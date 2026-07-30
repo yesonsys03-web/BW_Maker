@@ -2568,6 +2568,7 @@ dependencies = [
 name = "psd_line_export"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "tauri",
@@ -2575,6 +2576,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-opener",
+ "tokio",
 ]
 
 [[package]]
