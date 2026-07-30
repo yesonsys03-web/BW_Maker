@@ -53,21 +53,20 @@ def render_thumbnails(session, layer_ids, max_size, out_dir):
     for lid in layer_ids:
         layer = session["layers_by_id"][lid]
         if layer.is_group():
-            # For groups: include group + all descendants + all ancestors
-            wanted = set()
-            # Add group and all ancestors
+            # For groups: include group + ancestors (hidden group override),
+            # but respect visible flag on descendants
+            ancestors_and_self = set()
             cur = layer
             while cur is not psd:
-                wanted.add(id(cur))
+                ancestors_and_self.add(id(cur))
                 cur = cur.parent
-            # Add all descendants
-            for desc in layer.descendants():
-                wanted.add(id(desc))
+            # Collect visible descendants
+            descendant_ids = {id(desc) for desc in layer.descendants() if desc.visible}
             img = layer.composite(
                 force=True,
                 color=1.0,
                 alpha=0.0,
-                layer_filter=lambda l: id(l) in wanted,
+                layer_filter=lambda l: id(l) in ancestors_and_self or id(l) in descendant_ids,
             )
         else:
             img = Image.fromarray(extract_rgba(layer))

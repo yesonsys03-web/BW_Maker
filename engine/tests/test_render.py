@@ -73,3 +73,20 @@ def test_render_thumbnails_hidden_group(fixture_psd, tmp_path):
     arr = np.array(im)
     # Should still have pixels with alpha > 0 despite being hidden
     assert (arr[..., 3] > 0).any()
+
+
+def test_render_thumbnails_respects_child_visibility(fixture_psd, tmp_path):
+    # Child layer visibility should be respected in group thumbnails
+    # BG group (id 1) contains: line (id 4, value 50), hidden_line (id 3, value 77), fill (id 2, value 128)
+    s = _session(fixture_psd)
+    # Hide the 'line' layer (id 4) then render BG group
+    layer_line = s["layers_by_id"][4]
+    layer_line.visible = False
+    # Use large max_size to preserve original pixel coordinates
+    thumbs = render_thumbnails(s, [1], max_size=128, out_dir=tmp_path)
+    from PIL import Image
+    im = Image.open(thumbs["1"])
+    arr = np.array(im)
+    # At position (6,6) which is inside the line's bbox (0,0,32,24)
+    # but since line is hidden, should show fill value (128) instead
+    assert arr[6, 6, 0] == 128  # R channel should be fill value
