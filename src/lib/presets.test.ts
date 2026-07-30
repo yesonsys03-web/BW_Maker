@@ -76,6 +76,47 @@ test("loadPresets throws on corrupted JSON instead of absorbing the error", asyn
   await expect(loadPresets()).rejects.toThrow();
 });
 
+test("loadPresets throws when the top-level JSON value is not an array", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify(DEFAULT_PRESET)); // an object, not an array
+
+  await expect(loadPresets()).rejects.toThrow(/배열/);
+});
+
+test("loadPresets throws when a stored preset is missing a required field (valid JSON, wrong shape)", async () => {
+  const { excludeGroupPrefixes: _drop, ...broken } = DEFAULT_PRESET;
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([broken]));
+
+  await expect(loadPresets()).rejects.toThrow(/excludeGroupPrefixes/);
+});
+
+test("loadPresets throws when a field has the wrong type/value (e.g. an invalid enum)", async () => {
+  const broken = { ...DEFAULT_PRESET, merge: "bogus" };
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([broken]));
+
+  await expect(loadPresets()).rejects.toThrow(/merge/);
+});
+
+test("loadPresets accepts a well-formed preset list and preserves every field exactly", async () => {
+  const wellFormed: Preset = {
+    name: "custom",
+    include: { type: "regex", value: "^fx_", caseSensitive: true },
+    excludeGroupPrefixes: ["_", "#"],
+    matchGroups: false,
+    includeHidden: false,
+    merge: "perGroup",
+    naming: "original",
+    outputSuffix: "_FX",
+    embedPreview: false,
+  };
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([wellFormed]));
+
+  await expect(loadPresets()).resolves.toEqual([wellFormed]);
+});
+
 test("savePresets ensures the app data directory exists then writes JSON", async () => {
   mkdirMock.mockResolvedValue(undefined);
   writeTextFileMock.mockResolvedValue(undefined);

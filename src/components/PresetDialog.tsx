@@ -6,6 +6,13 @@ export type PresetDialogMode = "edit" | "saveAs";
 interface PresetDialogProps {
   mode: PresetDialogMode;
   preset: Preset;
+  /**
+   * Names of OTHER presets already on disk — excludes the preset being
+   * edited itself in "edit" mode. Used to prevent silently writing two
+   * presets with the same name (findIndex-by-name elsewhere would then only
+   * ever resolve the first one, corrupting selection and persistence).
+   */
+  existingNames: string[];
   onSave: (preset: Preset) => void;
   onCancel: () => void;
 }
@@ -27,7 +34,7 @@ function parseGroupPrefixes(text: string): string[] {
  * (duplicate as a new named preset) — `mode` only changes labels/copy, the
  * validated Preset shape returned via onSave is identical either way.
  */
-export function PresetDialog({ mode, preset, onSave, onCancel }: PresetDialogProps) {
+export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: PresetDialogProps) {
   const [name, setName] = useState(preset.name);
   const [includeType, setIncludeType] = useState<Preset["include"]["type"]>(preset.include.type);
   const [includeValue, setIncludeValue] = useState(preset.include.value);
@@ -44,12 +51,19 @@ export function PresetDialog({ mode, preset, onSave, onCancel }: PresetDialogPro
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [valueError, setValueError] = useState<string | null>(null);
+  const [pendingSave, setPendingSave] = useState<Preset | null>(null);
 
   function validate(): Preset | null {
     let ok = true;
 
-    if (name.trim().length === 0) {
+    const trimmedName = name.trim();
+    if (trimmedName.length === 0) {
       setNameError("이름을 입력하세요.");
+      ok = false;
+    } else if (mode === "edit" && existingNames.includes(trimmedName)) {
+      // Edit mode is a hard block: renaming to collide with another saved
+      // preset would make findIndex-by-name resolve the wrong entry.
+      setNameError("같은 이름의 프리셋이 이미 있습니다.");
       ok = false;
     } else {
       setNameError(null);
@@ -88,6 +102,15 @@ export function PresetDialog({ mode, preset, onSave, onCancel }: PresetDialogPro
   function handleSubmit() {
     const validated = validate();
     if (!validated) return;
+    // "edit" mode already hard-blocked a colliding name above (validate()
+    // sets nameError and returns null). "saveAs" mode is intentionally
+    // allowed to collide — that's how the user explicitly overwrites an
+    // existing preset by name — but it must be an explicit confirmation,
+    // never a silent overwrite.
+    if (mode === "saveAs" && existingNames.includes(validated.name)) {
+      setPendingSave(validated);
+      return;
+    }
     onSave(validated);
   }
 
@@ -219,6 +242,32 @@ export function PresetDialog({ mode, preset, onSave, onCancel }: PresetDialogPro
           </button>
         </div>
       </div>
+
+      {pendingSave && (
+        <div
+          className="modal-overlay"
+          onClick={(e) => {
+            // Nested inside the outer dialog's own overlay — without this,
+            // a backdrop click here would bubble up and also fire the outer
+            // overlay's onCancel, silently discarding the whole edit form.
+            e.stopPropagation();
+            setPendingSave(null);
+          }}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h3>이미 존재하는 이름입니다</h3>
+            <p>"{pendingSave.name}" 프리셋이 이미 있습니다. 기존 프리셋을 덮어쓰시겠습니까?</p>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setPendingSave(null)}>
+                취소
+              </button>
+              <button type="button" onClick={() => onSave(pendingSave)}>
+                덮어쓰기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

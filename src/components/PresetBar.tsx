@@ -118,6 +118,14 @@ export function PresetBar({ sessionId, hasPendingOps, onApplied, onError }: Pres
   const dialogBasis: Preset | undefined =
     dialog?.mode === "edit" ? presets[dialog.index] : dialog?.mode === "saveAs" ? selectedPreset : undefined;
 
+  // "edit" excludes the entry being edited itself (a no-op rename must not
+  // collide with itself); "saveAs" is always a brand-new entry, so every
+  // current name — including the source preset's own — counts as "existing".
+  const dialogExistingNames: string[] =
+    dialog?.mode === "edit"
+      ? presets.filter((_, i) => i !== dialog.index).map((p) => p.name)
+      : presets.map((p) => p.name);
+
   return (
     <div className="preset-bar">
       <label className="preset-bar-select-label">
@@ -172,6 +180,7 @@ export function PresetBar({ sessionId, hasPendingOps, onApplied, onError }: Pres
         <PresetDialog
           mode={dialog.mode}
           preset={dialogBasis}
+          existingNames={dialogExistingNames}
           onSave={handleDialogSave}
           onCancel={() => setDialog(null)}
         />
