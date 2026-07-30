@@ -9,8 +9,6 @@ def build_tree(psd):
         children = []
         for layer in layers:
             node_id = len(nodes_by_id)
-            # Check if mask has actual dimensions (non-zero size)
-            has_mask = layer.mask is not None and (layer.mask.width > 0 or layer.mask.height > 0)
             node = {
                 "id": node_id,
                 "name": layer.name,
@@ -19,7 +17,7 @@ def build_tree(psd):
                 "blendMode": layer.blend_mode.name.lower(),
                 "opacity": int(layer.opacity),
                 "bbox": list(layer.bbox),
-                "hasMask": has_mask,
+                "hasMask": layer.mask is not None,
                 "path": path + [layer.name],
             }
             nodes_by_id[node_id] = node
