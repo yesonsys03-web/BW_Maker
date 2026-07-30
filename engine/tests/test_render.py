@@ -85,6 +85,32 @@ def test_render_thumbnails_hidden_group(fixture_psd, tmp_path):
     assert (arr[..., 3] > 0).any()
 
 
+def test_render_thumbnails_skips_empty_layer(fixture_psd, tmp_path):
+    # Regression: a real PSD can contain pixel layers an artist created but
+    # never painted (bbox (0,0,0,0), topil() -> None). One such layer must not
+    # take down the whole batch — it's simply omitted from the result.
+    s = _session(fixture_psd)
+    empty_layer = types.SimpleNamespace(
+        mask=None, name="reflections", topil=lambda: None,
+        width=0, height=0, is_group=lambda: False,
+    )
+    s["layers_by_id"][999] = empty_layer
+    thumbs = render_thumbnails(s, [4, 999, 5], max_size=16, out_dir=tmp_path)
+    assert "999" not in thumbs
+    assert set(thumbs) == {"4", "5"}
+
+
+def test_render_preview_handles_empty_visible_set(fixture_psd, tmp_path):
+    # render_preview's viewport is the document canvas, not any layer's bbox,
+    # so an empty (or all-empty) visible set must not raise the "Image
+    # dimensions must be positive" PIL error render_thumbnails was hit by.
+    s = _session(fixture_psd)
+    preview = render_preview(s, [], max_size=32, out_dir=tmp_path)
+    from PIL import Image
+    im = Image.open(preview)
+    assert im.size[0] > 0 and im.size[1] > 0
+
+
 def test_render_thumbnails_respects_child_visibility(fixture_psd, tmp_path):
     # Child layer visibility should be respected in group thumbnails
     # BG group (id 1) contains: line (id 4, value 50), hidden_line (id 3, value 77), fill (id 2, value 128)

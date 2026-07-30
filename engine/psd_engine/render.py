@@ -70,7 +70,19 @@ def render_thumbnails(session, layer_ids, max_size, out_dir):
                 alpha=0.0,
                 layer_filter=lambda l: id(l) in ancestors_and_self or id(l) in descendant_ids,
             )
+            if img is None or img.width <= 0 or img.height <= 0:
+                # Group has no visible pixel content (e.g. all descendants are
+                # themselves empty/hidden) — not a thumbnail target.
+                continue
         else:
+            # Artist created the layer but never painted it (empty bbox);
+            # extract_rgba()/PIL would raise on a 0x0 image. Not a thumbnail
+            # target — omit it rather than failing the whole batch. Note:
+            # layer.width/height here is the leaf's own record-based bbox,
+            # unaffected by its (or an ancestor's) visible flag — unlike a
+            # group's bbox, which is computed from visible descendants.
+            if layer.width <= 0 or layer.height <= 0:
+                continue
             img = Image.fromarray(extract_rgba(layer))
         img = img.convert("RGBA")
         img.thumbnail((max_size, max_size))
@@ -82,6 +94,10 @@ def render_preview(session, visible_layer_ids, max_size, out_dir):
     psd = session["psd"]
     layers = [session["layers_by_id"][lid] for lid in visible_layer_ids]
     wanted = _wanted_ids(psd, layers)
+    # viewport is always the full document canvas (never a layer's bbox), so
+    # this is immune to the empty-bbox-layer hazard render_thumbnails has:
+    # an empty/all-empty visible set just yields fewer painted pixels, not a
+    # 0x0 image.
     img = psd.composite(
         viewport=(0, 0, psd.width, psd.height),
         force=True,
