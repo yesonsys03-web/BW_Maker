@@ -23,7 +23,7 @@ def _emit(obj, out):
 class Engine:
     _ALLOWED_METHODS = {
         "open_psd", "close_session", "render_thumbnails",
-        "render_preview", "apply_preset", "export_psd",
+        "render_preview", "apply_preset", "export_psd", "batch_run",
     }
 
     def __init__(self, out=None):
@@ -61,6 +61,16 @@ class Engine:
             "matchedLayerIds": matched,
             "operations": preset_operations(s["tree"], matched, preset),
         }
+
+    def batch_run(self, paths, preset, outputDir=None, overwrite=False):
+        from .batch import run_batch
+
+        def progress(path, stage, current, total):
+            _emit({"event": "progress", "path": path, "stage": stage,
+                   "current": current, "total": total}, self.out)
+
+        return run_batch(paths, preset, output_dir=outputDir,
+                         overwrite=overwrite, progress=progress)
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
                    embedPreview=True, overwrite=False, verify=True):
