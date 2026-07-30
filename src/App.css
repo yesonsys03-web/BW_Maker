@@ -71,13 +71,98 @@ input[type="text"] {
 .app-shell {
   display: grid;
   grid-template-columns: 240px 1fr 320px;
-  grid-template-rows: 1fr 160px;
+  grid-template-rows: auto 1fr 160px;
   grid-template-areas:
+    "presetbar presetbar presetbar"
     "files preview tree"
     "bottom bottom bottom";
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+}
+
+/* ---------- preset bar ---------- */
+
+.preset-bar {
+  grid-area: presetbar;
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0.5em 0.75em;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.preset-bar-select-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  color: var(--text-dim);
+}
+
+.preset-bar-select-label select {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35em 0.5em;
+  min-width: 160px;
+}
+
+.modal-card.preset-dialog {
+  width: 420px;
+  max-height: calc(100vh - 4em);
+  overflow-y: auto;
+}
+
+.preset-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+}
+
+.preset-field span:first-child {
+  font-size: 0.82em;
+  color: var(--text-dim);
+}
+
+.preset-field select {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4em 0.6em;
+}
+
+.preset-field-row {
+  display: flex;
+  gap: 0.6em;
+}
+
+.preset-field-grow {
+  flex: 1;
+}
+
+.preset-field-error {
+  color: var(--danger);
+  font-size: 0.78em;
+}
+
+.preset-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+
+.modal-card p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.9em;
+  line-height: 1.5;
 }
 
 /* ---------- file panel ---------- */

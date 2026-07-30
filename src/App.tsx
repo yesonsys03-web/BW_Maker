@@ -5,6 +5,7 @@ import { FilePanel } from "./components/FilePanel";
 import { LayerTree } from "./components/LayerTree";
 import { ErrorPanel } from "./components/ErrorPanel";
 import { PreviewCanvas } from "./components/PreviewCanvas";
+import { PresetBar } from "./components/PresetBar";
 import { loadPngDataUrl, renderThumbnails } from "./lib/engine";
 import { pixelLeafIds, toEngineError } from "./lib/preview";
 
@@ -19,6 +20,7 @@ function AppShell() {
     setPreviewHidden,
     pushOp,
     setIncluded,
+    applyPresetResult,
     dismissError,
     pushError,
   } = useAppStore();
@@ -56,6 +58,13 @@ function AppShell() {
 
   return (
     <div className="app-shell">
+      <PresetBar
+        sessionId={activeFile?.sessionId}
+        hasPendingOps={ops.ops.length > 0}
+        onApplied={applyPresetResult}
+        onError={pushError}
+      />
+
       <FilePanel files={state.files} activePath={state.activePath} onAddFiles={addFiles} onSelectFile={selectFile} />
 
       <div className="preview-area">
@@ -82,7 +91,7 @@ function AppShell() {
       </div>
 
       <div className="bottom-strip">
-        <span className="bottom-strip-placeholder">프리셋 / 히스토리 / 배치 패널 (준비 중)</span>
+        <span className="bottom-strip-placeholder">히스토리 / 배치 패널 (준비 중)</span>
       </div>
 
       <ErrorPanel errors={state.errors} onDismiss={dismissError} />

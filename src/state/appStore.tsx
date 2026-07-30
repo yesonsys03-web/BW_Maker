@@ -46,6 +46,7 @@ export type AppAction =
   | { type: "setPreviewHidden"; path: string; layerIds: number[]; hidden: boolean }
   | { type: "pushOp"; path: string; op: Operation }
   | { type: "setIncluded"; path: string; includedIds: number[] }
+  | { type: "applyPresetResult"; path: string; matchedLayerIds: number[]; operations: Operation[] }
   | { type: "undoOp"; path: string }
   | { type: "dismissError"; index: number }
   | { type: "pushError"; title: string; error: EngineError };
@@ -210,6 +211,31 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       }
     }
 
+    case "applyPresetResult": {
+      const current = state.opsByPath[action.path];
+      if (!current) return state;
+      try {
+        const includedIds = [...action.matchedLayerIds].sort((a, b) => a - b);
+        const entries = buildEntries(includedIds, action.operations);
+        const next: OpsState = {
+          includedIds,
+          previewHiddenIds: current.previewHiddenIds,
+          ops: action.operations,
+          entries,
+        };
+        return {
+          ...state,
+          matchedIds: action.matchedLayerIds,
+          opsByPath: { ...state.opsByPath, [action.path]: next },
+        };
+      } catch (e) {
+        return {
+          ...state,
+          errors: [...state.errors, { title: "프리셋 적용 실패", error: errorFrom(e) }],
+        };
+      }
+    }
+
     case "undoOp": {
       const current = state.opsByPath[action.path];
       if (!current || current.ops.length === 0) return state;
@@ -263,6 +289,7 @@ export interface AppContextValue {
   setPreviewHidden: (layerIds: number[], hidden: boolean) => void;
   pushOp: (op: Operation) => void;
   setIncluded: (includedIds: number[]) => void;
+  applyPresetResult: (matchedLayerIds: number[], operations: Operation[]) => void;
   undoOp: () => void;
   dismissError: (index: number) => void;
   pushError: (title: string, error: EngineError) => void;
@@ -320,6 +347,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [state.activePath]
   );
 
+  const applyPresetResult = useCallback(
+    (matchedLayerIds: number[], operations: Operation[]) => {
+      if (!state.activePath) return;
+      dispatch({ type: "applyPresetResult", path: state.activePath, matchedLayerIds, operations });
+    },
+    [state.activePath]
+  );
+
   const undoOp = useCallback(() => {
     if (!state.activePath) return;
     dispatch({ type: "undoOp", path: state.activePath });
@@ -347,6 +382,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setPreviewHidden,
       pushOp,
       setIncluded,
+      applyPresetResult,
       undoOp,
       dismissError,
       pushError,
@@ -361,6 +397,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setPreviewHidden,
       pushOp,
       setIncluded,
+      applyPresetResult,
       undoOp,
       dismissError,
       pushError,

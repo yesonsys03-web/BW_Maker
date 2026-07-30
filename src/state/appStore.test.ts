@@ -193,6 +193,40 @@ describe("ops actions delegate to the active file's OpsState", () => {
     const s = appReducer(merged, { type: "undoOp", path: "/a.psd" });
     expect(s.opsByPath["/a.psd"].entries.map((e) => e.entryId)).toEqual([1, 2, 5]);
   });
+
+  test("applyPresetResult replaces includedIds/ops/entries with the engine's result and sets matchedIds", () => {
+    const s0 = opened();
+    const s = appReducer(s0, {
+      type: "applyPresetResult",
+      path: "/a.psd",
+      matchedLayerIds: [5, 1],
+      operations: [{ op: "merge", layerIds: [1, 5], name: "M" }],
+    });
+    expect(s.matchedIds).toEqual([5, 1]);
+    expect(s.opsByPath["/a.psd"].includedIds).toEqual([1, 5]);
+    expect(s.opsByPath["/a.psd"].ops).toEqual([{ op: "merge", layerIds: [1, 5], name: "M" }]);
+    expect(s.opsByPath["/a.psd"].entries.map((e) => e.entryId)).toEqual([-1]);
+    // previewHiddenIds carries over unchanged from the prior OpsState.
+    expect(s.opsByPath["/a.psd"].previewHiddenIds).toEqual(s0.opsByPath["/a.psd"].previewHiddenIds);
+    expect(s.errors).toHaveLength(0);
+  });
+
+  test("applyPresetResult with an internally inconsistent operations array is caught via the error stack (no throw, no partial state)", () => {
+    const s0 = opened();
+    let s: AppState | undefined;
+    expect(() => {
+      s = appReducer(s0, {
+        type: "applyPresetResult",
+        path: "/a.psd",
+        matchedLayerIds: [1],
+        operations: [{ op: "rename", layerId: 999, name: "x" }], // 999 isn't in matchedLayerIds
+      });
+    }).not.toThrow();
+    expect(s!.errors).toHaveLength(1);
+    expect(s!.errors[0].error.message).toBeTruthy();
+    expect(s!.opsByPath["/a.psd"]).toEqual(s0.opsByPath["/a.psd"]);
+    expect(s!.matchedIds).toEqual(s0.matchedIds);
+  });
 });
 
 describe("error stack management", () => {
