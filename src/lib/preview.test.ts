@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { pixelLeafIds, visibleIdsForPreview } from "./preview";
+import { MAX_PREVIEW_SCALE, MIN_PREVIEW_SCALE, nextScale, pixelLeafIds, visibleIdsForPreview } from "./preview";
 import type { TreeNode } from "./types";
 
 function leaf(id: number, kind: string): TreeNode {
@@ -68,4 +68,29 @@ test("pixelLeafIds returns every pixel leaf id in document order, ignoring inclu
 
 test("pixelLeafIds on an empty tree returns an empty array", () => {
   expect(pixelLeafIds([])).toEqual([]);
+});
+
+test("nextScale with deltaY 0 leaves scale unchanged", () => {
+  expect(nextScale(2, 0)).toBeCloseTo(2);
+});
+
+test("nextScale with negative deltaY (scroll up) zooms in", () => {
+  expect(nextScale(1, -100)).toBeGreaterThan(1);
+});
+
+test("nextScale with positive deltaY (scroll down) zooms out", () => {
+  expect(nextScale(1, 100)).toBeLessThan(1);
+});
+
+test("nextScale clamps at MIN_PREVIEW_SCALE on a large zoom-out", () => {
+  expect(nextScale(0.11, 1_000_000)).toBe(MIN_PREVIEW_SCALE);
+});
+
+test("nextScale clamps at MAX_PREVIEW_SCALE on a large zoom-in", () => {
+  expect(nextScale(7, -1_000_000)).toBe(MAX_PREVIEW_SCALE);
+});
+
+test("nextScale never leaves the [MIN_PREVIEW_SCALE, MAX_PREVIEW_SCALE] range", () => {
+  expect(nextScale(MIN_PREVIEW_SCALE, 500)).toBeGreaterThanOrEqual(MIN_PREVIEW_SCALE);
+  expect(nextScale(MAX_PREVIEW_SCALE, -500)).toBeLessThanOrEqual(MAX_PREVIEW_SCALE);
 });

@@ -63,3 +63,17 @@ export function toEngineError(e: unknown): EngineError {
   if (e instanceof Error) return { message: e.message, traceback: e.stack ?? e.message };
   return { message: String(e), traceback: String(e) };
 }
+
+export const MIN_PREVIEW_SCALE = 0.1;
+export const MAX_PREVIEW_SCALE = 8;
+
+/**
+ * Wheel-driven zoom step for PreviewCanvas: exponential response to deltaY
+ * (negative deltaY == scroll up == zoom in), clamped to
+ * [MIN_PREVIEW_SCALE, MAX_PREVIEW_SCALE]. Pure so the clamp/direction
+ * behavior is unit-testable without a DOM wheel event.
+ */
+export function nextScale(current: number, deltaY: number): number {
+  const factor = Math.exp(-deltaY * 0.001);
+  return Math.min(MAX_PREVIEW_SCALE, Math.max(MIN_PREVIEW_SCALE, current * factor));
+}

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { loadPngDataUrl, renderPreview } from "../lib/engine";
-import { toEngineError, visibleIdsForPreview } from "../lib/preview";
+import { nextScale, toEngineError, visibleIdsForPreview } from "../lib/preview";
 import type { EngineError, TreeNode } from "../lib/types";
 
 interface PreviewCanvasProps {
@@ -11,8 +11,6 @@ interface PreviewCanvasProps {
   onError: (title: string, error: EngineError) => void;
 }
 
-const MIN_SCALE = 0.1;
-const MAX_SCALE = 8;
 const DEBOUNCE_MS = 400;
 const PREVIEW_MAX_SIZE = 1500;
 
@@ -31,8 +29,8 @@ export function PreviewCanvas({ sessionId, tree, includedIds, previewHiddenIds, 
   const [offset, setOffset] = useState({ x: 0, y: 0 });
 
   const requestIdRef = useRef(0);
-  const viewportRef = useRef<HTMLDivElement | null>(null);
   const draggingRef = useRef<{ x: number; y: number } | null>(null);
+  const wheelCleanupRef = useRef<(() => void) | null>(null);
 
   const visibleIds = useMemo(
     () => (tree ? visibleIdsForPreview(tree, includedIds, previewHiddenIds) : []),
@@ -78,19 +76,23 @@ export function PreviewCanvas({ sessionId, tree, includedIds, previewHiddenIds, 
     return () => window.clearTimeout(timer);
   }, [sessionId, visibleIds, onError]);
 
-  // Non-passive wheel listener so preventDefault actually stops page scroll/zoom.
-  useEffect(() => {
-    const el = viewportRef.current;
+  // Callback ref (not a plain ref + mount-only effect): the viewport div only
+  // exists once sessionId/visibleIds make this component render past the
+  // early returns below, so a `useEffect(..., [])` reading a plain ref would
+  // fire while the ref is still null on first mount (no file open yet) and
+  // never re-attach once the div actually appears. The callback ref runs
+  // exactly when the DOM node is attached/detached, whenever that happens.
+  const viewportCallbackRef = useCallback((el: HTMLDivElement | null) => {
+    wheelCleanupRef.current?.();
+    wheelCleanupRef.current = null;
     if (!el) return;
     function handleWheel(e: WheelEvent) {
       e.preventDefault();
-      setScale((prev) => {
-        const factor = Math.exp(-e.deltaY * 0.001);
-        return Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev * factor));
-      });
+      setScale((prev) => nextScale(prev, e.deltaY));
     }
+    // Non-passive so preventDefault actually stops page scroll/zoom.
     el.addEventListener("wheel", handleWheel, { passive: false });
-    return () => el.removeEventListener("wheel", handleWheel);
+    wheelCleanupRef.current = () => el.removeEventListener("wheel", handleWheel);
   }, []);
 
   function handlePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
@@ -125,7 +127,7 @@ export function PreviewCanvas({ sessionId, tree, includedIds, previewHiddenIds, 
     <div className="preview-canvas">
       <div
         className="preview-viewport"
-        ref={viewportRef}
+        ref={viewportCallbackRef}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
