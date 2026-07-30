@@ -3,8 +3,9 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { defaultExportPath, reorderArgs, resolveEntryName } from "../lib/exportFlow";
 import { exportPsd, onEngineEvent } from "../lib/engine";
 import { toEngineError } from "../lib/preview";
+import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { OpsState } from "../lib/opsReducer";
-import type { EngineError, ExportResult, Operation, TreeNode } from "../lib/types";
+import type { EngineError, ExportResult, OpenResult, Operation, TreeNode } from "../lib/types";
 
 interface ExportDialogProps {
   sessionId: number;
@@ -13,6 +14,7 @@ interface ExportDialogProps {
   tree: TreeNode[] | undefined;
   onPushOp: (op: Operation) => void;
   onClose: () => void;
+  onSessionRefreshed: (path: string, result: OpenResult) => void;
   onError: (title: string, error: EngineError) => void;
 }
 
@@ -36,7 +38,16 @@ function isProgressEvent(payload: unknown): payload is ProgressState & { event: 
  * rather than in LayerTree — see task-8 brief's documented deviation from
  * spec section 6.
  */
-export function ExportDialog({ sessionId, srcPath, ops, tree, onPushOp, onClose, onError }: ExportDialogProps) {
+export function ExportDialog({
+  sessionId,
+  srcPath,
+  ops,
+  tree,
+  onPushOp,
+  onClose,
+  onSessionRefreshed,
+  onError,
+}: ExportDialogProps) {
   const [outputSuffix, setOutputSuffix] = useState("_LINE");
   const [naming, setNaming] = useState<"pathPrefix" | "original">("pathPrefix");
   const [embedPreview, setEmbedPreview] = useState(true);
@@ -98,7 +109,12 @@ export function ExportDialog({ sessionId, srcPath, ops, tree, onPushOp, onClose,
     setResult(null);
     try {
       // save() already confirmed overwrite with the user, so overwrite:true.
-      const res = await exportPsd(sessionId, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true);
+      const res = await withEvictedSessionRetry(
+        srcPath,
+        sessionId,
+        (sid) => exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true),
+        (r) => onSessionRefreshed(srcPath, r)
+      );
       setResult(res);
     } catch (e) {
       onError("내보내기 실패", toEngineError(e));

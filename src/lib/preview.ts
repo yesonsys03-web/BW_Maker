@@ -64,6 +64,20 @@ export function toEngineError(e: unknown): EngineError {
   return { message: String(e), traceback: String(e) };
 }
 
+/**
+ * True when an engine RPC failure is SessionStore.get raising "unknown or
+ * evicted session: {id}" (engine/psd_engine/session.py) — i.e. the LRU
+ * cache (max 2 sessions) dropped this file's session in favor of more
+ * recently used files. Callers use this to distinguish "transparently
+ * reopen and retry" from a real failure that belongs on the ErrorPanel.
+ * Substring match (not exact), because Python's KeyError.__str__ wraps the
+ * message in repr() quotes: str(KeyError("unknown or evicted session: 2"))
+ * === "'unknown or evicted session: 2'".
+ */
+export function isEvictedSessionError(e: unknown): boolean {
+  return toEngineError(e).message.includes("unknown or evicted session");
+}
+
 export const MIN_PREVIEW_SCALE = 0.1;
 export const MAX_PREVIEW_SCALE = 8;
 

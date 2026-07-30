@@ -228,12 +228,19 @@ input[type="text"] {
   gap: 2px;
 }
 
+.file-list-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25em;
+}
+
 .file-list-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.5em;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   text-align: left;
   background: transparent;
   border: 1px solid transparent;
@@ -248,6 +255,21 @@ input[type="text"] {
 .file-list-item.active {
   background: var(--accent-dim);
   border-color: var(--accent);
+}
+
+.file-list-remove {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-size: 1em;
+  line-height: 1;
+  padding: 0.2em 0.5em;
+}
+
+.file-list-remove:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: #6a2f2f;
 }
 
 .file-name {
@@ -890,6 +912,26 @@ input[type="text"] {
   margin: 0;
   padding-left: 1.2em;
   font-size: 0.88em;
+}
+
+/* ---------- engine status banner ---------- */
+
+.engine-status-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1em;
+  padding: 0.6em 1em;
+  background: var(--danger-bg);
+  border-bottom: 1px solid #6a2f2f;
+  color: var(--danger);
+  font-weight: 600;
+  text-align: center;
 }
 
 /* ---------- error panel ---------- */

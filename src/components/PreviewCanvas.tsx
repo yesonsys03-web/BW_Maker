@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { loadPngDataUrl, renderPreview } from "../lib/engine";
 import { nextScale, toEngineError, visibleIdsForPreview } from "../lib/preview";
-import type { EngineError, TreeNode } from "../lib/types";
+import { withEvictedSessionRetry } from "../lib/sessionRetry";
+import type { EngineError, OpenResult, TreeNode } from "../lib/types";
 
 interface PreviewCanvasProps {
   sessionId: number | undefined;
+  path: string | undefined;
   tree: TreeNode[] | undefined;
   includedIds: number[];
   previewHiddenIds: number[];
+  onSessionRefreshed: (path: string, result: OpenResult) => void;
   onError: (title: string, error: EngineError) => void;
 }
 
@@ -22,7 +25,15 @@ const PREVIEW_MAX_SIZE = 1500;
  * (e.g. from a render superseded by a later toggle) overwriting a newer
  * frame or clobbering a newer request's loading state.
  */
-export function PreviewCanvas({ sessionId, tree, includedIds, previewHiddenIds, onError }: PreviewCanvasProps) {
+export function PreviewCanvas({
+  sessionId,
+  path,
+  tree,
+  includedIds,
+  previewHiddenIds,
+  onSessionRefreshed,
+  onError,
+}: PreviewCanvasProps) {
   const [imgSrc, setImgSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [scale, setScale] = useState(1);
@@ -47,7 +58,7 @@ export function PreviewCanvas({ sessionId, tree, includedIds, previewHiddenIds, 
   }, [sessionId]);
 
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !path) return;
     if (visibleIds.length === 0) {
       requestIdRef.current += 1; // invalidate any in-flight render from a prior toggle
       setImgSrc(null);
@@ -60,7 +71,12 @@ export function PreviewCanvas({ sessionId, tree, includedIds, previewHiddenIds, 
       setLoading(true);
       void (async () => {
         try {
-          const { pngPath } = await renderPreview(sessionId, visibleIds, PREVIEW_MAX_SIZE);
+          const { pngPath } = await withEvictedSessionRetry(
+            path,
+            sessionId,
+            (sid) => renderPreview(sid, visibleIds, PREVIEW_MAX_SIZE),
+            (result) => onSessionRefreshed(path, result)
+          );
           const dataUrl = await loadPngDataUrl(pngPath);
           if (requestIdRef.current !== requestId) return; // superseded by a newer request
           setImgSrc(dataUrl);
@@ -74,7 +90,7 @@ export function PreviewCanvas({ sessionId, tree, includedIds, previewHiddenIds, 
     }, DEBOUNCE_MS);
 
     return () => window.clearTimeout(timer);
-  }, [sessionId, visibleIds, onError]);
+  }, [sessionId, path, visibleIds, onSessionRefreshed, onError]);
 
   // Callback ref (not a plain ref + mount-only effect): the viewport div only
   // exists once sessionId/visibleIds make this component render past the

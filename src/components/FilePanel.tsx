@@ -8,6 +8,7 @@ interface FilePanelProps {
   activePath: string | null;
   onAddFiles: (paths: string[]) => void;
   onSelectFile: (path: string) => void;
+  onRemoveFile: (path: string) => void;
 }
 
 const STATUS_LABEL: Record<FileStatus, string> = {
@@ -23,7 +24,7 @@ function fileName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-export function FilePanel({ files, activePath, onAddFiles, onSelectFile }: FilePanelProps) {
+export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemoveFile }: FilePanelProps) {
   const [isDragOver, setIsDragOver] = useState(false);
 
   // Primary drop path: Tauri's webview-level drag/drop event, which carries
@@ -110,7 +111,7 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile }: FileP
         ) : (
           <ul className="file-list">
             {files.map((file) => (
-              <li key={file.path}>
+              <li key={file.path} className="file-list-row">
                 <button
                   type="button"
                   className={`file-list-item${file.path === activePath ? " active" : ""}`}
@@ -120,6 +121,19 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile }: FileP
                     {fileName(file.path)}
                   </span>
                   <span className={`status-badge status-${file.status}`}>{STATUS_LABEL[file.status]}</span>
+                </button>
+                <button
+                  type="button"
+                  className="file-list-remove"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemoveFile(file.path);
+                  }}
+                  disabled={file.status === "processing"}
+                  aria-label={`${fileName(file.path)} 목록에서 제거`}
+                  title="목록에서 제거 (엔진 세션도 닫습니다)"
+                >
+                  ×
                 </button>
               </li>
             ))}

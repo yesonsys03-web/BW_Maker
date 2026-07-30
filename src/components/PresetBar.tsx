@@ -2,13 +2,16 @@ import { useEffect, useState } from "react";
 import { applyPreset } from "../lib/engine";
 import { toEngineError } from "../lib/preview";
 import { loadPresets, savePresets } from "../lib/presets";
-import type { EngineError, Operation, Preset } from "../lib/types";
+import { withEvictedSessionRetry } from "../lib/sessionRetry";
+import type { EngineError, OpenResult, Operation, Preset } from "../lib/types";
 import { PresetDialog, type PresetDialogMode } from "./PresetDialog";
 
 interface PresetBarProps {
   sessionId: number | undefined;
+  path: string | undefined;
   hasPendingOps: boolean;
   onApplied: (matchedLayerIds: number[], operations: Operation[]) => void;
+  onSessionRefreshed: (path: string, result: OpenResult) => void;
   onError: (title: string, error: EngineError) => void;
 }
 
@@ -21,7 +24,7 @@ type DialogState = { mode: Extract<PresetDialogMode, "edit">; index: number } | 
  * Presets are loaded once on mount; a load/save/apply failure is never
  * absorbed — it's always reported via onError so it lands on the ErrorPanel.
  */
-export function PresetBar({ sessionId, hasPendingOps, onApplied, onError }: PresetBarProps) {
+export function PresetBar({ sessionId, path, hasPendingOps, onApplied, onSessionRefreshed, onError }: PresetBarProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
@@ -63,10 +66,15 @@ export function PresetBar({ sessionId, hasPendingOps, onApplied, onError }: Pres
   }
 
   async function doApply() {
-    if (!sessionId || !selectedPreset) return;
+    if (!sessionId || !path || !selectedPreset) return;
     setApplying(true);
     try {
-      const result = await applyPreset(sessionId, selectedPreset);
+      const result = await withEvictedSessionRetry(
+        path,
+        sessionId,
+        (sid) => applyPreset(sid, selectedPreset),
+        (r) => onSessionRefreshed(path, r)
+      );
       onApplied(result.matchedLayerIds, result.operations);
     } catch (e) {
       onError("프리셋 적용 실패", toEngineError(e));
@@ -77,7 +85,7 @@ export function PresetBar({ sessionId, hasPendingOps, onApplied, onError }: Pres
   }
 
   function handleApplyClick() {
-    if (!sessionId || !selectedPreset || applying) return;
+    if (!sessionId || !path || !selectedPreset || applying) return;
     if (hasPendingOps) {
       setConfirmApply(true);
       return;

@@ -7,7 +7,7 @@ import {
   type Dispatch,
   type ReactNode,
 } from "react";
-import { EngineRpcError, openPsd } from "../lib/engine";
+import { EngineRpcError, closeSession, openPsd } from "../lib/engine";
 import { buildEntries, opsReducer, type OpsState } from "../lib/opsReducer";
 import type { EngineError, OpenResult, Operation, TreeNode } from "../lib/types";
 
@@ -49,7 +49,10 @@ export type AppAction =
   | { type: "applyPresetResult"; path: string; matchedLayerIds: number[]; operations: Operation[] }
   | { type: "undoOp"; path: string }
   | { type: "dismissError"; index: number }
-  | { type: "pushError"; title: string; error: EngineError };
+  | { type: "pushError"; title: string; error: EngineError }
+  | { type: "removeFile"; path: string }
+  | { type: "sessionRefreshed"; path: string; result: OpenResult }
+  | { type: "engineRestarted" };
 
 export const EMPTY_OPS: OpsState = { includedIds: [], previewHiddenIds: [], ops: [], entries: [] };
 
@@ -256,6 +259,52 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "pushError":
       return { ...state, errors: [...state.errors, { title: action.title, error: action.error }] };
 
+    case "removeFile": {
+      const wasActive = state.activePath === action.path;
+      const opsByPath = { ...state.opsByPath };
+      delete opsByPath[action.path];
+      return {
+        ...state,
+        files: state.files.filter((f) => f.path !== action.path),
+        opsByPath,
+        activePath: wasActive ? null : state.activePath,
+        matchedIds: wasActive ? [] : state.matchedIds,
+      };
+    }
+
+    // A transparent re-open after the engine's SessionStore (LRU max 2)
+    // evicted this file's session (see lib/sessionRetry.ts). Unlike
+    // "openSuccess", this deliberately leaves opsByPath untouched — the
+    // whole point is that the user's edits (ops/includedIds/
+    // previewHiddenIds) survive an eviction they never saw.
+    case "sessionRefreshed": {
+      const { path, result } = action;
+      return {
+        ...state,
+        files: updateFile(state.files, path, {
+          status: "open",
+          sessionId: result.sessionId,
+          tree: result.tree,
+          width: result.width,
+          height: result.height,
+        }),
+      };
+    }
+
+    // The engine child process died and was restarted (EngineStatus banner).
+    // Every session the old process held is gone with it, so every file
+    // resets to idle — selecting one again opens a fresh session against
+    // the same path. Ops/includedIds/previewHiddenIds are left in
+    // opsByPath; the next openSuccess for that path rebuilds them anyway,
+    // and until then they're inert, unreferenced state.
+    case "engineRestarted":
+      return {
+        ...state,
+        activePath: null,
+        matchedIds: [],
+        files: state.files.map((f) => ({ path: f.path, status: "idle" })),
+      };
+
     default:
       return state;
   }
@@ -278,6 +327,25 @@ export async function openFileEffect(dispatch: Dispatch<AppAction>, path: string
   }
 }
 
+/**
+ * Async orchestration for removing a file from the list: best-effort closes
+ * its engine session (if any), then always removes it locally regardless of
+ * whether the close RPC succeeded — a close failure (e.g. engine already
+ * dead) must not trap the entry in the list, but it must not be swallowed
+ * either, so it's reported via pushError.
+ */
+export async function removeFileEffect(dispatch: Dispatch<AppAction>, file: FileEntry): Promise<void> {
+  if (file.sessionId !== undefined) {
+    try {
+      await closeSession(file.sessionId);
+    } catch (e) {
+      const error: EngineError = e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
+      dispatch({ type: "pushError", title: `세션 닫기 실패: ${file.path}`, error });
+    }
+  }
+  dispatch({ type: "removeFile", path: file.path });
+}
+
 export interface AppContextValue {
   state: AppState;
   ops: OpsState;
@@ -285,6 +353,7 @@ export interface AppContextValue {
   dispatch: Dispatch<AppAction>;
   addFiles: (paths: string[]) => void;
   selectFile: (path: string) => void;
+  removeFile: (path: string) => void;
   togglePreview: (layerId: number) => void;
   setPreviewHidden: (layerIds: number[], hidden: boolean) => void;
   pushOp: (op: Operation) => void;
@@ -293,6 +362,8 @@ export interface AppContextValue {
   undoOp: () => void;
   dismissError: (index: number) => void;
   pushError: (title: string, error: EngineError) => void;
+  refreshSession: (path: string, result: OpenResult) => void;
+  engineRestarted: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -367,6 +438,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     []
   );
 
+  const removeFile = useCallback(
+    (path: string) => {
+      const file = state.files.find((f) => f.path === path);
+      if (!file || file.status === "processing") return;
+      void removeFileEffect(dispatch, file);
+    },
+    [state.files]
+  );
+
+  const refreshSession = useCallback(
+    (path: string, result: OpenResult) => dispatch({ type: "sessionRefreshed", path, result }),
+    []
+  );
+
+  const engineRestarted = useCallback(() => dispatch({ type: "engineRestarted" }), []);
+
   const ops = (state.activePath && state.opsByPath[state.activePath]) || EMPTY_OPS;
   const activeFile = state.files.find((f) => f.path === state.activePath);
 
@@ -378,6 +465,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch,
       addFiles,
       selectFile,
+      removeFile,
       togglePreview,
       setPreviewHidden,
       pushOp,
@@ -386,6 +474,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       undoOp,
       dismissError,
       pushError,
+      refreshSession,
+      engineRestarted,
     }),
     [
       state,
@@ -393,6 +483,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       activeFile,
       addFiles,
       selectFile,
+      removeFile,
       togglePreview,
       setPreviewHidden,
       pushOp,
@@ -401,6 +492,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       undoOp,
       dismissError,
       pushError,
+      refreshSession,
+      engineRestarted,
     ]
   );
 

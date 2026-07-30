@@ -4,6 +4,7 @@ import { AppProvider, useAppStore } from "./state/appStore";
 import { FilePanel } from "./components/FilePanel";
 import { LayerTree } from "./components/LayerTree";
 import { ErrorPanel } from "./components/ErrorPanel";
+import { EngineStatus } from "./components/EngineStatus";
 import { PreviewCanvas } from "./components/PreviewCanvas";
 import { PresetBar } from "./components/PresetBar";
 import { OpsHistory } from "./components/OpsHistory";
@@ -11,6 +12,7 @@ import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
 import { loadPngDataUrl, renderThumbnails } from "./lib/engine";
 import { pixelLeafIds, toEngineError } from "./lib/preview";
+import { withEvictedSessionRetry } from "./lib/sessionRetry";
 
 type BottomTab = "history" | "batch";
 
@@ -21,6 +23,7 @@ function AppShell() {
     activeFile,
     addFiles,
     selectFile,
+    removeFile,
     togglePreview,
     setPreviewHidden,
     pushOp,
@@ -29,6 +32,8 @@ function AppShell() {
     undoOp,
     dismissError,
     pushError,
+    refreshSession,
+    engineRestarted,
   } = useAppStore();
 
   // Thumbnails per file path (layer ids are only unique within a session, so
@@ -54,7 +59,12 @@ function AppShell() {
 
     void (async () => {
       try {
-        const { thumbs } = await renderThumbnails(sessionId, ids, 48);
+        const { thumbs } = await withEvictedSessionRetry(
+          path,
+          sessionId,
+          (sid) => renderThumbnails(sid, ids, 48),
+          (result) => refreshSession(path, result)
+        );
         const entries = await Promise.all(
           Object.entries(thumbs).map(async ([id, path_]) => [Number(id), await loadPngDataUrl(path_)] as const)
         );
@@ -63,14 +73,37 @@ function AppShell() {
         pushError("썸네일 렌더링 실패", toEngineError(e));
       }
     })();
-  }, [state.activePath, activeFile?.sessionId, activeFile?.tree, pushError]);
+  }, [state.activePath, activeFile?.sessionId, activeFile?.tree, refreshSession, pushError]);
+
+  // Removing a file (FilePanel's "×") drops its thumbnails/fetch-marker too,
+  // so re-adding the same path later re-fetches instead of reusing stale
+  // (or, worse, silently absent) thumbnail data.
+  useEffect(() => {
+    const validPaths = new Set(state.files.map((f) => f.path));
+    setThumbsByPath((prev) => {
+      let changed = false;
+      const next: typeof prev = {};
+      for (const [p, v] of Object.entries(prev)) {
+        if (validPaths.has(p)) next[p] = v;
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+    for (const p of fetchedPathsRef.current) {
+      if (!validPaths.has(p)) fetchedPathsRef.current.delete(p);
+    }
+  }, [state.files]);
 
   return (
     <div className="app-shell">
+      <EngineStatus onRestarted={engineRestarted} onError={pushError} />
+
       <PresetBar
         sessionId={activeFile?.sessionId}
+        path={activeFile?.path}
         hasPendingOps={ops.ops.length > 0}
         onApplied={applyPresetResult}
+        onSessionRefreshed={refreshSession}
         onError={pushError}
       />
 
@@ -83,14 +116,22 @@ function AppShell() {
         </button>
       </div>
 
-      <FilePanel files={state.files} activePath={state.activePath} onAddFiles={addFiles} onSelectFile={selectFile} />
+      <FilePanel
+        files={state.files}
+        activePath={state.activePath}
+        onAddFiles={addFiles}
+        onSelectFile={selectFile}
+        onRemoveFile={removeFile}
+      />
 
       <div className="preview-area">
         <PreviewCanvas
           sessionId={activeFile?.sessionId}
+          path={activeFile?.path}
           tree={activeFile?.tree}
           includedIds={ops.includedIds}
           previewHiddenIds={ops.previewHiddenIds}
+          onSessionRefreshed={refreshSession}
           onError={pushError}
         />
       </div>
@@ -138,6 +179,7 @@ function AppShell() {
           tree={activeFile.tree}
           onPushOp={pushOp}
           onClose={() => setExportOpen(false)}
+          onSessionRefreshed={refreshSession}
           onError={pushError}
         />
       )}
