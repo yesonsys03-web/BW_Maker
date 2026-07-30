@@ -8,6 +8,8 @@ def extract_rgba(layer):
         img = layer.composite(viewport=layer.bbox)
     else:
         img = layer.topil()
+    if img is None:
+        raise ValueError(f"layer {layer.name!r} has no pixels")
     return np.array(img.convert("RGBA"))
 
 

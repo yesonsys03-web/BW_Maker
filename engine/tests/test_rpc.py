@@ -1,6 +1,10 @@
+import io
 import json
+import os
 import subprocess
 import sys
+
+from psd_engine import rpc
 
 
 class EngineProc:
@@ -100,6 +104,41 @@ def test_rpc_invalid_json_doesnt_crash_engine(fixture_psd):
         eng.call("close_session", sessionId=r["sessionId"])
     finally:
         eng.close()
+
+
+def test_rpc_non_dict_json_doesnt_crash_engine(fixture_psd):
+    eng = EngineProc()
+    try:
+        # Valid JSON, but not an object (e.g. a bare array)
+        eng.p.stdin.write("[1,2,3]\n")
+        eng.p.stdin.flush()
+        line = eng.p.stdout.readline()
+        msg = json.loads(line)
+        assert msg["id"] is None
+        assert "error" in msg
+        # Engine should still work after a non-dict JSON line
+        r = eng.call("open_psd", path=str(fixture_psd))["result"]
+        sid = r["sessionId"]
+        assert sid
+        r2 = eng.call("close_session", sessionId=sid)
+        assert r2["result"] == {}
+    finally:
+        eng.close()
+
+
+def test_render_preview_no_path_collision_across_calls(fixture_psd):
+    # render_preview must not overwrite its previous output on re-render
+    # (webview cache would otherwise serve stale images).
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(fixture_psd))
+    sid = r["sessionId"]
+
+    r1 = engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=32)
+    r2 = engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=32)
+
+    assert r1["pngPath"] != r2["pngPath"]
+    assert os.path.exists(r1["pngPath"])
+    assert os.path.exists(r2["pngPath"])
 
 
 def test_rpc_unknown_method_error(fixture_psd):

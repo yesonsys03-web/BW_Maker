@@ -1,4 +1,7 @@
+import types
+
 import numpy as np
+import pytest
 from psd_tools import PSDImage
 
 from psd_engine.render import extract_rgba, merge_rgba, render_preview, render_thumbnails
@@ -16,6 +19,13 @@ def test_extract_rgba(fixture_psd):
     arr = extract_rgba(s["layers_by_id"][4])   # 'line' value=50, 32x24
     assert arr.shape == (24, 32, 4)
     assert (arr[..., :3] == 50).all() and (arr[..., 3] == 255).all()
+
+
+def test_extract_rgba_empty_layer_raises():
+    # psd-tools' topil() returns None for layers with no pixels
+    layer = types.SimpleNamespace(mask=None, name="empty", topil=lambda: None)
+    with pytest.raises(ValueError, match="no pixels"):
+        extract_rgba(layer)
 
 
 def test_merge_rgba_overlap(fixture_psd):

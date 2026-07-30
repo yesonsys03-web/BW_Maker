@@ -48,11 +48,13 @@ class Engine:
 
     def render_thumbnails(self, sessionId, layerIds, maxSize=128):
         s = self.store.get(sessionId)
-        return {"thumbs": render_thumbnails(s, layerIds, maxSize, self.tmp)}
+        out_dir = Path(tempfile.mkdtemp(dir=self.tmp))
+        return {"thumbs": render_thumbnails(s, layerIds, maxSize, out_dir)}
 
     def render_preview(self, sessionId, visibleLayerIds, maxSize=1500):
         s = self.store.get(sessionId)
-        return {"pngPath": render_preview(s, visibleLayerIds, maxSize, self.tmp)}
+        out_dir = Path(tempfile.mkdtemp(dir=self.tmp))
+        return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir)}
 
     def apply_preset(self, sessionId, preset):
         s = self.store.get(sessionId)
@@ -122,6 +124,11 @@ def main(stdin=None, stdout=None):
             _emit({"id": None,
                    "error": {"message": str(e),
                              "traceback": traceback.format_exc()}}, stdout)
+            continue
+        if not isinstance(request, dict):
+            _emit({"id": None,
+                   "error": {"message": f"request must be a JSON object, got {type(request).__name__}",
+                             "traceback": ""}}, stdout)
             continue
         try:
             _emit({"id": request.get("id"), "result": engine.handle(request)}, stdout)

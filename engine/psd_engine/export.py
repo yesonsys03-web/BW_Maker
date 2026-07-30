@@ -18,6 +18,8 @@ def _entry_pixels(session, entry):
 
 def export_psd(session, entries, output_path, embed_preview=True,
                overwrite=False, progress=None):
+    if not entries:
+        raise ValueError("no entries to export")
     apply_pytoshop_patches()
     from pytoshop import enums
     from pytoshop.image_data import ImageData

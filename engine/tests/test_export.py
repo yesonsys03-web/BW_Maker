@@ -37,6 +37,12 @@ def test_export_copies_and_merge(session, tmp_path):
     assert layers[0].bbox == (5, 5, 9, 9)
 
 
+def test_export_empty_entries_raises(session, tmp_path):
+    out_path = tmp_path / "out.psd"
+    with pytest.raises(ValueError, match="no entries to export"):
+        export_psd(session, [], out_path)
+
+
 def test_export_refuses_overwrite(session, tmp_path):
     entries = _plan(session, [4], [])
     out_path = tmp_path / "out.psd"
