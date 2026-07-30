@@ -164,7 +164,7 @@ UI의 모든 편집은 원본을 건드리지 않고 작업 목록으로 쌓인�
 ## 10. 프로젝트 구조 · 패키징
 
 ```
-psd-layer-tool/
+psd_line_export/
   src/                # React + TS (Vite)
   src-tauri/          # Rust 쉘, tauri.conf.json (sidecar 등록)
   engine/             # Python 엔진 (uv 프로젝트)
