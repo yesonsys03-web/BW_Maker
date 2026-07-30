@@ -13,6 +13,7 @@ import { BatchPanel } from "./components/BatchPanel";
 import { loadPngDataUrl, renderThumbnails } from "./lib/engine";
 import { pixelLeafIds, toEngineError } from "./lib/preview";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
+import type { Preset } from "./lib/types";
 
 type BottomTab = "history" | "batch";
 
@@ -43,6 +44,7 @@ function AppShell() {
 
   const [bottomTab, setBottomTab] = useState<BottomTab>("history");
   const [exportOpen, setExportOpen] = useState(false);
+  const [selectedPreset, setSelectedPreset] = useState<Preset | undefined>(undefined);
 
   // Background, one-shot thumbnail render per opened file. A failure lands on
   // the error stack and leaves that file's rows showing names only.
@@ -105,6 +107,7 @@ function AppShell() {
         onApplied={applyPresetResult}
         onSessionRefreshed={refreshSession}
         onError={pushError}
+        onSelectedPresetChange={setSelectedPreset}
       />
 
       <div className="toolbar">
@@ -178,6 +181,7 @@ function AppShell() {
           srcPath={activeFile.path}
           ops={ops}
           tree={activeFile.tree}
+          preset={selectedPreset}
           onPushOp={pushOp}
           onClose={() => setExportOpen(false)}
           onSessionRefreshed={refreshSession}

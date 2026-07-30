@@ -5,13 +5,14 @@ import { exportPsd, onEngineEvent } from "../lib/engine";
 import { toEngineError } from "../lib/preview";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { OpsState } from "../lib/opsReducer";
-import type { EngineError, ExportResult, OpenResult, Operation, TreeNode } from "../lib/types";
+import type { EngineError, ExportResult, OpenResult, Operation, Preset, TreeNode } from "../lib/types";
 
 interface ExportDialogProps {
   sessionId: number;
   srcPath: string;
   ops: OpsState;
   tree: TreeNode[] | undefined;
+  preset: Preset | undefined;
   onPushOp: (op: Operation) => void;
   onClose: () => void;
   onSessionRefreshed: (path: string, result: OpenResult) => void;
@@ -43,14 +44,21 @@ export function ExportDialog({
   srcPath,
   ops,
   tree,
+  preset,
   onPushOp,
   onClose,
   onSessionRefreshed,
   onError,
 }: ExportDialogProps) {
-  const [outputSuffix, setOutputSuffix] = useState("_LINE");
-  const [naming, setNaming] = useState<"pathPrefix" | "original">("pathPrefix");
-  const [embedPreview, setEmbedPreview] = useState(true);
+  // Initialized from the currently-selected preset (still user-overridable
+  // below) so single-file export matches batch export's naming/suffix/
+  // embedPreview for the same preset — see FIX 3. ExportDialog is only ever
+  // mounted fresh per open (App.tsx renders it conditionally), so a plain
+  // useState initializer is enough; it doesn't need to react to a preset
+  // switch while already open.
+  const [outputSuffix, setOutputSuffix] = useState(preset?.outputSuffix ?? "_LINE");
+  const [naming, setNaming] = useState<"pathPrefix" | "original">(preset?.naming ?? "pathPrefix");
+  const [embedPreview, setEmbedPreview] = useState(preset?.embedPreview ?? true);
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [result, setResult] = useState<ExportResult | null>(null);
@@ -125,7 +133,7 @@ export function ExportDialog({
   }
 
   const verification = result?.verification;
-  const verificationOk = verification ? verification.ok : true;
+  const verificationOk = verification?.ok === true;
 
   return (
     <div className="modal-overlay" onClick={() => !exporting && onClose()}>

@@ -13,6 +13,7 @@ interface PresetBarProps {
   onApplied: (matchedLayerIds: number[], operations: Operation[]) => void;
   onSessionRefreshed: (path: string, result: OpenResult) => void;
   onError: (title: string, error: EngineError) => void;
+  onSelectedPresetChange: (preset: Preset | undefined) => void;
 }
 
 type DialogState = { mode: Extract<PresetDialogMode, "edit">; index: number } | { mode: Extract<PresetDialogMode, "saveAs"> };
@@ -24,7 +25,15 @@ type DialogState = { mode: Extract<PresetDialogMode, "edit">; index: number } | 
  * Presets are loaded once on mount; a load/save/apply failure is never
  * absorbed — it's always reported via onError so it lands on the ErrorPanel.
  */
-export function PresetBar({ sessionId, path, hasPendingOps, onApplied, onSessionRefreshed, onError }: PresetBarProps) {
+export function PresetBar({
+  sessionId,
+  path,
+  hasPendingOps,
+  onApplied,
+  onSessionRefreshed,
+  onError,
+  onSelectedPresetChange,
+}: PresetBarProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
@@ -53,6 +62,13 @@ export function PresetBar({ sessionId, path, hasPendingOps, onApplied, onSession
 
   const selectedIndex = presets.findIndex((p) => p.name === selectedName);
   const selectedPreset = selectedIndex === -1 ? undefined : presets[selectedIndex];
+
+  // Reports the currently-selected preset up to App so ExportDialog can
+  // initialize naming/outputSuffix/embedPreview from it (single-file export
+  // must match the same preset's batch-export defaults; see FIX 3).
+  useEffect(() => {
+    onSelectedPresetChange(selectedPreset);
+  }, [selectedPreset, onSelectedPresetChange]);
 
   async function persistList(list: Preset[]) {
     setSaving(true);
