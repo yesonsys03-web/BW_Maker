@@ -128,7 +128,9 @@ def test_rpc_non_dict_json_doesnt_crash_engine(fixture_psd):
 
 def test_render_preview_no_path_collision_across_calls(fixture_psd):
     # render_preview must not overwrite its previous output on re-render
-    # (webview cache would otherwise serve stale images).
+    # (webview cache would otherwise serve stale images) — but the previous
+    # call's dir is cleaned up once superseded, so only the latest survives
+    # (see test_render_dirs_do_not_accumulate_across_kinds for the leak fix).
     engine = rpc.Engine(out=io.StringIO())
     r = engine.open_psd(str(fixture_psd))
     sid = r["sessionId"]
@@ -137,8 +139,27 @@ def test_render_preview_no_path_collision_across_calls(fixture_psd):
     r2 = engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=32)
 
     assert r1["pngPath"] != r2["pngPath"]
-    assert os.path.exists(r1["pngPath"])
+    assert not os.path.exists(r1["pngPath"])
     assert os.path.exists(r2["pngPath"])
+
+
+def test_render_dirs_do_not_accumulate_across_kinds(fixture_psd):
+    # Repeated render_preview/render_thumbnails calls (e.g. a 400ms-debounced
+    # preview over an afternoon) must not leave behind one temp dir per call.
+    # kill_engine SIGKILLs the process on app exit, skipping atexit cleanup,
+    # so this has to be enforced per-call rather than relying on atexit alone.
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(fixture_psd))
+    sid = r["sessionId"]
+
+    for _ in range(5):
+        engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=32)
+    for _ in range(5):
+        engine.render_thumbnails(sid, layerIds=[2, 5], maxSize=32)
+
+    # At most one surviving dir per kind (preview, thumbnails) under the
+    # engine's temp root — not one per call.
+    assert len(list(engine.tmp.iterdir())) == 2
 
 
 def test_rpc_unknown_method_error(fixture_psd):

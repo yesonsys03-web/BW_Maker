@@ -153,10 +153,17 @@ export async function onEngineEvent(cb: (data: unknown) => void): Promise<() => 
   return unlisten;
 }
 
+export interface EngineDeadPayload {
+  stderrTail?: string[];
+}
+
 /**
- * Subscribes to engine-dead event. Returns unsubscribe function.
+ * Subscribes to engine-dead event. The payload's stderrTail carries the
+ * engine process's last ~50 stderr lines (see src-tauri/src/engine.rs) — a
+ * packaged build has no terminal, so this is the only way a Python-level
+ * crash traceback reaches the artist. Returns unsubscribe function.
  */
-export async function onEngineDead(cb: () => void): Promise<() => void> {
-  const unlisten = await listen("engine-dead", () => cb());
+export async function onEngineDead(cb: (payload: EngineDeadPayload) => void): Promise<() => void> {
+  const unlisten = await listen<EngineDeadPayload>("engine-dead", (event) => cb(event.payload ?? {}));
   return unlisten;
 }

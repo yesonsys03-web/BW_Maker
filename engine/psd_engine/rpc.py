@@ -30,7 +30,22 @@ class Engine:
         self.store = SessionStore()
         self.out = out or sys.stdout
         self.tmp = Path(tempfile.mkdtemp(prefix="psd_engine_"))
+        # Most-recent render dir per kind ("thumbnails"/"preview") — a fresh
+        # call deletes its predecessor rather than accumulating forever.
+        # atexit alone isn't enough: kill_engine (src-tauri/src/engine.rs)
+        # SIGKILLs the process on app exit, which skips atexit entirely, so a
+        # 400ms-debounced preview session can otherwise leave hundreds of
+        # PNGs behind in a single afternoon.
+        self._last_render_dirs: dict[str, Path] = {}
         atexit.register(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _fresh_render_dir(self, kind):
+        prev = self._last_render_dirs.get(kind)
+        if prev is not None:
+            shutil.rmtree(prev, ignore_errors=True)
+        out_dir = Path(tempfile.mkdtemp(dir=self.tmp))
+        self._last_render_dirs[kind] = out_dir
+        return out_dir
 
     # ---- RPC methods ----
     def open_psd(self, path):
@@ -48,12 +63,12 @@ class Engine:
 
     def render_thumbnails(self, sessionId, layerIds, maxSize=128):
         s = self.store.get(sessionId)
-        out_dir = Path(tempfile.mkdtemp(dir=self.tmp))
+        out_dir = self._fresh_render_dir("thumbnails")
         return {"thumbs": render_thumbnails(s, layerIds, maxSize, out_dir)}
 
     def render_preview(self, sessionId, visibleLayerIds, maxSize=1500):
         s = self.store.get(sessionId)
-        out_dir = Path(tempfile.mkdtemp(dir=self.tmp))
+        out_dir = self._fresh_render_dir("preview")
         return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir)}
 
     def apply_preset(self, sessionId, preset):

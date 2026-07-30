@@ -1,12 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
+
+/// engine-dead 페이로드/버퍼에 보관하는 stderr 라인 수 상한. 패키지된 빌드는
+/// 터미널이 없어 Python 레벨 크래시(임포트 실패, MemoryError 등)의 traceback을
+/// 볼 방법이 없으므로, 죽었을 때 이걸 그대로 실어 보낸다.
+const STDERR_TAIL_LINES: usize = 50;
 
 pub struct EngineState {
     proc: Mutex<Option<EngineProc>>,
@@ -16,6 +22,8 @@ pub struct EngineState {
     /// 시작 시점의 값을 캡처해두고, EOF를 감지했을 때 이 값과 비교해 자신이
     /// 여전히 "현재" 프로세스를 담당하는지 판단한다 (restart_engine 레이스 가드).
     epoch: Arc<AtomicU64>,
+    /// 현재 엔진 프로세스 stderr의 마지막 STDERR_TAIL_LINES줄.
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
 
 struct EngineProc {
@@ -30,6 +38,7 @@ impl Default for EngineState {
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
             epoch: Arc::new(AtomicU64::new(0)),
+            stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 }
@@ -41,7 +50,8 @@ fn engine_command() -> Command {
     c.args(["run", "python", "-m", "psd_engine"])
         .current_dir(engine_dir)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     c
 }
 
@@ -50,6 +60,9 @@ pub fn spawn_engine(app: &AppHandle) -> Result<(), String> {
     let mut child = engine_command().spawn().map_err(|e| e.to_string())?;
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
+    let stderr = child.stderr.take().ok_or("no stderr")?;
+
+    state.stderr_tail.lock().unwrap().clear();
 
     // 이 reader가 담당하는 세대를 기록한다. restart_engine이 그 사이 epoch를 다시
     // 올렸다면(=이 reader는 이미 교체된 이전 세대) EOF 시점에 drain을 건너뛴다.
@@ -57,6 +70,26 @@ pub fn spawn_engine(app: &AppHandle) -> Result<(), String> {
     let epoch = state.epoch.clone();
     let pending = state.pending.clone();
     let app_handle = app.clone();
+    let stderr_tail = state.stderr_tail.clone();
+
+    // stderr reader: 패키지된 빌드에는 터미널이 없어 Python 크래시의 traceback을
+    // 볼 방법이 없으므로, 마지막 STDERR_TAIL_LINES줄을 보관해뒀다가 engine-dead
+    // 이벤트에 실어 보낸다.
+    {
+        let stderr_tail = stderr_tail.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                let mut buf = stderr_tail.lock().unwrap();
+                buf.push_back(line);
+                while buf.len() > STDERR_TAIL_LINES {
+                    buf.pop_front();
+                }
+            }
+        });
+    }
+
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -78,7 +111,8 @@ pub fn spawn_engine(app: &AppHandle) -> Result<(), String> {
         // 상태(=이 reader는 stale)라면 새 프로세스의 pending을 건드리지 않는다.
         if should_drain_on_eof(epoch.load(Ordering::SeqCst), my_epoch) {
             fail_all_pending(&pending, "engine process died");
-            let _ = app_handle.emit("engine-dead", ());
+            let tail: Vec<String> = stderr_tail.lock().unwrap().iter().cloned().collect();
+            let _ = app_handle.emit("engine-dead", json!({ "stderrTail": tail }));
         }
     });
 
@@ -86,13 +120,34 @@ pub fn spawn_engine(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// stdin을 먼저 닫아 엔진의 `for line in stdin` 루프가 EOF로 정상 종료되도록
+/// 유도한다 — 그래야 Python 쪽 atexit(임시 렌더 디렉터리 정리)가 실행된다.
+/// 곧바로 종료하지 않으면(데드락/행) SIGKILL로 fallback한다.
+fn terminate_engine_proc(mut p: EngineProc) {
+    drop(p.stdin);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match p.child.try_wait() {
+            Ok(Some(_)) => return, // 정상 종료
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = p.child.kill();
+                    let _ = p.child.wait();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
 /// 실행 중인 엔진 자식 프로세스를 종료한다. 앱 종료 시 호출.
 pub fn kill_engine(app: &AppHandle) {
     let state: State<EngineState> = app.state();
     let taken = state.proc.lock().unwrap().take();
-    if let Some(mut p) = taken {
-        let _ = p.child.kill();
-        let _ = p.child.wait();
+    if let Some(p) = taken {
+        terminate_engine_proc(p);
     }
 }
 
@@ -148,9 +203,8 @@ pub fn paths_exist(paths: Vec<String>) -> Vec<bool> {
 
 #[tauri::command]
 pub fn restart_engine(app: AppHandle, state: State<'_, EngineState>) -> Result<(), String> {
-    if let Some(mut p) = state.proc.lock().unwrap().take() {
-        let _ = p.child.kill();
-        let _ = p.child.wait();
+    if let Some(p) = state.proc.lock().unwrap().take() {
+        terminate_engine_proc(p);
     }
     // 이전 엔진에 대해 대기 중이던 요청을 즉시 실패 처리한다. 이렇게 하지 않으면
     // 옛 reader 스레드의 EOF 감지(OS 타이밍 의존적) 또는 epoch 가드로 인한 drain

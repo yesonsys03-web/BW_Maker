@@ -922,16 +922,35 @@ input[type="text"] {
   left: 0;
   right: 0;
   z-index: 200;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 1em;
   padding: 0.6em 1em;
   background: var(--danger-bg);
   border-bottom: 1px solid #6a2f2f;
   color: var(--danger);
-  font-weight: 600;
   text-align: center;
+}
+
+.engine-status-banner-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1em;
+  font-weight: 600;
+}
+
+.engine-status-stderr {
+  margin: 0.6em auto 0;
+  max-width: 720px;
+  max-height: 200px;
+  overflow: auto;
+  background: var(--bg-0);
+  border: 1px solid #6a2f2f;
+  border-radius: 4px;
+  padding: 0.5em;
+  font-size: 0.78em;
+  font-weight: 400;
+  text-align: left;
+  white-space: pre-wrap;
+  color: var(--text-dim);
 }
 
 /* ---------- error panel ---------- */
