@@ -71,14 +71,27 @@ input[type="text"] {
 .app-shell {
   display: grid;
   grid-template-columns: 240px 1fr 320px;
-  grid-template-rows: auto 1fr 160px;
+  grid-template-rows: auto auto 1fr 160px;
   grid-template-areas:
     "presetbar presetbar presetbar"
+    "toolbar toolbar toolbar"
     "files preview tree"
     "bottom bottom bottom";
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+}
+
+/* ---------- toolbar (Task 8/9: export + batch entry points) ---------- */
+
+.toolbar {
+  grid-area: toolbar;
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.4em 0.75em;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
 }
 
 /* ---------- preset bar ---------- */
@@ -559,19 +572,324 @@ input[type="text"] {
   gap: 0.5em;
 }
 
-/* ---------- bottom strip (Task 7-9 placeholder) ---------- */
+/* ---------- bottom strip: history / batch tabs ---------- */
 
 .bottom-strip {
   grid-area: bottom;
   border-top: 1px solid var(--border);
   background: var(--bg-1);
   display: flex;
-  align-items: center;
-  padding: 0 1em;
+  flex-direction: column;
+  min-height: 0;
 }
 
-.bottom-strip-placeholder {
+.bottom-tabs {
+  display: flex;
+  gap: 0.25em;
+  padding: 0.4em 0.75em 0;
+  flex-shrink: 0;
+}
+
+.bottom-tabs button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
   color: var(--text-dim);
+}
+
+.bottom-tabs button.active {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--bg-2);
+}
+
+.bottom-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.5em 0.75em;
+}
+
+/* ---------- ops history ---------- */
+
+.ops-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.4em;
+  font-weight: 600;
+}
+
+.ops-history-empty {
+  color: var(--text-dim);
+  font-size: 0.9em;
+}
+
+.ops-history-list {
+  margin: 0;
+  padding-left: 1.4em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2em;
+  font-size: 0.9em;
+}
+
+/* ---------- export dialog ---------- */
+
+.modal-card.export-dialog {
+  width: 560px;
+  max-height: calc(100vh - 4em);
+  overflow-y: auto;
+}
+
+.export-entries-hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.78em;
+}
+
+.export-entries {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3em;
+  background: var(--bg-1);
+}
+
+.export-entries-empty {
+  color: var(--text-dim);
+  font-size: 0.9em;
+  padding: 0.5em;
+}
+
+.export-entry-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.3em 0.5em;
+  border-radius: 4px;
+  background: var(--bg-2);
+  cursor: grab;
+}
+
+.export-entry-row.dragging {
+  opacity: 0.5;
+}
+
+.export-entry-handle {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.export-entry-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-field-row {
+  display: flex;
+  gap: 0.6em;
+}
+
+.export-radio-group {
+  display: flex;
+  gap: 0.8em;
+  align-items: center;
+}
+
+.export-radio-group label {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+  font-size: 0.9em;
+}
+
+.export-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+}
+
+.export-progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+
+.export-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s;
+}
+
+.export-progress-label {
+  font-size: 0.8em;
+  color: var(--text-dim);
+}
+
+.export-result {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+}
+
+.export-result.fail {
+  border-color: #6a2f2f;
+}
+
+.export-result-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+}
+
+.export-result-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
+
+.export-result-count-mismatch {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.85em;
+}
+
+.verification-badge {
+  flex-shrink: 0;
+  font-size: 0.78em;
+  padding: 0.15em 0.6em;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.verification-badge.ok {
+  color: #6fcf97;
+  border-color: #2f5c46;
+}
+
+.verification-badge.fail {
+  color: var(--danger);
+  border-color: #6a2f2f;
+}
+
+.verification-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.verification-table th,
+.verification-table td {
+  text-align: left;
+  padding: 0.3em 0.5em;
+  border-bottom: 1px solid var(--border);
+}
+
+.verification-table td.ok {
+  color: #6fcf97;
+}
+
+.verification-table td.fail {
+  color: var(--danger);
+}
+
+/* ---------- batch panel ---------- */
+
+.batch-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+}
+
+.batch-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  flex-wrap: wrap;
+}
+
+.batch-output-radio {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+  font-size: 0.9em;
+}
+
+.batch-output-dir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
+
+.batch-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+  max-height: 90px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3em;
+  background: var(--bg-1);
+}
+
+.batch-empty {
+  color: var(--text-dim);
+  font-size: 0.85em;
+  padding: 0.3em;
+}
+
+.batch-file-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  font-size: 0.88em;
+  padding: 0.1em 0.3em;
+}
+
+.batch-results-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.batch-results-table th,
+.batch-results-table td {
+  text-align: left;
+  padding: 0.3em 0.5em;
+  border-bottom: 1px solid var(--border);
+}
+
+.batch-row-fail td:first-child {
+  color: var(--danger);
+}
+
+.batch-row-detail td {
+  background: var(--bg-0);
+}
+
+.batch-conflict-list {
+  max-height: 160px;
+  overflow-y: auto;
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: 0.88em;
 }
 
 /* ---------- error panel ---------- */

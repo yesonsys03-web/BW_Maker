@@ -6,8 +6,13 @@ import { LayerTree } from "./components/LayerTree";
 import { ErrorPanel } from "./components/ErrorPanel";
 import { PreviewCanvas } from "./components/PreviewCanvas";
 import { PresetBar } from "./components/PresetBar";
+import { OpsHistory } from "./components/OpsHistory";
+import { ExportDialog } from "./components/ExportDialog";
+import { BatchPanel } from "./components/BatchPanel";
 import { loadPngDataUrl, renderThumbnails } from "./lib/engine";
 import { pixelLeafIds, toEngineError } from "./lib/preview";
+
+type BottomTab = "history" | "batch";
 
 function AppShell() {
   const {
@@ -21,6 +26,7 @@ function AppShell() {
     pushOp,
     setIncluded,
     applyPresetResult,
+    undoOp,
     dismissError,
     pushError,
   } = useAppStore();
@@ -29,6 +35,9 @@ function AppShell() {
   // keying by path — not a flat id map — avoids collisions across files).
   const [thumbsByPath, setThumbsByPath] = useState<Record<string, Record<number, string>>>({});
   const fetchedPathsRef = useRef<Set<string>>(new Set());
+
+  const [bottomTab, setBottomTab] = useState<BottomTab>("history");
+  const [exportOpen, setExportOpen] = useState(false);
 
   // Background, one-shot thumbnail render per opened file. A failure lands on
   // the error stack and leaves that file's rows showing names only.
@@ -65,6 +74,15 @@ function AppShell() {
         onError={pushError}
       />
 
+      <div className="toolbar">
+        <button type="button" onClick={() => setExportOpen(true)} disabled={!activeFile?.sessionId}>
+          내보내기...
+        </button>
+        <button type="button" onClick={() => setBottomTab("batch")}>
+          배치 실행...
+        </button>
+      </div>
+
       <FilePanel files={state.files} activePath={state.activePath} onAddFiles={addFiles} onSelectFile={selectFile} />
 
       <div className="preview-area">
@@ -91,8 +109,38 @@ function AppShell() {
       </div>
 
       <div className="bottom-strip">
-        <span className="bottom-strip-placeholder">히스토리 / 배치 패널 (준비 중)</span>
+        <div className="bottom-tabs">
+          <button
+            type="button"
+            className={bottomTab === "history" ? "active" : ""}
+            onClick={() => setBottomTab("history")}
+          >
+            히스토리
+          </button>
+          <button type="button" className={bottomTab === "batch" ? "active" : ""} onClick={() => setBottomTab("batch")}>
+            배치
+          </button>
+        </div>
+        <div className="bottom-panel">
+          {bottomTab === "history" ? (
+            <OpsHistory ops={ops} tree={activeFile?.tree} onUndo={undoOp} />
+          ) : (
+            <BatchPanel files={state.files} onError={pushError} />
+          )}
+        </div>
       </div>
+
+      {exportOpen && activeFile?.sessionId && (
+        <ExportDialog
+          sessionId={activeFile.sessionId}
+          srcPath={activeFile.path}
+          ops={ops}
+          tree={activeFile.tree}
+          onPushOp={pushOp}
+          onClose={() => setExportOpen(false)}
+          onError={pushError}
+        />
+      )}
 
       <ErrorPanel errors={state.errors} onDismiss={dismissError} />
     </div>
