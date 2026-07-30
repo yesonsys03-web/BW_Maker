@@ -32,3 +32,33 @@ def test_patched_pytoshop_writes_rle_psd_with_clean_names(tmp_path):
     arr = np.array(layer.topil().convert("RGBA"))
     assert arr.shape == (10, 10, 4)
     assert (arr == 200).all()
+
+
+def test_patched_pytoshop_writes_zero_length_mask_for_default_layers(tmp_path):
+    """Verify that pytoshop patch writes zero-length mask section for layers without masks.
+    This ensures psd-tools reads layer.mask as None instead of an empty Mask object."""
+    from psd_engine.patches import apply_pytoshop_patches
+
+    apply_pytoshop_patches()
+
+    from psd_tools import PSDImage
+    from pytoshop import enums
+    from pytoshop.user import nested_layers
+
+    a = np.full((10, 10), 200, np.uint8)
+    img = nested_layers.Image(
+        name="test_layer", channels={0: a, 1: a, 2: a, -1: a},
+        top=0, left=0, opacity=255, visible=True,
+        blend_mode=enums.BlendMode.normal,
+    )
+    psd = nested_layers.nested_layers_to_psd(
+        [img], color_mode=enums.ColorMode.rgb, size=(10, 10)
+    )
+    path = tmp_path / "test_mask.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+
+    # Re-open and verify layer.mask is None (not just empty)
+    out = PSDImage.open(path)
+    layer = list(out)[0]
+    assert layer.mask is None, "Layer without mask data should have layer.mask = None"
