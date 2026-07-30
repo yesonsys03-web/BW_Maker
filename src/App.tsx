@@ -122,6 +122,7 @@ function AppShell() {
         onAddFiles={addFiles}
         onSelectFile={selectFile}
         onRemoveFile={removeFile}
+        onError={pushError}
       />
 
       <div className="preview-area">

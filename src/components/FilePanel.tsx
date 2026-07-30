@@ -1,6 +1,8 @@
 import { useEffect, useState, type DragEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { toEngineError } from "../lib/preview";
+import type { EngineError } from "../lib/types";
 import type { FileEntry, FileStatus } from "../state/appStore";
 
 interface FilePanelProps {
@@ -9,6 +11,7 @@ interface FilePanelProps {
   onAddFiles: (paths: string[]) => void;
   onSelectFile: (path: string) => void;
   onRemoveFile: (path: string) => void;
+  onError: (title: string, error: EngineError) => void;
 }
 
 const STATUS_LABEL: Record<FileStatus, string> = {
@@ -24,7 +27,7 @@ function fileName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemoveFile }: FilePanelProps) {
+export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemoveFile, onError }: FilePanelProps) {
   const [isDragOver, setIsDragOver] = useState(false);
 
   // Primary drop path: Tauri's webview-level drag/drop event, which carries
@@ -61,13 +64,17 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
   }, [onAddFiles]);
 
   async function handleBrowse() {
-    const selection = await open({
-      multiple: true,
-      filters: [{ name: "Photoshop", extensions: ["psd"] }],
-    });
-    if (!selection) return;
-    const paths = Array.isArray(selection) ? selection : [selection];
-    if (paths.length > 0) onAddFiles(paths);
+    try {
+      const selection = await open({
+        multiple: true,
+        filters: [{ name: "Photoshop", extensions: ["psd"] }],
+      });
+      if (!selection) return;
+      const paths = Array.isArray(selection) ? selection : [selection];
+      if (paths.length > 0) onAddFiles(paths);
+    } catch (e) {
+      onError("파일 선택 실패", toEngineError(e));
+    }
   }
 
   function handleDragOver(e: DragEvent<HTMLDivElement>) {
@@ -96,7 +103,7 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
     <div className="file-panel">
       <div className="file-panel-header">
         <span>파일</span>
-        <button type="button" onClick={handleBrowse}>
+        <button type="button" onClick={() => void handleBrowse()}>
           + 추가
         </button>
       </div>

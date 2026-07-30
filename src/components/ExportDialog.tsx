@@ -97,17 +97,17 @@ export function ExportDialog({
   }
 
   async function handleExport() {
-    const defaultPath = defaultExportPath(srcPath, outputSuffix);
-    const outputPath = await save({
-      defaultPath,
-      filters: [{ name: "Photoshop", extensions: ["psd"] }],
-    });
-    if (!outputPath) return;
-
-    setExporting(true);
-    setProgress(null);
-    setResult(null);
     try {
+      const defaultPath = defaultExportPath(srcPath, outputSuffix);
+      const outputPath = await save({
+        defaultPath,
+        filters: [{ name: "Photoshop", extensions: ["psd"] }],
+      });
+      if (!outputPath) return;
+
+      setExporting(true);
+      setProgress(null);
+      setResult(null);
       // save() already confirmed overwrite with the user, so overwrite:true.
       const res = await withEvictedSessionRetry(
         srcPath,

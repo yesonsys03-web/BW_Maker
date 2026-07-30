@@ -117,9 +117,13 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
   }
 
   async function handlePickOutputDir() {
-    const dir = await open({ directory: true });
-    if (!dir) return;
-    setOutputDir(Array.isArray(dir) ? dir[0] : dir);
+    try {
+      const dir = await open({ directory: true });
+      if (!dir) return;
+      setOutputDir(Array.isArray(dir) ? dir[0] : dir);
+    } catch (e) {
+      onError("출력 폴더 선택 실패", toEngineError(e));
+    }
   }
 
   async function runBatch(paths: string[], preset: Preset, dir: string | null, overwrite: boolean) {
