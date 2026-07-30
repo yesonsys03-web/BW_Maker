@@ -83,7 +83,11 @@ export function buildEntries(includedIds: number[], ops: Operation[]): Entry[] {
           entries.splice(0, 0, e);
         } else {
           const above = require_(op.aboveId);
-          entries.splice(entries.indexOf(above) + 1, 0, e);
+          const aboveIdx = entries.indexOf(above);
+          if (aboveIdx === -1) {
+            throw new Error(`reorder: aboveId ${op.aboveId} not found in entries (self-reference?)`);
+          }
+          entries.splice(aboveIdx + 1, 0, e);
         }
         break;
       }

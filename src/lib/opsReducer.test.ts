@@ -36,6 +36,10 @@ test("unknown ref throws", () => {
   expect(() => buildEntries(INC, [{ op: "rename", layerId: 99, name: "x" }])).toThrow();
 });
 
+test("reorder self-reference (aboveId === layerId) throws", () => {
+  expect(() => buildEntries(INC, [{ op: "reorder", layerId: 4, aboveId: 4 }])).toThrow();
+});
+
 test("undo recomputes entries", () => {
   let s: OpsState = opsReducer(undefined as never, { type: "reset", includedIds: INC });
   s = opsReducer(s, { type: "pushOp", op: { op: "flatten", name: "F" } });
