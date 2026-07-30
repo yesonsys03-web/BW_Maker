@@ -192,7 +192,7 @@ input[type="text"] {
   border-color: #6a2f2f;
 }
 
-/* ---------- preview (Task 6 placeholder) ---------- */
+/* ---------- preview ---------- */
 
 .preview-area {
   grid-area: preview;
@@ -204,8 +204,69 @@ input[type="text"] {
   background: var(--bg-0);
 }
 
-.preview-placeholder {
+.preview-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preview-empty {
   color: var(--text-dim);
+}
+
+.preview-viewport {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  touch-action: none;
+  background-color: var(--bg-0);
+  background-image: linear-gradient(45deg, var(--bg-2) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--bg-2) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--bg-2) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--bg-2) 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+}
+
+.preview-viewport:active {
+  cursor: grabbing;
+}
+
+.preview-image {
+  max-width: none;
+  max-height: none;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.preview-spinner-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.preview-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: preview-spin 0.7s linear infinite;
+}
+
+@keyframes preview-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ---------- layer tree ---------- */
@@ -313,6 +374,25 @@ input[type="text"] {
   top: 50%;
   border-top: 1px solid var(--danger);
   transform: rotate(-35deg);
+}
+
+.node-thumb-slot {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.node-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .node-name {

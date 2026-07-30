@@ -6,6 +6,7 @@ interface LayerTreeProps {
   tree: TreeNode[] | undefined;
   ops: OpsState;
   matchedIds: number[];
+  thumbs: Record<number, string>;
   onSetIncluded: (includedIds: number[]) => void;
   onTogglePreview: (layerId: number) => void;
   onSetPreviewHidden: (layerIds: number[], hidden: boolean) => void;
@@ -67,6 +68,7 @@ export function LayerTree({
   tree,
   ops,
   matchedIds,
+  thumbs,
   onSetIncluded,
   onTogglePreview,
   onSetPreviewHidden,
@@ -277,6 +279,11 @@ export function LayerTree({
         >
           👁
         </button>
+        {node.kind === "pixel" && (
+          <span className="node-thumb-slot">
+            {thumbs[node.id] && <img className="node-thumb" src={thumbs[node.id]} alt="" draggable={false} />}
+          </span>
+        )}
         <span className="node-name">{node.name}</span>
         {node.kind !== "pixel" && <span className="node-kind">{node.kind}</span>}
       </div>

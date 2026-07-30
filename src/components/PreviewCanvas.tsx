@@ -1,0 +1,151 @@
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { loadPngDataUrl, renderPreview } from "../lib/engine";
+import { toEngineError, visibleIdsForPreview } from "../lib/preview";
+import type { EngineError, TreeNode } from "../lib/types";
+
+interface PreviewCanvasProps {
+  sessionId: number | undefined;
+  tree: TreeNode[] | undefined;
+  includedIds: number[];
+  previewHiddenIds: number[];
+  onError: (title: string, error: EngineError) => void;
+}
+
+const MIN_SCALE = 0.1;
+const MAX_SCALE = 8;
+const DEBOUNCE_MS = 400;
+const PREVIEW_MAX_SIZE = 1500;
+
+/**
+ * Center preview canvas. Recomputes visibleIds whenever activePath / eye
+ * toggle / include toggle changes (via tree, includedIds, previewHiddenIds
+ * reference changes), waits DEBOUNCE_MS, then renders via the engine. A
+ * monotonically increasing request id guards against a stale response
+ * (e.g. from a render superseded by a later toggle) overwriting a newer
+ * frame or clobbering a newer request's loading state.
+ */
+export function PreviewCanvas({ sessionId, tree, includedIds, previewHiddenIds, onError }: PreviewCanvasProps) {
+  const [imgSrc, setImgSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+
+  const requestIdRef = useRef(0);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const draggingRef = useRef<{ x: number; y: number } | null>(null);
+
+  const visibleIds = useMemo(
+    () => (tree ? visibleIdsForPreview(tree, includedIds, previewHiddenIds) : []),
+    [tree, includedIds, previewHiddenIds]
+  );
+
+  // Switching files invalidates anything in flight/shown and resets the view.
+  useEffect(() => {
+    requestIdRef.current += 1;
+    setImgSrc(null);
+    setLoading(false);
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    if (visibleIds.length === 0) {
+      requestIdRef.current += 1; // invalidate any in-flight render from a prior toggle
+      setImgSrc(null);
+      setLoading(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const requestId = ++requestIdRef.current;
+      setLoading(true);
+      void (async () => {
+        try {
+          const { pngPath } = await renderPreview(sessionId, visibleIds, PREVIEW_MAX_SIZE);
+          const dataUrl = await loadPngDataUrl(pngPath);
+          if (requestIdRef.current !== requestId) return; // superseded by a newer request
+          setImgSrc(dataUrl);
+          setLoading(false);
+        } catch (e) {
+          if (requestIdRef.current !== requestId) return;
+          setLoading(false);
+          onError("미리보기 렌더링 실패", toEngineError(e));
+        }
+      })();
+    }, DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [sessionId, visibleIds, onError]);
+
+  // Non-passive wheel listener so preventDefault actually stops page scroll/zoom.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    function handleWheel(e: WheelEvent) {
+      e.preventDefault();
+      setScale((prev) => {
+        const factor = Math.exp(-e.deltaY * 0.001);
+        return Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev * factor));
+      });
+    }
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, []);
+
+  function handlePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    draggingRef.current = { x: e.clientX, y: e.clientY };
+  }
+
+  function handlePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!draggingRef.current) return;
+    const dx = e.clientX - draggingRef.current.x;
+    const dy = e.clientY - draggingRef.current.y;
+    draggingRef.current = { x: e.clientX, y: e.clientY };
+    setOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+  }
+
+  function handlePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
+    draggingRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  }
+
+  if (!sessionId) {
+    return <div className="preview-canvas preview-empty">왼쪽에서 파일을 선택하세요.</div>;
+  }
+
+  if (visibleIds.length === 0) {
+    return <div className="preview-canvas preview-empty">표시할 레이어 없음</div>;
+  }
+
+  return (
+    <div className="preview-canvas">
+      <div
+        className="preview-viewport"
+        ref={viewportRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+      >
+        {imgSrc && (
+          <img
+            className="preview-image"
+            src={imgSrc}
+            alt="미리보기"
+            draggable={false}
+            style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
+          />
+        )}
+      </div>
+      {loading && (
+        <div className="preview-spinner-overlay" role="status" aria-label="렌더링 중">
+          <div className="preview-spinner" />
+        </div>
+      )}
+    </div>
+  );
+}
