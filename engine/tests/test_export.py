@@ -65,3 +65,17 @@ def test_verify_detects_corruption(session, tmp_path):
     export_psd(session, entries2, out_path, overwrite=True)
     v = verify_export(session, entries, out_path)
     assert v["ok"] is False
+
+
+def test_verify_detects_layer_count_mismatch(session, tmp_path):
+    # Export 2 layers
+    entries = _plan(session, [4, 5], [])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path)
+    # Verify with 1 entry — should detect mismatch
+    entries_wrong = _plan(session, [4], [])
+    v = verify_export(session, entries_wrong, out_path)
+    assert v["ok"] is False
+    assert v["layerCountOk"] is False
+    assert v["expectedLayers"] == 1
+    assert v["actualLayers"] == 2

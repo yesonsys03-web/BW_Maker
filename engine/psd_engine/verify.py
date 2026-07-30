@@ -10,7 +10,8 @@ def verify_export(session, entries, output_path):
     psd = session["psd"]
     canvas_ok = (out.width, out.height) == (psd.width, psd.height)
     out_layers = list(out)
-    ok = canvas_ok and len(out_layers) == len(entries)
+    layer_count_ok = len(out_layers) == len(entries)
+    ok = canvas_ok and layer_count_ok
 
     layer_checks = []
     for entry, out_layer in zip(entries, out_layers):
@@ -33,4 +34,11 @@ def verify_export(session, entries, output_path):
         layer_checks.append(check)
         ok = ok and check["nameOk"] and check["pixelOk"] is not False
 
-    return {"ok": bool(ok), "canvasOk": bool(canvas_ok), "layers": layer_checks}
+    return {
+        "ok": bool(ok),
+        "canvasOk": bool(canvas_ok),
+        "layerCountOk": bool(layer_count_ok),
+        "expectedLayers": len(entries),
+        "actualLayers": len(out_layers),
+        "layers": layer_checks,
+    }
