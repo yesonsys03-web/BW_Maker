@@ -1,5 +1,7 @@
 """비파괴 operation list → export plan(entry 목록, 아래→위)."""
 
+import re
+
 
 def build_export_plan(included_ids, operations):
     entries = [{"entryId": i, "sourceIds": [i], "name": None} for i in included_ids]
@@ -57,7 +59,7 @@ def build_export_plan(included_ids, operations):
 
 
 def _path_prefix_name(path):
-    parts = [p for p in path if not p.startswith("*") and not p.lower().startswith("group ")]
+    parts = [p for p in path if not p.startswith("*") and not re.fullmatch(r"group \d+", p, re.IGNORECASE)]
     out = []
     for p in parts:
         if not out or out[-1].lower() != p.lower():
@@ -68,14 +70,18 @@ def _path_prefix_name(path):
 def finalize_names(entries, nodes_by_id, naming):
     if naming not in ("pathPrefix", "original"):
         raise ValueError(f"unknown naming rule: {naming!r}")
-    used = {}
+    used_finals = set()
     for e in entries:
         if e["name"] is not None:
             base = e["name"]
         else:
             path = nodes_by_id[e["sourceIds"][-1]]["path"]
             base = path[-1] if naming == "original" else _path_prefix_name(path)
-        count = used.get(base, 0) + 1
-        used[base] = count
-        e["finalName"] = base if count == 1 else f"{base}_{count}"
+        final = base
+        counter = 2
+        while final in used_finals:
+            final = f"{base}_{counter}"
+            counter += 1
+        used_finals.add(final)
+        e["finalName"] = final
     return entries

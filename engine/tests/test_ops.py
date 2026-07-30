@@ -77,3 +77,36 @@ def test_finalize_names_dedup(fixture_psd):
     entries = build_export_plan([4, 7], [])   # 둘 다 원본 이름 'line'
     finalize_names(entries, nodes, "original")
     assert [e["finalName"] for e in entries] == ["line", "line_2"]
+
+
+def test_finalize_names_dedup_base_base2_base():
+    """Regression: base/base_2/base should get unique finalNames."""
+    entries = [
+        {"entryId": 1, "sourceIds": [1], "name": None},
+        {"entryId": 2, "sourceIds": [2], "name": None},
+        {"entryId": 3, "sourceIds": [3], "name": None},
+    ]
+    nodes_by_id = {
+        1: {"path": ["base"]},
+        2: {"path": ["base_2"]},
+        3: {"path": ["base"]},
+    }
+    finalize_names(entries, nodes_by_id, "original")
+    finals = [e["finalName"] for e in entries]
+    # All three should be unique despite base/base_2/base pattern
+    assert finals == ["base", "base_2", "base_3"]
+    assert len(set(finals)) == 3
+
+
+def test_path_prefix_filters_only_autogen_groups():
+    """Regression: Group N (auto-generated) should be filtered, Group Photos (user-named) should not."""
+    entries = [
+        {"entryId": 1, "sourceIds": [1], "name": None},
+        {"entryId": 2, "sourceIds": [2], "name": None},
+    ]
+    nodes_by_id = {
+        1: {"path": ["Group 2", "photo"]},    # Group 2 = auto-gen, should be removed
+        2: {"path": ["Group Photos", "image"]},  # Group Photos = user-named, should stay
+    }
+    finalize_names(entries, nodes_by_id, "pathPrefix")
+    assert [e["finalName"] for e in entries] == ["photo", "Group Photos_image"]
