@@ -5,7 +5,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invokeMock
 
 import { callEngine, loadPngDataUrl } from "./engine";
 
-beforeEach(() => invokeMock.mockReset());
+beforeEach(() => {
+  invokeMock.mockReset();
+});
 
 test("callEngine passes method/params and returns result", async () => {
   invokeMock.mockResolvedValue({ sessionId: 1 });

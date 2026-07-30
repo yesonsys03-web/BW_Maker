@@ -1,12 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  EngineError,
   OpenResult,
   Operation,
   Preset,
   ExportResult,
   BatchItemResult,
 } from "./types";
+
+export class EngineRpcError extends Error implements EngineError {
+  traceback: string;
+  constructor(err: { message?: string; traceback?: string }) {
+    super(err?.message ?? String(err));
+    this.name = "EngineRpcError";
+    this.traceback = err?.traceback ?? "";
+    Object.defineProperty(this, "message", {
+      value: err?.message ?? String(err),
+      enumerable: true,
+    });
+  }
+}
 
 /**
  * Core engine request wrapper. Calls the Tauri command `engine_request`
@@ -15,12 +29,8 @@ import type {
 export async function callEngine(method: string, params: object): Promise<unknown> {
   try {
     return await invoke("engine_request", { method, params });
-  } catch (e: any) {
-    const err = e as { message?: string; traceback?: string };
-    throw {
-      message: err?.message ?? String(err),
-      traceback: err?.traceback ?? "",
-    };
+  } catch (e) {
+    throw new EngineRpcError(e as { message?: string; traceback?: string });
   }
 }
 
@@ -34,8 +44,14 @@ export async function openPsd(path: string): Promise<OpenResult> {
 /**
  * Applies a preset to a PSD session.
  */
-export async function applyPreset(sessionId: number, preset: Preset): Promise<unknown> {
-  return callEngine("apply_preset", { sessionId, preset });
+export async function applyPreset(
+  sessionId: number,
+  preset: Preset
+): Promise<{ matchedLayerIds: number[]; operations: Operation[] }> {
+  return callEngine("apply_preset", { sessionId, preset }) as Promise<{
+    matchedLayerIds: number[];
+    operations: Operation[];
+  }>;
 }
 
 /**
@@ -45,15 +61,23 @@ export async function renderPreview(
   sessionId: number,
   visibleLayerIds: number[],
   maxSize: number
-): Promise<string> {
-  return callEngine("render_preview", { sessionId, visibleLayerIds, maxSize }) as Promise<string>;
+): Promise<{ pngPath: string }> {
+  return callEngine("render_preview", { sessionId, visibleLayerIds, maxSize }) as Promise<{
+    pngPath: string;
+  }>;
 }
 
 /**
  * Renders thumbnail images for layers.
  */
-export async function renderThumbnails(sessionId: number, layerIds: number[], size: number): Promise<unknown> {
-  return callEngine("render_thumbnails", { sessionId, layerIds, size });
+export async function renderThumbnails(
+  sessionId: number,
+  layerIds: number[],
+  maxSize: number
+): Promise<{ thumbs: Record<string, string> }> {
+  return callEngine("render_thumbnails", { sessionId, layerIds, maxSize }) as Promise<{
+    thumbs: Record<string, string>;
+  }>;
 }
 
 /**
@@ -61,10 +85,24 @@ export async function renderThumbnails(sessionId: number, layerIds: number[], si
  */
 export async function exportPsd(
   sessionId: number,
+  includedIds: number[],
   operations: Operation[],
-  outputPath: string
+  naming: "pathPrefix" | "original",
+  outputPath: string,
+  embedPreview: boolean = true,
+  overwrite: boolean = false,
+  verify: boolean = true
 ): Promise<ExportResult> {
-  return callEngine("export_psd", { sessionId, operations, outputPath }) as Promise<ExportResult>;
+  return callEngine("export_psd", {
+    sessionId,
+    includedIds,
+    operations,
+    naming,
+    outputPath,
+    embedPreview,
+    overwrite,
+    verify,
+  }) as Promise<ExportResult>;
 }
 
 /**
@@ -73,16 +111,19 @@ export async function exportPsd(
 export async function batchRun(
   paths: string[],
   preset: Preset,
-  outputDir: string
-): Promise<BatchItemResult[]> {
-  return callEngine("batch_run", { paths, preset, outputDir }) as Promise<BatchItemResult[]>;
+  outputDir: string | null,
+  overwrite: boolean
+): Promise<{ results: BatchItemResult[] }> {
+  return callEngine("batch_run", { paths, preset, outputDir, overwrite }) as Promise<{
+    results: BatchItemResult[];
+  }>;
 }
 
 /**
  * Closes a PSD session.
  */
 export async function closeSession(sessionId: number): Promise<void> {
-  return callEngine("close_session", { sessionId }) as Promise<void>;
+  return (await callEngine("close_session", { sessionId })) as void;
 }
 
 /**
