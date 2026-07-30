@@ -12,8 +12,16 @@ import type {
  * Core engine request wrapper. Calls the Tauri command `engine_request`
  * with the given method and parameters. Rejects with EngineError on failure.
  */
-export function callEngine(method: string, params: object): Promise<unknown> {
-  return invoke("engine_request", { method, params });
+export async function callEngine(method: string, params: object): Promise<unknown> {
+  try {
+    return await invoke("engine_request", { method, params });
+  } catch (e: any) {
+    const err = e as { message?: string; traceback?: string };
+    throw {
+      message: err?.message ?? String(err),
+      traceback: err?.traceback ?? "",
+    };
+  }
 }
 
 /**
