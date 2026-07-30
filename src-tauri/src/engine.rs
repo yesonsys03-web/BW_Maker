@@ -12,6 +12,10 @@ pub struct EngineState {
     proc: Mutex<Option<EngineProc>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
     next_id: AtomicU64,
+    /// 엔진 프로세스 세대 번호. spawn_engine 호출마다 증가한다. reader 스레드는
+    /// 시작 시점의 값을 캡처해두고, EOF를 감지했을 때 이 값과 비교해 자신이
+    /// 여전히 "현재" 프로세스를 담당하는지 판단한다 (restart_engine 레이스 가드).
+    epoch: Arc<AtomicU64>,
 }
 
 struct EngineProc {
@@ -25,6 +29,7 @@ impl Default for EngineState {
             proc: Mutex::new(None),
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
+            epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -46,6 +51,10 @@ pub fn spawn_engine(app: &AppHandle) -> Result<(), String> {
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
 
+    // 이 reader가 담당하는 세대를 기록한다. restart_engine이 그 사이 epoch를 다시
+    // 올렸다면(=이 reader는 이미 교체된 이전 세대) EOF 시점에 drain을 건너뛴다.
+    let my_epoch = state.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    let epoch = state.epoch.clone();
     let pending = state.pending.clone();
     let app_handle = app.clone();
     std::thread::spawn(move || {
@@ -64,12 +73,13 @@ pub fn spawn_engine(app: &AppHandle) -> Result<(), String> {
                 Routed::Skip => {}
             }
         }
-        // EOF: 프로세스 사망. 대기 중 요청 전부 실패 처리 후 알림.
-        let mut p = pending.lock().unwrap();
-        for (_, tx) in p.drain() {
-            let _ = tx.send(json!({"error": {"message": "engine process died", "traceback": ""}}));
+        // EOF: 이 reader가 담당하던 프로세스가 사망했다. 여전히 현재 세대라면 대기
+        // 중 요청 전부 실패 처리 후 알림. restart_engine이 이미 새 세대를 spawn해둔
+        // 상태(=이 reader는 stale)라면 새 프로세스의 pending을 건드리지 않는다.
+        if should_drain_on_eof(epoch.load(Ordering::SeqCst), my_epoch) {
+            fail_all_pending(&pending, "engine process died");
+            let _ = app_handle.emit("engine-dead", ());
         }
-        let _ = app_handle.emit("engine-dead", ());
     });
 
     *state.proc.lock().unwrap() = Some(EngineProc { child, stdin });
@@ -130,6 +140,10 @@ pub fn restart_engine(app: AppHandle, state: State<'_, EngineState>) -> Result<(
         let _ = p.child.kill();
         let _ = p.child.wait();
     }
+    // 이전 엔진에 대해 대기 중이던 요청을 즉시 실패 처리한다. 이렇게 하지 않으면
+    // 옛 reader 스레드의 EOF 감지(OS 타이밍 의존적) 또는 epoch 가드로 인한 drain
+    // 스킵 때문에 해당 oneshot들이 응답을 영영 못 받고 방치될 수 있다.
+    fail_all_pending(&state.pending, "engine restarted");
     spawn_engine(&app)
 }
 
@@ -150,9 +164,26 @@ pub fn route_line(line: &str) -> Routed {
     }
 }
 
+/// EOF를 감지한 reader 스레드가, 자신이 시작될 때 캡처해둔 세대(my_epoch)가
+/// EngineState의 현재 세대(current_epoch)와 여전히 같은지 판단한다. 다르다면
+/// restart_engine이 이미 새 프로세스를 spawn한 뒤라는 뜻이므로(이 reader는 stale)
+/// false를 반환해 새 프로세스의 pending을 drain하지 않도록 막는다.
+fn should_drain_on_eof(current_epoch: u64, my_epoch: u64) -> bool {
+    current_epoch == my_epoch
+}
+
+/// pending에 남아있는 모든 요청을 주어진 메시지로 즉시 실패 처리하고 비운다.
+fn fail_all_pending(pending: &Mutex<HashMap<u64, oneshot::Sender<Value>>>, message: &str) {
+    let mut p = pending.lock().unwrap();
+    for (_, tx) in p.drain() {
+        let _ = tx.send(json!({"error": {"message": message, "traceback": ""}}));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn routes_response_event_skip() {
         assert!(matches!(route_line(r#"{"id":3,"result":{}}"#), Routed::Response(3, _)));
@@ -160,5 +191,47 @@ mod tests {
         assert!(matches!(route_line(r#"{"id":null,"error":{"message":"x"}}"#), Routed::Event(_)));
         assert!(matches!(route_line(""), Routed::Skip));
         assert!(matches!(route_line("not json"), Routed::Skip));
+    }
+
+    #[test]
+    fn should_drain_on_eof_only_when_epoch_unchanged() {
+        // 정상 종료: restart 없이 죽었으므로 epoch가 그대로 — drain해야 함.
+        assert!(should_drain_on_eof(1, 1));
+        // restart_engine이 먼저 epoch를 올려버린 stale reader — drain하면 안 됨.
+        assert!(!should_drain_on_eof(2, 1));
+    }
+
+    #[test]
+    fn restart_race_does_not_leak_or_misfire_pending() {
+        // restart_engine 시나리오를 OS 타이밍 없이 시뮬레이션한다:
+        // 1) 옛 세대(epoch=1)에 대한 요청 하나가 pending에 걸려 있고,
+        // 2) restart_engine이 즉시 fail_all_pending으로 이를 실패시킨 뒤 epoch를 올리고,
+        // 3) 새 세대(epoch=2)에 대한 요청이 pending에 새로 걸린 상태에서,
+        // 4) 옛 reader의 EOF 핸들러가 뒤늦게 도착해도 새 pending을 건드리지 않아야 한다.
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let (old_tx, mut old_rx) = oneshot::channel();
+        pending.lock().unwrap().insert(1, old_tx);
+        let old_epoch = 1u64;
+
+        // restart_engine: 즉시 옛 pending 실패 처리 + epoch 증가.
+        fail_all_pending(&pending, "engine restarted");
+        let current_epoch = old_epoch + 1;
+
+        assert!(pending.lock().unwrap().is_empty());
+        let old_result = old_rx.try_recv().expect("old request should be resolved immediately");
+        assert_eq!(old_result["error"]["message"], "engine restarted");
+
+        // 새 세대의 요청이 도착.
+        let (new_tx, mut new_rx) = oneshot::channel();
+        pending.lock().unwrap().insert(2, new_tx);
+
+        // 옛 reader의 EOF 핸들러가 뒤늦게 도착: epoch가 이미 바뀌었으므로 drain 스킵.
+        assert!(!should_drain_on_eof(current_epoch, old_epoch));
+
+        // 새 세대의 pending은 그대로 살아있어야 한다.
+        assert_eq!(pending.lock().unwrap().len(), 1);
+        assert!(new_rx.try_recv().is_err(), "new request must still be awaiting its own response");
     }
 }
