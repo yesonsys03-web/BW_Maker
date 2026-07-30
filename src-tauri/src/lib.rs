@@ -23,7 +23,8 @@ pub fn run() {
             greet,
             engine::engine_request,
             engine::read_file_b64,
-            engine::restart_engine
+            engine::restart_engine,
+            engine::paths_exist
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

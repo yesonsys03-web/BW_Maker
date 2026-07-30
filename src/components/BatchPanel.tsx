@@ -1,8 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { exists } from "@tauri-apps/plugin-fs";
 import { findConflicts, planBatchOutputs } from "../lib/batch";
-import { batchRun, onEngineEvent } from "../lib/engine";
+import { batchRun, onEngineEvent, pathsExist } from "../lib/engine";
 import { loadPresets } from "../lib/presets";
 import { toEngineError } from "../lib/preview";
 import type { FileEntry } from "../state/appStore";
@@ -141,21 +140,29 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
 
   async function handleRunClick() {
     if (!selectedPreset || running) return;
-    const paths = files.filter((f) => selectedPaths.has(f.path)).map((f) => f.path);
-    if (paths.length === 0) return;
-    const dir = outputMode === "customDir" ? outputDir : null;
-    if (outputMode === "customDir" && !dir) {
-      onError("배치 실행 실패", { message: "출력 폴더를 선택하세요.", traceback: "" });
-      return;
-    }
+    try {
+      const paths = files.filter((f) => selectedPaths.has(f.path)).map((f) => f.path);
+      if (paths.length === 0) return;
+      const dir = outputMode === "customDir" ? outputDir : null;
+      if (outputMode === "customDir" && !dir) {
+        onError("배치 실행 실패", { message: "출력 폴더를 선택하세요.", traceback: "" });
+        return;
+      }
 
-    const planned = planBatchOutputs(paths, dir, selectedPreset.outputSuffix);
-    const conflicts = await findConflicts(planned, exists);
-    if (conflicts.length > 0) {
-      setPendingRun({ paths, preset: selectedPreset, outputDir: dir, conflicts });
-      return;
+      const planned = planBatchOutputs(paths, dir, selectedPreset.outputSuffix);
+      // paths_exist (not plugin-fs's exists) — batch outputs routinely land
+      // outside the AppData scope plugin-fs is capability-restricted to.
+      const flags = await pathsExist(planned.map((p) => p.outputPath));
+      const flagByPath = new Map(planned.map((p, i) => [p.outputPath, flags[i]]));
+      const conflicts = await findConflicts(planned, async (p) => flagByPath.get(p) ?? false);
+      if (conflicts.length > 0) {
+        setPendingRun({ paths, preset: selectedPreset, outputDir: dir, conflicts });
+        return;
+      }
+      await runBatch(paths, selectedPreset, dir, false);
+    } catch (e) {
+      onError("배치 실행 실패", toEngineError(e));
     }
-    await runBatch(paths, selectedPreset, dir, false);
   }
 
   function toggleExpanded(i: number) {

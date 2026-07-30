@@ -134,6 +134,18 @@ pub fn read_file_b64(path: String) -> Result<String, String> {
         .map_err(|e| format!("{path}: {e}"))
 }
 
+/// Filesystem existence check for arbitrary paths, bypassing plugin-fs's
+/// AppData-scoped capability. Batch export plans its output next to the
+/// source file or under a user-chosen directory — both routinely outside
+/// AppData — so plugin-fs's `exists` would reject them with PathForbidden.
+#[tauri::command]
+pub fn paths_exist(paths: Vec<String>) -> Vec<bool> {
+    paths
+        .iter()
+        .map(|p| std::path::Path::new(p).exists())
+        .collect()
+}
+
 #[tauri::command]
 pub fn restart_engine(app: AppHandle, state: State<'_, EngineState>) -> Result<(), String> {
     if let Some(mut p) = state.proc.lock().unwrap().take() {
@@ -233,5 +245,22 @@ mod tests {
         // 새 세대의 pending은 그대로 살아있어야 한다.
         assert_eq!(pending.lock().unwrap().len(), 1);
         assert!(new_rx.try_recv().is_err(), "new request must still be awaiting its own response");
+    }
+
+    #[test]
+    fn paths_exist_reports_existing_and_missing_paths() {
+        let tmp = std::env::temp_dir().join(format!("psd_line_export_paths_exist_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let existing = tmp.join("exists.txt");
+        std::fs::write(&existing, b"x").unwrap();
+        let missing = tmp.join("missing.txt");
+
+        let result = paths_exist(vec![
+            existing.to_string_lossy().to_string(),
+            missing.to_string_lossy().to_string(),
+        ]);
+
+        assert_eq!(result, vec![true, false]);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

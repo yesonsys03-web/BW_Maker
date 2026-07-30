@@ -135,6 +135,17 @@ export async function loadPngDataUrl(path: string): Promise<string> {
 }
 
 /**
+ * Checks filesystem existence for a batch of paths via the Rust `paths_exist`
+ * command. plugin-fs's `exists` is scoped to AppData and rejects with
+ * PathForbidden for arbitrary user-chosen paths (e.g. batch export outputs
+ * next to the source file), so this bypasses that capability restriction
+ * instead of widening it.
+ */
+export async function pathsExist(paths: string[]): Promise<boolean[]> {
+  return invoke("paths_exist", { paths });
+}
+
+/**
  * Subscribes to engine events (progress, etc.). Returns unsubscribe function.
  */
 export async function onEngineEvent(cb: (data: unknown) => void): Promise<() => void> {
