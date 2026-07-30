@@ -1,5 +1,7 @@
 """줄 단위 JSON-RPC 루프. 모든 예외는 traceback과 함께 반환(흡수 금지)."""
+import atexit
 import json
+import shutil
 import sys
 import tempfile
 import traceback
@@ -19,10 +21,16 @@ def _emit(obj, out):
 
 
 class Engine:
+    _ALLOWED_METHODS = {
+        "open_psd", "close_session", "render_thumbnails",
+        "render_preview", "apply_preset", "export_psd",
+    }
+
     def __init__(self, out=None):
         self.store = SessionStore()
         self.out = out or sys.stdout
         self.tmp = Path(tempfile.mkdtemp(prefix="psd_engine_"))
+        atexit.register(shutil.rmtree, self.tmp, ignore_errors=True)
 
     # ---- RPC methods ----
     def open_psd(self, path):
@@ -82,9 +90,9 @@ class Engine:
     # ---- dispatch ----
     def handle(self, request):
         method_name = request.get("method", "")
-        method = getattr(self, method_name, None)
-        if method is None or method_name.startswith("_") or method_name in ("handle",):
+        if method_name not in self._ALLOWED_METHODS:
             raise ValueError(f"unknown method: {method_name!r}")
+        method = getattr(self, method_name)
         return method(**request.get("params", {}))
 
 
@@ -98,7 +106,13 @@ def main(stdin=None, stdout=None):
         line = line.strip()
         if not line:
             continue
-        request = json.loads(line)
+        try:
+            request = json.loads(line)
+        except Exception as e:  # noqa: BLE001 — traceback 그대로 노출이 정책
+            _emit({"id": None,
+                   "error": {"message": str(e),
+                             "traceback": traceback.format_exc()}}, stdout)
+            continue
         try:
             _emit({"id": request.get("id"), "result": engine.handle(request)}, stdout)
         except Exception as e:  # noqa: BLE001 — traceback 그대로 노출이 정책
