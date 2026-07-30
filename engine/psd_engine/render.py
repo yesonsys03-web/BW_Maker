@@ -48,10 +48,29 @@ def _save_png(img, out_dir, stem):
 
 
 def render_thumbnails(session, layer_ids, max_size, out_dir):
+    psd = session["psd"]
     result = {}
     for lid in layer_ids:
         layer = session["layers_by_id"][lid]
-        img = layer.composite() if layer.is_group() else Image.fromarray(extract_rgba(layer))
+        if layer.is_group():
+            # For groups: include group + all descendants + all ancestors
+            wanted = set()
+            # Add group and all ancestors
+            cur = layer
+            while cur is not psd:
+                wanted.add(id(cur))
+                cur = cur.parent
+            # Add all descendants
+            for desc in layer.descendants():
+                wanted.add(id(desc))
+            img = layer.composite(
+                force=True,
+                color=1.0,
+                alpha=0.0,
+                layer_filter=lambda l: id(l) in wanted,
+            )
+        else:
+            img = Image.fromarray(extract_rgba(layer))
         img = img.convert("RGBA")
         img.thumbnail((max_size, max_size))
         result[str(lid)] = _save_png(img, out_dir, f"thumb_{lid}")

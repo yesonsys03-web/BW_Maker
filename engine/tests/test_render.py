@@ -47,3 +47,29 @@ def test_render_thumbnails_and_preview(fixture_psd, tmp_path):
     preview = render_preview(s, [2, 5], max_size=32, out_dir=tmp_path)
     im = Image.open(preview)
     assert max(im.size) <= 32
+
+
+def test_render_thumbnails_group_not_empty(fixture_psd, tmp_path):
+    # Group thumbnails should not be transparent (have alpha>0 pixels)
+    s = _session(fixture_psd)
+    # BG group (id 1) contains fill layer (128, full canvas)
+    thumbs = render_thumbnails(s, [1], max_size=16, out_dir=tmp_path)
+    from PIL import Image
+    im = Image.open(thumbs["1"])
+    arr = np.array(im)
+    # Should have pixels with alpha > 0
+    assert (arr[..., 3] > 0).any()
+
+
+def test_render_thumbnails_hidden_group(fixture_psd, tmp_path):
+    # Hidden groups should still render their content when explicitly requested
+    s = _session(fixture_psd)
+    # BG group (id 1) - make it hidden then render
+    layer_bg = s["layers_by_id"][1]
+    layer_bg.visible = False
+    thumbs = render_thumbnails(s, [1], max_size=16, out_dir=tmp_path)
+    from PIL import Image
+    im = Image.open(thumbs["1"])
+    arr = np.array(im)
+    # Should still have pixels with alpha > 0 despite being hidden
+    assert (arr[..., 3] > 0).any()
