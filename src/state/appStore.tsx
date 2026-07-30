@@ -377,7 +377,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (path: string) => {
       const file = state.files.find((f) => f.path === path);
       if (!file || file.status === "processing") return;
-      if (file.status === "idle") {
+      // "error" reopens too: a failed open previously became permanently
+      // active with no tree and no way to retry (only "idle" retried).
+      if (file.status === "idle" || file.status === "error") {
         void openFileEffect(dispatch, path);
       } else {
         dispatch({ type: "selectFile", path });

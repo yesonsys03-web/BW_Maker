@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import { loadPngDataUrl, renderPreview } from "../lib/engine";
 import { nextScale, toEngineError, visibleIdsForPreview } from "../lib/preview";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
+import type { FileStatus } from "../state/appStore";
 import type { EngineError, OpenResult, TreeNode } from "../lib/types";
 
 interface PreviewCanvasProps {
   sessionId: number | undefined;
   path: string | undefined;
+  status: FileStatus | undefined;
   tree: TreeNode[] | undefined;
   includedIds: number[];
   previewHiddenIds: number[];
@@ -28,6 +30,7 @@ const PREVIEW_MAX_SIZE = 1500;
 export function PreviewCanvas({
   sessionId,
   path,
+  status,
   tree,
   includedIds,
   previewHiddenIds,
@@ -42,23 +45,46 @@ export function PreviewCanvas({
   const requestIdRef = useRef(0);
   const draggingRef = useRef<{ x: number; y: number } | null>(null);
   const wheelCleanupRef = useRef<(() => void) | null>(null);
+  // Latest sessionId, read at debounce-timer-fire time rather than captured
+  // at effect-setup time — see the render effect below for why.
+  const sessionIdRef = useRef(sessionId);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   const visibleIds = useMemo(
     () => (tree ? visibleIdsForPreview(tree, includedIds, previewHiddenIds) : []),
     [tree, includedIds, previewHiddenIds]
   );
 
-  // Switching files invalidates anything in flight/shown and resets the view.
+  // Switching files (a new `path`) invalidates anything in flight/shown and
+  // resets the view. Keyed on `path`, not `sessionId`: a transparent
+  // session-refresh reopen (LRU eviction, see sessionRetry.ts) changes
+  // sessionId for the *same* file and must NOT reset zoom/pan, nor bump
+  // requestIdRef and invalidate its own in-flight retry (which would discard
+  // the reopened render and cause a duplicate render_preview call).
   useEffect(() => {
     requestIdRef.current += 1;
     setImgSrc(null);
     setLoading(false);
     setScale(1);
     setOffset({ x: 0, y: 0 });
-  }, [sessionId]);
+  }, [path]);
 
+  // `sessionId` is deliberately NOT a dependency here (read via sessionIdRef
+  // inside the timer instead). withEvictedSessionRetry's reopen already gets
+  // a fresh sessionId directly from its own openPsd call and retries with it
+  // — it doesn't need this effect to re-run to pick that up. If sessionId
+  // *were* a dependency, a mid-flight session refresh would (a) not change
+  // path/tree/visibleIds's content, yet (b) still change tree's array
+  // identity, re-triggering this effect and scheduling a second, fully
+  // redundant render_preview call ~400ms after the retry's own successful
+  // one — a real duplicate composite render on a large file, even without
+  // the view-reset bug above. Reading the ref at fire time instead keeps the
+  // effect reactive to genuine visibility/file changes only.
   useEffect(() => {
-    if (!sessionId || !path) return;
+    if (!path) return;
     if (visibleIds.length === 0) {
       requestIdRef.current += 1; // invalidate any in-flight render from a prior toggle
       setImgSrc(null);
@@ -67,14 +93,16 @@ export function PreviewCanvas({
     }
 
     const timer = window.setTimeout(() => {
+      const sid = sessionIdRef.current;
+      if (!sid) return;
       const requestId = ++requestIdRef.current;
       setLoading(true);
       void (async () => {
         try {
           const { pngPath } = await withEvictedSessionRetry(
             path,
-            sessionId,
-            (sid) => renderPreview(sid, visibleIds, PREVIEW_MAX_SIZE),
+            sid,
+            (s) => renderPreview(s, visibleIds, PREVIEW_MAX_SIZE),
             (result) => onSessionRefreshed(path, result)
           );
           const dataUrl = await loadPngDataUrl(pngPath);
@@ -90,7 +118,7 @@ export function PreviewCanvas({
     }, DEBOUNCE_MS);
 
     return () => window.clearTimeout(timer);
-  }, [sessionId, path, visibleIds, onSessionRefreshed, onError]);
+  }, [path, visibleIds, onSessionRefreshed, onError]);
 
   // Callback ref (not a plain ref + mount-only effect): the viewport div only
   // exists once sessionId/visibleIds make this component render past the
@@ -129,6 +157,10 @@ export function PreviewCanvas({
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
+  }
+
+  if (status === "processing") {
+    return <div className="preview-canvas preview-empty">여는 중...</div>;
   }
 
   if (!sessionId) {

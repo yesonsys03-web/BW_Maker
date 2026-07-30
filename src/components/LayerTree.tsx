@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { OpsState } from "../lib/opsReducer";
 import type { Operation, TreeNode } from "../lib/types";
+import type { FileStatus } from "../state/appStore";
 
 interface LayerTreeProps {
   tree: TreeNode[] | undefined;
+  path: string | undefined;
+  status: FileStatus | undefined;
   ops: OpsState;
   matchedIds: number[];
   thumbs: Record<number, string>;
@@ -66,6 +69,8 @@ function nodeById(nodes: TreeNode[], id: number): TreeNode | undefined {
  */
 export function LayerTree({
   tree,
+  path,
+  status,
   ops,
   matchedIds,
   thumbs,
@@ -92,15 +97,18 @@ export function LayerTree({
   );
 
   // Layer ids are only unique within a single session, so switching the
-  // active file (a new `tree` reference) must drop any selection/collapse/
-  // menu state left over from the previous file's tree.
+  // active file (a new `path`) must drop any selection/collapse/menu state
+  // left over from the previous file's tree. Keyed on `path`, not `tree`: a
+  // transparent session-refresh reopen (LRU eviction, see sessionRetry.ts)
+  // produces a new `tree` reference for the *same* file and must not silently
+  // collapse every expanded group / clear the artist's selection.
   useEffect(() => {
     setCollapsedIds(new Set());
     setSelectedIds(new Set());
     setLastClickedId(null);
     setContextMenu(null);
     setModal(null);
-  }, [tree]);
+  }, [path]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -117,6 +125,10 @@ export function LayerTree({
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [contextMenu]);
+
+  if (status === "processing") {
+    return <div className="layer-tree layer-tree-empty">여는 중...</div>;
+  }
 
   if (!tree) {
     return <div className="layer-tree layer-tree-empty">레이어 트리가 없습니다. 왼쪽에서 파일을 선택하세요.</div>;

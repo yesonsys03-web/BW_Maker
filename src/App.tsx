@@ -46,6 +46,13 @@ function AppShell() {
   const [exportOpen, setExportOpen] = useState(false);
   const [selectedPreset, setSelectedPreset] = useState<Preset | undefined>(undefined);
 
+  // Clear a stale open dialog if its file disappears from under it (e.g. an
+  // engine restart resets activePath to null) — otherwise it would spring
+  // back open unprompted the next time any file is selected.
+  useEffect(() => {
+    if (!activeFile) setExportOpen(false);
+  }, [activeFile]);
+
   // Background, one-shot thumbnail render per opened file. A failure lands on
   // the error stack and leaves that file's rows showing names only.
   useEffect(() => {
@@ -132,6 +139,7 @@ function AppShell() {
         <PreviewCanvas
           sessionId={activeFile?.sessionId}
           path={activeFile?.path}
+          status={activeFile?.status}
           tree={activeFile?.tree}
           includedIds={ops.includedIds}
           previewHiddenIds={ops.previewHiddenIds}
@@ -143,6 +151,8 @@ function AppShell() {
       <div className="layer-tree-panel">
         <LayerTree
           tree={activeFile?.tree}
+          path={activeFile?.path}
+          status={activeFile?.status}
           ops={ops}
           matchedIds={state.matchedIds}
           thumbs={(state.activePath && thumbsByPath[state.activePath]) || {}}
