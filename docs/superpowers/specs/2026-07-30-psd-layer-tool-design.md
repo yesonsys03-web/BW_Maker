@@ -87,7 +87,7 @@ UI의 모든 편집은 원본을 건드리지 않고 작업 목록으로 쌓인�
 {"op": "rename",   "layerId": 5, "name": "BG_line"}
 {"op": "merge",    "layerIds": [2, 4, 6], "name": "merged_line"}  // 쌓임 순서대로 합성
 {"op": "flatten",  "name": "flattened"}                 // 포함된 전체를 한 장으로
-{"op": "reorder",  "layerId": 5, "beforeId": 2}
+{"op": "reorder",  "layerId": 5, "aboveId": 2}          // 5를 2 바로 위로; aboveId null = 맨 아래로
 ```
 
 - **merge 의미론**: 선택 레이어들을 원본 쌓임 순서·블렌드모드·불투명도로 psd-tools가 합성해
@@ -107,7 +107,7 @@ UI의 모든 편집은 원본을 건드리지 않고 작업 목록으로 쌓인�
   // type: "contains" | "regex"
   "excludeGroupPrefixes": ["-"],
   "matchGroups": true,          // 매치된 그룹의 하위 픽셀 레이어 포함
-  "merge": "none",              // "none" | "all" | "perTopGroup"
+  "merge": "none",              // "none" | "all"(전부 한 장) | "perGroup"(같은 부모 그룹의 매치 레이어끼리)
   "naming": "pathPrefix",       // "pathPrefix" | "original"
   "outputSuffix": "_LINE",
   "includeHidden": true,        // 원본에서 숨김 상태여도 매치되면 포함, 내보내기 시 visible 처리
