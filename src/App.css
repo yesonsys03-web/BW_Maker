@@ -1289,3 +1289,14 @@ input[type="text"] {
 .tree-row-merged .node-name {
   color: #f2c94c;
 }
+
+/* 병합 행을 펼쳤을 때 딸려 나오는 원본 소스 행. 병합 결과와 헷갈리지 않게
+   들여쓰고 흐리게 둔다 — 비교용으로 보는 것이지 결과물이 아니다. */
+.tree-row-merge-source {
+  opacity: 0.72;
+  box-shadow: inset 2px 0 0 var(--border);
+}
+
+.tree-row-merge-source .node-name {
+  font-size: 0.92em;
+}

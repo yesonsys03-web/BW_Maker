@@ -111,6 +111,9 @@ export function LayerTree({
   const [filterMode, setFilterMode] = useState<LayerFilterMode>("all");
   const [query, setQuery] = useState("");
   const [autoMerging, setAutoMerging] = useState(false);
+  // 펼쳐둔 병합 행(entryId). 병합하고 나면 원본이 화면에서 사라져 무엇이
+  // 들어갔는지 확인할 수 없으므로, 접힌 채로 두되 열어볼 수 있게 한다.
+  const [expandedMerges, setExpandedMerges] = useState<Set<number>>(new Set());
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
@@ -163,11 +166,17 @@ export function LayerTree({
   const visibleOrder = useMemo(
     () =>
       filtering
-        ? flatRows.map((r) => (r.kind === "merged" ? r.entryId : r.leaf.node.id))
+        ? flatRows.flatMap((r) =>
+            r.kind === "merged"
+              ? expandedMerges.has(r.entryId)
+                ? [r.entryId, ...r.leaves.map((l) => l.node.id)]
+                : [r.entryId]
+              : [r.leaf.node.id]
+          )
         : tree
           ? collectVisibleLeafOrder(tree, collapsedIds)
           : [],
-    [filtering, flatRows, tree, collapsedIds]
+    [filtering, flatRows, expandedMerges, tree, collapsedIds]
   );
 
   // Layer ids are only unique within a single session, so switching the
@@ -184,6 +193,7 @@ export function LayerTree({
     setModal(null);
     setFilterMode("all");
     setQuery("");
+    setExpandedMerges(new Set());
   }, [path]);
 
   useEffect(() => {
@@ -378,7 +388,7 @@ export function LayerTree({
    * 토글·선택·우클릭 메뉴 동작이 두 보기에서 완전히 동일하다. `breadcrumb`이
    * 주어지면 평면 목록 모드로, 이름 아래에 조상 경로를 함께 그린다.
    */
-  function renderLeaf(node: TreeNode, opts: { indentPx: number; breadcrumb?: string }) {
+  function renderLeaf(node: TreeNode, opts: { indentPx: number; breadcrumb?: string; nested?: boolean }) {
     const isMatched = matchedSet.has(node.id);
     const included = includedSet.has(node.id);
     const hidden = previewHiddenSet.has(node.id);
@@ -390,14 +400,14 @@ export function LayerTree({
     return (
       <div
         key={node.id}
-        className={`tree-row tree-row-leaf${flat ? " tree-row-flat" : ""}${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
+        className={`tree-row tree-row-leaf${flat ? " tree-row-flat" : ""}${opts.nested ? " tree-row-merge-source" : ""}${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
         style={{ paddingLeft: `${opts.indentPx}px` }}
         role={flat ? "listitem" : "treeitem"}
         aria-selected={selected}
         onClick={(e) => handleRowClick(node.id, e)}
         onContextMenu={(e) => handleContextMenu(node.id, e)}
       >
-        {!flat && <span className="fold-toggle-slot" />}
+        <span className="fold-toggle-slot" />
         <input
           type="checkbox"
           className="include-checkbox"
@@ -462,6 +472,7 @@ export function LayerTree({
     const allIncluded = sourceIds.length > 0 && sourceIds.every((id) => includedSet.has(id));
     const someIncluded = sourceIds.some((id) => includedSet.has(id));
     const hidden = sourceIds.length > 0 && sourceIds.every((id) => previewHiddenSet.has(id));
+    const expanded = expandedMerges.has(row.entryId);
     const sourceNames = row.leaves.map((l) => l.node.name).join(" + ");
     const fullPaths = row.leaves.map((l) => (l.breadcrumb ? `${l.breadcrumb} / ${l.node.name}` : l.node.name));
 
@@ -475,6 +486,23 @@ export function LayerTree({
         onClick={(e) => handleRowClick(row.entryId, e)}
         onContextMenu={(e) => handleContextMenu(row.entryId, e)}
       >
+        <button
+          type="button"
+          className="fold-toggle"
+          aria-expanded={expanded}
+          title={expanded ? "합쳐진 원본 레이어 접기" : "합쳐진 원본 레이어 펼치기"}
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpandedMerges((prev) => {
+              const next = new Set(prev);
+              if (next.has(row.entryId)) next.delete(row.entryId);
+              else next.add(row.entryId);
+              return next;
+            });
+          }}
+        >
+          {expanded ? "▼" : "▶"}
+        </button>
         <input
           type="checkbox"
           className="include-checkbox"
@@ -580,9 +608,17 @@ export function LayerTree({
             <p className="layer-filter-empty">조건에 맞는 레이어가 없습니다.</p>
           ) : (
             flatRows.map((row) =>
-              row.kind === "merged"
-                ? renderMergedRow(row)
-                : renderLeaf(row.leaf.node, { indentPx: 8, breadcrumb: row.leaf.breadcrumb })
+              row.kind === "merged" ? (
+                <div key={`merged-${row.entryId}`}>
+                  {renderMergedRow(row)}
+                  {expandedMerges.has(row.entryId) &&
+                    row.leaves.map((l) =>
+                      renderLeaf(l.node, { indentPx: 30, breadcrumb: l.breadcrumb, nested: true })
+                    )}
+                </div>
+              ) : (
+                renderLeaf(row.leaf.node, { indentPx: 8, breadcrumb: row.leaf.breadcrumb })
+              )
             )
           )}
         </div>
