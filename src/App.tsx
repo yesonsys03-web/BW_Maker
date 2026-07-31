@@ -17,6 +17,7 @@ import {
   clampTreePanelWidth,
   parseTreePanelWidth,
 } from "./lib/layout";
+import { DEFAULT_ROLE_TOKENS } from "./lib/presets";
 import { pixelLeafIds, toEngineError } from "./lib/preview";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
 import type { Preset } from "./lib/types";
@@ -239,6 +240,8 @@ function AppShell() {
           title="드래그해서 폭 조절 (더블클릭: 기본값)"
         />
         <LayerTree
+          sessionId={activeFile?.sessionId}
+          roleTokens={selectedPreset?.roleTokens ?? DEFAULT_ROLE_TOKENS}
           tree={activeFile?.tree}
           path={activeFile?.path}
           status={activeFile?.status}
@@ -249,6 +252,7 @@ function AppShell() {
           onTogglePreview={togglePreview}
           onSetPreviewHidden={setPreviewHidden}
           onPushOp={pushOp}
+          onError={pushError}
         />
       </div>
 

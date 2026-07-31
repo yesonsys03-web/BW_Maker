@@ -34,7 +34,7 @@ async function presetsFilePath(): Promise<string> {
 }
 
 const INCLUDE_TYPES = new Set(["contains", "regex"]);
-const MERGE_MODES = new Set(["none", "all", "perGroup", "byRole"]);
+const MERGE_MODES = new Set(["none", "all", "perGroup", "byElement"]);
 
 /** byRole 병합의 기본 역할 토큰(아래→위 순서). 엔진 DEFAULT_ROLE_TOKENS와 같다. */
 export const DEFAULT_ROLE_TOKENS = ["UL", "OL_UL", "OL"];
@@ -73,6 +73,9 @@ function validatePreset(value: unknown, index: number): Preset {
   }
   if (typeof v.matchGroups !== "boolean") throw new Error(`${prefix}.matchGroups: boolean이 아닙니다.`);
   if (typeof v.includeHidden !== "boolean") throw new Error(`${prefix}.includeHidden: boolean이 아닙니다.`);
+  // byRole은 요소별 병합으로 대체되기 전 잠깐 존재했던 이름이다. 그 사이에
+  // 저장된 프리셋이 로드에서 튕기지 않도록 새 이름으로 읽어준다.
+  if (v.merge === "byRole") v.merge = "byElement";
   if (typeof v.merge !== "string" || !MERGE_MODES.has(v.merge)) {
     throw new Error(`${prefix}.merge: "none"/"all"/"perGroup" 중 하나가 아닙니다.`);
   }

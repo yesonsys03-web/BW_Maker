@@ -223,10 +223,20 @@ test("loadPresets rejects role tokens that are not a string array", async () => 
   await expect(loadPresets()).rejects.toThrow(/roleTokens/);
 });
 
-test("loadPresets accepts the byRole merge mode", async () => {
+test("loadPresets accepts the byElement merge mode", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, merge: "byElement" }]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.merge).toBe("byElement");
+});
+
+test("loadPresets migrates the short-lived byRole mode to byElement", async () => {
+  // byRole은 요소별 병합으로 대체되기 전 잠깐 존재했다. 그 사이에 저장된
+  // 프리셋이 로드에서 튕기면 사용자는 이유도 모른 채 프리셋을 잃는다.
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, merge: "byRole" }]));
 
   const [loaded] = await loadPresets();
-  expect(loaded.merge).toBe("byRole");
+  expect(loaded.merge).toBe("byElement");
 });

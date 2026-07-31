@@ -175,3 +175,46 @@ export function collapseMergedRows(leaves: FlatLeaf[], entries: Entry[]): FlatRo
 
   return out;
 }
+
+/**
+ * 수동 병합 다이얼로그가 미리 채워둘 이름.
+ *
+ * 라인 레이어는 하나같이 "LINE"이라 이름만으로는 단서가 없다. 실제 단서는 요소
+ * 그룹 이름(`CHAIR1_UL`, `CHAIR1_OL`)이므로 거기서 역할 접미사를 떼어내 공통
+ * 이름을 찾는다. 전부 같은 요소면 그 이름을, 아니면 공통 접두사를 제안한다.
+ * 어디까지나 제안이라 사용자가 고쳐 쓸 수 있다 — 못 찾으면 빈칸으로 둔다.
+ */
+export function suggestMergeName(leaves: FlatLeaf[], roleTokens: string[]): string {
+  const bases = leaves.map((l) => elementNameOf(l, roleTokens)).filter((n) => n.length > 0);
+  if (bases.length === 0) return "";
+  if (bases.every((b) => b === bases[0])) return bases[0];
+
+  let prefix = bases[0];
+  for (const base of bases.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < base.length && prefix[i].toUpperCase() === base[i].toUpperCase()) i++;
+    prefix = prefix.slice(0, i);
+    if (prefix.length === 0) return "";
+  }
+  // 접두사가 이름 중간에서 잘리면(CHAIR1/CHAIR2 → "CHAIR") 그대로 쓰되,
+  // 구분자로 끝나면 다듬는다.
+  return prefix.replace(/[_\-\s]+$/, "");
+}
+
+/** 레이어가 속한 요소 이름. 엔진 element_of와 같은 규칙(제안용 근사). */
+function elementNameOf(leaf: FlatLeaf, roleTokens: string[]): string {
+  const tokens = [...roleTokens].filter((t) => t.trim().length > 0).sort((a, b) => b.length - a.length);
+  const names = [...leaf.node.path].reverse();
+  for (const raw of names) {
+    const name = raw.trim();
+    const upper = name.toUpperCase();
+    for (const token of tokens) {
+      const t = token.trim().toUpperCase();
+      if (upper === t) return name;
+      if (["_", "-", " "].some((sep) => upper.endsWith(sep + t))) {
+        return name.slice(0, name.length - t.length).replace(/[_\-\s]+$/, "") || name;
+      }
+    }
+  }
+  return "";
+}

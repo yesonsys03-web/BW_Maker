@@ -9,7 +9,7 @@ from collections import deque
 from pathlib import Path
 
 from .export import export_psd as _export
-from .matching import match_preset, preset_operations
+from .matching import auto_merge_operations, match_preset, preset_operations
 from .ops import build_export_plan, finalize_names
 from .render import render_document_preview, render_preview, render_thumbnails
 from .session import SessionStore
@@ -38,7 +38,7 @@ class Engine:
     _ALLOWED_METHODS = {
         "open_psd", "close_session", "render_thumbnails",
         "render_preview", "render_document_preview",
-        "apply_preset", "export_psd", "batch_run",
+        "apply_preset", "auto_merge_operations", "export_psd", "batch_run",
     }
 
     def __init__(self, out=None):
@@ -86,6 +86,11 @@ class Engine:
         out_dir = self._fresh_render_dir("preview")
         return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
                                           line_color=lineColor)}
+
+    def auto_merge_operations(self, sessionId, layerIds, roleTokens=None):
+        """레이어 패널의 '요소별 병합' 버튼용. 프리셋 경로와 같은 함수를 쓴다."""
+        s = self.store.get(sessionId)
+        return {"operations": auto_merge_operations(s["tree"], layerIds, roleTokens)}
 
     def render_document_preview(self, sessionId, maxSize=1500):
         s = self.store.get(sessionId)

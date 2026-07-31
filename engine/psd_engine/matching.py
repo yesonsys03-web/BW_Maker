@@ -43,8 +43,8 @@ def match_preset(tree, preset):
     return matched
 
 
-#: 역할 토큰의 기본값. 목록 순서가 곧 쌓는 순서다(아래→위). BG는 토큰이 아니라
-#: "아무 역할도 못 찾은 나머지"이며 항상 맨 아래에 깔린다.
+#: 역할 접미사의 기본값. 요소 이름에서 이 접미사를 떼어내 "같은 요소"를 알아낸다
+#: (CHAIR1_UL, CHAIR1_OL → CHAIR1). 어디에도 걸리지 않는 레이어는 BG로 묶인다.
 DEFAULT_ROLE_TOKENS = ["UL", "OL_UL", "OL"]
 
 #: 그룹 이름과 역할 토큰 사이에 쓰이는 구분자. `CHAIR2_UL`, `CHAIR2-UL`, `CHAIR2 UL`.
@@ -71,15 +71,21 @@ def _match_role(name, tokens_longest_first):
     return None
 
 
-def _role_of(path, tokens_longest_first):
+def element_of(path, tokens_longest_first):
     """
-    레이어의 역할. 자기 이름부터 가까운 조상 그룹 순으로 올라가며 처음 만나는
-    토큰을 쓴다(`*ART / CHAIR2_UL / LINE` → UL). 못 찾으면 None = BG.
+    레이어가 속한 "요소" 이름. 자기 이름부터 가까운 조상 그룹 순으로 올라가며
+    역할 접미사가 붙은 첫 이름을 찾아 그 접미사를 떼어낸다
+    (`*ART / CHAIR1_UL / LINE` → `CHAIR1`). 못 찾으면 None = BG.
+
+    같은 요소의 UL/OL이 한 이름으로 모이게 하는 것이 목적이다.
     """
     for name in reversed(path):
         role = _match_role(name, tokens_longest_first)
-        if role is not None:
-            return role
+        if role is None:
+            continue
+        stripped = name.strip()
+        base = stripped[: len(stripped) - len(role)]
+        return base.rstrip("".join(_ROLE_SEPARATORS)) or stripped
     return None
 
 
@@ -110,46 +116,51 @@ def preset_operations(tree, matched_ids, preset, source_stem=None):
             for name, ids in groups.values()
             if len(ids) >= 2
         ]
-    if mode == "byRole":
-        return _by_role_operations(tree, matched_ids, preset, source_stem)
+    if mode == "byElement":
+        return auto_merge_operations(tree, matched_ids, preset.get("roleTokens"))
     raise ValueError(f"unknown merge mode: {mode!r}")
 
 
-def _by_role_operations(tree, matched_ids, preset, source_stem):
+def auto_merge_operations(tree, matched_ids, role_tokens=None):
     """
-    애니메이션 BG의 역할(BG / UL / OL / OL_UL …)별로 한 장씩 병합한다.
+    같은 요소의 라인들을 한 장으로 묶는 연산 목록.
 
-    소스에서는 CHAIR2_UL, CHAIR2_OL, TABLE 같은 요소들이 서로 뒤섞여 쌓여 있어서
-    (실제 파일에서 BG 요소가 OL 요소보다 위에 오기도 한다) 문서 순서를 그대로
-    쓰면 원하는 스택이 나오지 않는다. 그래서 병합한 뒤 reorder로 순서를 못박는다:
-    맨 아래 BG, 그 위로 preset의 roleTokens 순서.
+    `CHAIR1_UL / LINE`과 `CHAIR1_OL / LINE`은 한 요소(CHAIR1)의 앞뒤 파트이므로
+    `CHAIR1` 한 장이 된다. 역할 접미사가 없는 레이어는 전부 `BG` 한 장으로.
+
+    소스에서는 요소들이 뒤섞여 쌓여 있고 BG 요소(TABLE, LAMP)가 OL 요소보다 위에
+    오기도 한다. 문서 순서를 그대로 쓰면 BG가 위로 올라가므로, 병합 뒤 reorder로
+    "맨 아래 BG, 그 위에 요소들(문서 순서)"을 못박는다.
+
+    레이어 패널의 버튼과 프리셋의 요소별 병합이 같은 함수를 쓴다 — 규칙이 두
+    군데로 갈라지면 화면과 배치 실행 결과가 달라진다.
     """
-    tokens = [t for t in (preset.get("roleTokens") or DEFAULT_ROLE_TOKENS) if t and t.strip()]
+    tokens = [t for t in (role_tokens or DEFAULT_ROLE_TOKENS) if t and t.strip()]
     longest_first = sorted(tokens, key=len, reverse=True)
 
     matched_set = set(matched_ids)
-    buckets = {token: [] for token in tokens}
     background = []
+    elements = {}          # 요소 이름 -> [leaf id] (문서 순서, 등장 순 유지)
 
     def walk(nodes):
         for node in nodes:
             if node["kind"] == "group":
                 walk(node["children"])
             elif node["id"] in matched_set:
-                role = _role_of(node["path"], longest_first)
-                (buckets[role] if role is not None else background).append(node["id"])
+                name = element_of(node["path"], longest_first)
+                if name is None:
+                    background.append(node["id"])
+                else:
+                    elements.setdefault(name, []).append(node["id"])
 
     walk(tree)
 
-    def final_name(role):
-        return f"{source_stem}_{role}" if source_stem else role
-
     operations = []
     merged_ids = []
-    for role, layer_ids in [("BG", background)] + [(t, buckets[t]) for t in tokens]:
+    for name, layer_ids in [("BG", background)] + list(elements.items()):
         if not layer_ids:
             continue
-        operations.append({"op": "merge", "layerIds": layer_ids, "name": final_name(role)})
+        operations.append({"op": "merge", "layerIds": layer_ids, "name": name})
         # 병합 항목 id는 merge 연산 순서대로 -1, -2, ... 로 붙는다
         # (build_export_plan / buildEntries 양쪽 동일).
         merged_ids.append(-len(merged_ids) - 1)

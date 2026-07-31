@@ -1,7 +1,7 @@
 import pytest
 from psd_tools import PSDImage
 
-from psd_engine.matching import match_preset, preset_operations
+from psd_engine.matching import auto_merge_operations, match_preset, preset_operations
 from psd_engine.tree import build_tree
 
 
@@ -110,7 +110,7 @@ def test_unknown_merge_mode_raises_valueerror():
         preset_operations(tree, ids, p)
 
 
-# ---- byRole: 애니메이션 BG 역할별 자동 병합 ----
+# ---- byElement: 요소별 자동 병합 ----
 
 def _leaf(i, name, path):
     return {"id": i, "name": name, "kind": "pixel", "path": path + [name]}
@@ -121,8 +121,8 @@ def _group(i, name, path, children):
             "children": children}
 
 
-# 실제 소스의 형태: 요소 그룹 이름 접미사가 역할을 나타내고, 접미사가 없으면 BG.
-# 문서 순서상 BG 요소(TABLE)가 OL 요소보다 위에 오는 것도 실제 파일 그대로다.
+# 실제 소스의 형태: 요소 그룹 이름 접미사가 역할(UL/OL)을 나타내고, 접미사가
+# 없으면 BG. 문서 순서상 BG 요소(TABLE)가 OL 요소보다 위에 오는 것도 실제와 같다.
 ROLE_TREE = [
     _group(100, "*ART", [], [
         _group(110, "ROOM", ["*ART"], [_leaf(1, "LINE", ["*ART", "ROOM"])]),
@@ -135,81 +135,80 @@ ROLE_TREE = [
 ROLE_MATCHED = [1, 2, 3, 4, 5]
 
 
-def _by_role(matched=ROLE_MATCHED, tree=ROLE_TREE, stem=None, **over):
-    return preset_operations(tree, matched, _preset(merge="byRole", **over), source_stem=stem)
+def _ops(matched=ROLE_MATCHED, tree=ROLE_TREE, tokens=None):
+    return auto_merge_operations(tree, matched, tokens)
 
 
 def _merges(ops):
     return [(op["name"], op["layerIds"]) for op in ops if op["op"] == "merge"]
 
 
-def test_by_role_buckets_layers_by_their_group_suffix():
-    assert _merges(_by_role()) == [
-        ("BG", [1, 5]),      # ROOM, TABLE — 접미사 없음
-        ("UL", [2, 4]),      # CHAIR2_UL, SOFA_UL
-        ("OL", [3]),         # CHAIR2_OL
+def test_auto_merge_joins_the_ul_and_ol_of_one_element():
+    # CHAIR2_UL과 CHAIR2_OL은 한 요소(CHAIR2)의 앞뒤 파트다.
+    assert _merges(_ops()) == [
+        ("BG", [1, 5]),        # ROOM, TABLE — 접미사 없음
+        ("CHAIR2", [2, 3]),    # CHAIR2_UL + CHAIR2_OL
+        ("SOFA", [4]),
     ]
 
 
-def test_by_role_stacks_bg_at_the_bottom_then_the_token_order():
-    # 소스에서는 BG 요소(TABLE)가 OL 요소보다 위에 있다. 문서 순서를 그대로 쓰면
-    # BG가 OL 위로 올라가버리므로 reorder로 순서를 못박는다.
-    ops = _by_role()
-    reorders = [(op["layerId"], op["aboveId"]) for op in ops if op["op"] == "reorder"]
+def test_auto_merge_puts_bg_at_the_bottom_then_the_elements_in_document_order():
+    # 소스에서는 BG 요소(TABLE)가 요소들보다 위에 있다. 문서 순서를 그대로 쓰면
+    # BG가 위로 올라가므로 reorder로 못박는다.
+    reorders = [(op["layerId"], op["aboveId"]) for op in _ops() if op["op"] == "reorder"]
     assert reorders == [(-1, None), (-2, -1), (-3, -2)]
 
 
-def test_by_role_prefixes_the_source_file_name_when_given():
-    names = [n for n, _ in _merges(_by_role(stem="HH03_BG-Room"))]
-    assert names == ["HH03_BG-Room_BG", "HH03_BG-Room_UL", "HH03_BG-Room_OL"]
+def test_auto_merge_skips_empty_buckets_so_entry_ids_stay_aligned():
+    ops = _ops(matched=[2, 3])          # BG에 해당하는 레이어가 없다
+    assert _merges(ops) == [("CHAIR2", [2, 3])]
+    assert [(op["layerId"], op["aboveId"]) for op in ops if op["op"] == "reorder"] == [(-1, None)]
 
 
-def test_by_role_skips_roles_with_no_layers_so_entry_ids_stay_aligned():
-    # OL이 없는 파일. 병합 항목 id는 merge 연산 순서대로 -1, -2가 되어야 하고
-    # reorder가 그 id를 가리켜야 한다 — 빈 역할까지 세면 어긋난다.
-    ops = _by_role(matched=[1, 2, 4])
-    assert _merges(ops) == [("BG", [1]), ("UL", [2, 4])]
-    assert [(op["layerId"], op["aboveId"]) for op in ops if op["op"] == "reorder"] == [
-        (-1, None), (-2, -1),
-    ]
-
-
-def test_by_role_matches_the_longest_token_first():
+def test_element_name_strips_the_longest_token_first():
     tree = [_group(200, "PROP_OL_UL", [], [_leaf(9, "LINE", ["PROP_OL_UL"])])]
-    assert _merges(_by_role(matched=[9], tree=tree)) == [("OL_UL", [9])]
+    assert _merges(_ops(matched=[9], tree=tree)) == [("PROP", [9])]
 
 
-def test_by_role_does_not_mistake_a_name_that_merely_contains_a_token():
+def test_a_name_that_merely_contains_a_token_is_not_an_element():
     # WALL_OLD는 OL이 아니다 — 포함이 아니라 접미사로 봐야 한다.
     tree = [_group(200, "WALL_OLD", [], [_leaf(9, "LINE", ["WALL_OLD"])])]
-    assert _merges(_by_role(matched=[9], tree=tree)) == [("BG", [9])]
+    assert _merges(_ops(matched=[9], tree=tree)) == [("BG", [9])]
 
 
-def test_by_role_accepts_hyphen_and_space_separators():
+def test_element_name_accepts_hyphen_and_space_separators():
     tree = [
         _group(200, "CHAIR-UL", [], [_leaf(9, "LINE", ["CHAIR-UL"])]),
-        _group(210, "SOFA UL", [], [_leaf(10, "LINE", ["SOFA UL"])]),
+        _group(210, "CHAIR OL", [], [_leaf(10, "LINE", ["CHAIR OL"])]),
     ]
-    assert _merges(_by_role(matched=[9, 10], tree=tree)) == [("UL", [9, 10])]
+    # 구분자가 달라도 같은 요소 이름으로 모인다.
+    assert _merges(_ops(matched=[9, 10], tree=tree)) == [("CHAIR", [9, 10])]
 
 
-def test_by_role_takes_the_nearest_ancestor_when_several_carry_tokens():
-    # 바깥 그룹이 OL이고 안쪽이 UL이면 가까운 쪽(UL)이 이긴다.
+def test_element_uses_the_nearest_ancestor_carrying_a_token():
     tree = [_group(200, "SET_OL", [], [
         _group(210, "CHAIR_UL", ["SET_OL"], [_leaf(9, "LINE", ["SET_OL", "CHAIR_UL"])]),
     ])]
-    assert _merges(_by_role(matched=[9], tree=tree)) == [("UL", [9])]
+    assert _merges(_ops(matched=[9], tree=tree)) == [("CHAIR", [9])]
 
 
-def test_by_role_token_list_sets_both_matching_and_stacking_order():
-    ops = _by_role(roleTokens=["OL", "UL"])
-    assert [n for n, _ in _merges(ops)] == ["BG", "OL", "UL"]
+def test_a_group_named_only_by_its_role_keeps_that_name():
+    # 접미사를 떼면 아무것도 안 남는 경우(그룹 이름이 그냥 "OL") — 빈 이름 대신
+    # 원래 이름을 쓴다.
+    tree = [_group(200, "OL", [], [_leaf(9, "LINE", ["OL"])])]
+    assert _merges(_ops(matched=[9], tree=tree)) == [("OL", [9])]
 
 
-def test_by_role_with_a_single_layer_in_a_role_still_names_it():
-    # 한 장짜리 역할도 이름이 붙어야 산출물이 일관된다.
-    assert _merges(_by_role(matched=[3], stem="S")) == [("S_OL", [3])]
+def test_custom_role_tokens_are_honored():
+    tree = [_group(200, "DOOR_FRONT", [], [_leaf(9, "LINE", ["DOOR_FRONT"])])]
+    assert _merges(_ops(matched=[9], tree=tree, tokens=["FRONT"])) == [("DOOR", [9])]
 
 
-def test_by_role_with_no_matches_emits_nothing():
-    assert _by_role(matched=[]) == []
+def test_auto_merge_with_no_matches_emits_nothing():
+    assert _ops(matched=[]) == []
+
+
+def test_preset_by_element_mode_uses_the_same_rule():
+    # 레이어 패널 버튼과 프리셋(배치 실행)이 갈라지면 화면과 결과가 달라진다.
+    from_preset = preset_operations(ROLE_TREE, ROLE_MATCHED, _preset(merge="byElement"))
+    assert from_preset == _ops()

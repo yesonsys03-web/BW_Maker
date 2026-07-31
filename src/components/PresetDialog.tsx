@@ -19,13 +19,13 @@ interface PresetDialogProps {
 }
 
 const INCLUDE_TYPES: Preset["include"]["type"][] = ["contains", "regex"];
-const MERGE_MODES: Preset["merge"][] = ["none", "all", "perGroup", "byRole"];
+const MERGE_MODES: Preset["merge"][] = ["none", "all", "perGroup", "byElement"];
 
 const MERGE_LABELS: Record<Preset["merge"], string> = {
   none: "병합 없음",
   all: "전체 병합",
   perGroup: "그룹별 병합",
-  byRole: "역할별 병합 (BG/UL/OL)",
+  byElement: "요소별 병합 (BG + 요소)",
 };
 const NAMING_MODES: Preset["naming"][] = ["pathPrefix", "original"];
 
@@ -231,9 +231,9 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           </label>
         </div>
 
-        {merge === "byRole" && (
+        {merge === "byElement" && (
           <label className="preset-field">
-            <span>역할 접미사 (쉼표 구분, 아래→위 순서)</span>
+            <span>역할 접미사 (쉼표로 구분)</span>
             <input
               type="text"
               value={roleTokensText}
@@ -241,9 +241,9 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
               placeholder="UL, OL_UL, OL"
             />
             <span className="preset-hint">
-              그룹 이름이 이 접미사로 끝나면 그 역할로 묶습니다(<code>CHAIR2_UL</code> → UL).
+              요소 이름에서 이 접미사를 떼어내 같은 요소를 알아냅니다 —
+              <code>CHAIR1_UL</code>과 <code>CHAIR1_OL</code>이 <code>CHAIR1</code> 한 장이 됩니다.
               어디에도 걸리지 않은 레이어는 <code>BG</code>로 묶여 맨 아래에 깔립니다.
-              결과 레이어 이름은 원본 파일명 + 역할입니다.
             </span>
           </label>
         )}

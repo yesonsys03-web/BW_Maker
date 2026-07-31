@@ -9,14 +9,20 @@ import {
   flattenLeaves,
   isFiltering,
   isLineFallbackActive,
+  suggestMergeName,
   type FlatRow,
   type LayerFilterMode,
 } from "../lib/layerFilter";
+import { autoMergeOperations } from "../lib/engine";
 import { buildEntries, exportLabelsBySourceId, type OpsState } from "../lib/opsReducer";
-import type { Operation, TreeNode } from "../lib/types";
+import { toEngineError } from "../lib/preview";
+import type { EngineError, Operation, TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
 
 interface LayerTreeProps {
+  sessionId: number | undefined;
+  /** 요소 이름을 알아내는 역할 접미사(선택된 프리셋). 버튼과 이름 제안이 같이 쓴다. */
+  roleTokens: string[];
   tree: TreeNode[] | undefined;
   path: string | undefined;
   status: FileStatus | undefined;
@@ -27,6 +33,7 @@ interface LayerTreeProps {
   onTogglePreview: (layerId: number) => void;
   onSetPreviewHidden: (layerIds: number[], hidden: boolean) => void;
   onPushOp: (op: Operation) => void;
+  onError: (title: string, error: EngineError) => void;
 }
 
 interface ContextMenuState {
@@ -81,6 +88,8 @@ function nodeById(nodes: TreeNode[], id: number): TreeNode | undefined {
  * mutates the tree shown here.
  */
 export function LayerTree({
+  sessionId,
+  roleTokens,
   tree,
   path,
   status,
@@ -91,6 +100,7 @@ export function LayerTree({
   onTogglePreview,
   onSetPreviewHidden,
   onPushOp,
+  onError,
 }: LayerTreeProps) {
   const [collapsedIds, setCollapsedIds] = useState<Set<number>>(new Set());
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -100,6 +110,7 @@ export function LayerTree({
   const [nameValue, setNameValue] = useState("");
   const [filterMode, setFilterMode] = useState<LayerFilterMode>("all");
   const [query, setQuery] = useState("");
+  const [autoMerging, setAutoMerging] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
@@ -255,8 +266,13 @@ export function LayerTree({
 
   function openMergeModal(ids: number[]) {
     setContextMenu(null);
-    setModal({ kind: "merge", ids: [...ids].sort((a, b) => a - b), defaultName: "" });
-    setNameValue("");
+    // 라인 레이어는 전부 "LINE"이라 빈칸으로 두면 매번 직접 타이핑해야 한다.
+    // 요소 그룹 이름에서 역할 접미사를 떼어낸 공통 이름을 미리 채워둔다.
+    const sorted = [...ids].sort((a, b) => a - b);
+    const picked = allLeaves.filter((l) => sorted.includes(l.node.id));
+    const suggested = suggestMergeName(picked, roleTokens);
+    setModal({ kind: "merge", ids: sorted, defaultName: suggested });
+    setNameValue(suggested);
   }
 
   function openRenameModal(ids: number[]) {
@@ -278,6 +294,27 @@ export function LayerTree({
    * 하나씩 누르지 않아도 되게 하는 것이 이 패널의 목적이므로, 대상은 항상
    * "필터 결과"이지 트리 전체가 아니다.
    */
+  /**
+   * 표시 중인 레이어를 요소 단위로 자동 병합한다. 규칙은 엔진이 갖고 있고
+   * (프리셋의 요소별 병합과 같은 함수) 여기서는 그 결과 연산만 받아 쌓는다 —
+   * 규칙을 프런트에도 따로 구현하면 배치 실행 결과와 갈라진다.
+   */
+  async function handleAutoMerge() {
+    const sid = sessionId;
+    if (!sid) return;
+    const targets = bulkTogglableIds(filteredLeaves);
+    if (targets.length === 0) return;
+    setAutoMerging(true);
+    try {
+      const { operations } = await autoMergeOperations(sid, targets, roleTokens);
+      for (const op of operations) onPushOp(op);
+    } catch (e) {
+      onError("요소별 병합 실패", toEngineError(e));
+    } finally {
+      setAutoMerging(false);
+    }
+  }
+
   function handleBulkInclude(include: boolean) {
     const targets = bulkTogglableIds(filteredLeaves);
     if (targets.length === 0) return;
@@ -518,6 +555,14 @@ export function LayerTree({
             </button>
             <button type="button" onClick={() => handleBulkInclude(false)}>
               표시 전체 해제
+            </button>
+            <button
+              type="button"
+              disabled={!sessionId || autoMerging || bulkTogglableIds(filteredLeaves).length === 0}
+              title="같은 요소의 UL/OL을 한 장으로 묶고, 나머지는 BG 한 장으로 묶습니다."
+              onClick={() => void handleAutoMerge()}
+            >
+              {autoMerging ? "병합 중..." : "요소별 병합"}
             </button>
           </div>
         )}

@@ -7,6 +7,7 @@ import {
   flattenLeaves,
   isFiltering,
   isLineFallbackActive,
+  suggestMergeName,
   lineLeafIds,
 } from "./layerFilter";
 import type { TreeNode } from "./types";
@@ -191,4 +192,42 @@ test("a merge whose sources are mostly filtered out still shows the visible ones
   if (rows[0].kind !== "merged") throw new Error("병합 행이어야 한다");
   expect(rows[0].leaves.map((l) => l.node.id)).toEqual([4]);
   expect(rows[0].sourceCount).toBe(2);
+});
+
+// suggestMergeName: 라인 레이어는 전부 "LINE"이라 이름만으론 단서가 없다.
+// 요소 그룹 이름에서 역할 접미사를 떼어내 제안한다.
+const TOKENS = ["UL", "OL_UL", "OL"];
+const at = (id: number, name: string, path: string[]) => ({
+  node: leaf(id, name, path),
+  breadcrumb: path.join(" / "),
+});
+
+test("suggestMergeName returns the shared element when both sides are one element", () => {
+  const rows = [at(1, "LINE", ["*ART", "CHAIR1_UL"]), at(2, "LINE", ["*ART", "CHAIR1_OL"])];
+  expect(suggestMergeName(rows, TOKENS)).toBe("CHAIR1");
+});
+
+test("suggestMergeName falls back to the common prefix across elements", () => {
+  const rows = [at(1, "LINE", ["*ART", "CHAIR1_UL"]), at(2, "LINE", ["*ART", "CHAIR2_OL"])];
+  expect(suggestMergeName(rows, TOKENS)).toBe("CHAIR");
+});
+
+test("suggestMergeName strips the longest token first", () => {
+  const rows = [at(1, "LINE", ["*ART", "PROP_OL_UL"])];
+  expect(suggestMergeName(rows, TOKENS)).toBe("PROP");
+});
+
+test("suggestMergeName leaves the box empty when the layers share nothing", () => {
+  const rows = [at(1, "LINE", ["*ART", "CHAIR1_UL"]), at(2, "LINE", ["*ART", "SOFA_OL"])];
+  expect(suggestMergeName(rows, TOKENS)).toBe("");
+});
+
+test("suggestMergeName leaves the box empty for layers with no role suffix at all", () => {
+  const rows = [at(1, "LINE", ["*ART", "ROOM"]), at(2, "LINE", ["*ART", "TABLE"])];
+  expect(suggestMergeName(rows, TOKENS)).toBe("");
+});
+
+test("suggestMergeName uses the nearest ancestor carrying a token", () => {
+  const rows = [at(1, "LINE", ["SET_OL", "CHAIR_UL"])];
+  expect(suggestMergeName(rows, TOKENS)).toBe("CHAIR");
 });

@@ -55,6 +55,21 @@ export async function applyPreset(
 }
 
 /**
+ * 같은 요소의 라인들을 한 장으로 묶는 연산 목록. 레이어 패널의 버튼이 쓴다.
+ * 프리셋의 요소별 병합과 엔진에서 같은 함수를 공유하므로, 화면에서 누른 결과와
+ * 배치 실행 결과가 갈라지지 않는다.
+ */
+export async function autoMergeOperations(
+  sessionId: number,
+  layerIds: number[],
+  roleTokens: string[] | null = null
+): Promise<{ operations: Operation[] }> {
+  return callEngine("auto_merge_operations", { sessionId, layerIds, roleTokens }) as Promise<{
+    operations: Operation[];
+  }>;
+}
+
+/**
  * Renders a preview image of visible layers.
  */
 export async function renderPreview(

@@ -33,10 +33,10 @@ export interface Preset {
   excludeGroupPrefixes: string[];
   matchGroups: boolean;
   includeHidden: boolean;
-  merge: "none" | "all" | "perGroup" | "byRole";
+  merge: "none" | "all" | "perGroup" | "byElement";
   /**
-   * "byRole" 병합이 쓰는 역할 접미사. 목록 순서가 곧 쌓는 순서다(아래→위).
-   * 토큰을 못 찾은 레이어는 BG로 묶여 항상 맨 아래에 깔린다.
+   * 요소별 병합이 쓰는 역할 접미사. 요소 이름에서 이걸 떼어내 같은 요소를
+   * 알아낸다(CHAIR1_UL, CHAIR1_OL → CHAIR1). 어디에도 걸리지 않는 레이어는 BG.
    */
   roleTokens: string[];
   naming: "pathPrefix" | "original";
