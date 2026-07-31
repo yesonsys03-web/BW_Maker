@@ -1,0 +1,72 @@
+# 윈도우 설치본(.exe/.msi)을 만들어 릴리스 자산으로 올린다.
+#
+# 동결(PyInstaller)은 크로스 컴파일이 안 되므로 윈도우 산출물은 윈도우 러너에서만
+# 만들 수 있다 — 이 워크플로가 있어야 윈도우 PC 없이도 설치본을 낼 수 있다.
+#
+# 산출물을 Actions 아티팩트가 아니라 릴리스 자산으로 올리는 이유: 엔진을 동봉한
+# 설치본은 150~250MB인데 무료 아티팩트 저장소는 0.5GB다.
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 릴리스 자산 업로드
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      - run: npm ci
+
+      # 동결이 실패하면 여기서 빌드가 끝난다. 그게 신호다 — 모듈이 빠진 번들이
+      # "성공"으로 릴리스에 올라가는 것보다 낫다(스크립트 안의 임포트 게이트도
+      # 같은 목적).
+      - name: Freeze the engine sidecar
+        run: pwsh -File scripts/build-engine.ps1
+
+      - name: Build installers
+        run: npm run tauri build -- --bundles nsis msi
+
+      # 릴리스 태그/이름의 단일 출처는 tauri.conf.json의 version이다. 태그 push로
+      # 들어온 경우에도 같은 값을 쓰므로 태그와 앱 버전이 갈라지지 않는다.
+      - name: Read version
+        id: version
+        shell: bash
+        run: echo "version=$(jq -r .version src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          # 수동 실행(workflow_dispatch)은 초안으로 올린다. 워크플로를 고쳐가며
+          # 반복 실행하는 단계에서 공개 릴리스가 매번 갱신되지 않게 한다.
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          # 번들이 안 나왔는데 릴리스만 성공하는 일이 없도록.
+          fail_on_unmatched_files: true
