@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    psd_line_export_lib::run()
+    bw_maker_lib::run()
 }

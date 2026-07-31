@@ -1,8 +1,9 @@
 {
-  "name": "psd_line_export",
+  "name": "bw_maker",
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

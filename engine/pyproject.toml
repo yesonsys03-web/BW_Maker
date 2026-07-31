@@ -2,6 +2,7 @@
 name = "psd-engine"
 version = "0.1.0"
 description = "PSD layer extraction/edit/export JSON-RPC engine"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "psd-tools>=1.17,<2",

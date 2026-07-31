@@ -96,7 +96,7 @@ export const PREVIEW_BACKGROUND_LABELS: Record<PreviewBackground, string> = {
 
 export const DEFAULT_PREVIEW_BACKGROUND: PreviewBackground = "white";
 
-export const PREVIEW_BACKGROUND_STORAGE_KEY = "psdLineExport.previewBackground";
+export const PREVIEW_BACKGROUND_STORAGE_KEY = "bwMaker.previewBackground";
 
 /**
  * localStorage에 저장된 배경 설정을 읽는다. 값이 없거나(첫 실행) 아는 값이

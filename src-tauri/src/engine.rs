@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn paths_exist_reports_existing_and_missing_paths() {
-        let tmp = std::env::temp_dir().join(format!("psd_line_export_paths_exist_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("bw_maker_paths_exist_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let existing = tmp.join("exists.txt");
         std::fs::write(&existing, b"x").unwrap();
