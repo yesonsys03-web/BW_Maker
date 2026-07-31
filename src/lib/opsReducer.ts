@@ -101,6 +101,26 @@ export function buildEntries(includedIds: number[], ops: Operation[]): Entry[] {
       case "flatten":
         doMerge(entries.map((e) => e.entryId), op.name);
         break;
+      // 병합에서 빼내 단독 항목으로 되돌린다. 자동 병합이 요소를 잘못 묶었을 때
+      // 그 레이어만 꺼내는 용도라, 대상은 항상 원본 레이어 id다.
+      case "unmerge": {
+        for (const layerId of op.layerIds) {
+          // "자기 자신이 아닌 항목에 담겨 있으면" 병합된 것이다. 소스가 하나만
+          // 남은 병합 항목까지 포함해야, 전부 빼냈을 때 병합이 완전히 사라진다.
+          const host = entries.find((e) => e.entryId !== layerId && e.sourceIds.includes(layerId));
+          if (host === undefined) continue;   // 이미 단독이거나 대상이 사라졌다
+          host.sourceIds = host.sourceIds.filter((id) => id !== layerId);
+          const extracted: Entry = { entryId: layerId, sourceIds: [layerId], name: null };
+          // 배열 index 0 = 맨 아래. 꺼낸 레이어는 원래 있던 병합 바로 위에 둔다.
+          entries.splice(entries.indexOf(host) + 1, 0, extracted);
+          byId.set(layerId, extracted);
+          if (host.sourceIds.length === 0) {
+            entries.splice(entries.indexOf(host), 1);
+            byId.delete(host.entryId);
+          }
+        }
+        break;
+      }
       case "reorder": {
         const e = byId.get(op.layerId);
         if (e === undefined) break;

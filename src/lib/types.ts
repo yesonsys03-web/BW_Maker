@@ -25,7 +25,12 @@ export type Operation =
   | { op: "rename"; layerId: number; name: string }
   | { op: "merge"; layerIds: number[]; name: string }
   | { op: "flatten"; name: string }
-  | { op: "reorder"; layerId: number; aboveId: number | null };
+  | { op: "reorder"; layerId: number; aboveId: number | null }
+  /**
+   * 병합에서 빼내 단독 레이어로 되돌린다. 내보내기에서 빼는 것과 다르다 —
+   * 자동 병합이 잘못 묶었을 때 그 레이어만 원래 형태로 되돌리는 용도다.
+   */
+  | { op: "unmerge"; layerIds: number[] };
 
 export interface Preset {
   name: string;

@@ -58,6 +58,23 @@ def build_export_plan(included_ids, operations):
             do_merge(op["layerIds"], op["name"])
         elif kind == "flatten":
             do_merge([e["entryId"] for e in entries], op["name"])
+        elif kind == "unmerge":
+            # 병합에서 빼내 단독 항목으로 되돌린다(src/lib/opsReducer.ts와 같은 규칙).
+            for layer_id in op["layerIds"]:
+                host = next(
+                    (e for e in entries
+                     if e["entryId"] != layer_id and layer_id in e["sourceIds"]),
+                    None,
+                )
+                if host is None:
+                    continue
+                host["sourceIds"] = [i for i in host["sourceIds"] if i != layer_id]
+                extracted = {"entryId": layer_id, "sourceIds": [layer_id], "name": None}
+                entries.insert(entries.index(host) + 1, extracted)
+                by_id[layer_id] = extracted
+                if not host["sourceIds"]:
+                    entries.remove(host)
+                    del by_id[host["entryId"]]
         elif kind == "reorder":
             e = by_id.get(op["layerId"])
             above_id = op.get("aboveId")

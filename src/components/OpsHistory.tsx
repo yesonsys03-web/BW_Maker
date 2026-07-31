@@ -28,6 +28,10 @@ function describeOp(op: Operation, entriesBefore: Entry[], tree: TreeNode[] | un
       if (op.aboveId === null) return `순서변경: ${moved} → 맨 아래로`;
       return `순서변경: ${moved} → ${name(entriesBefore, tree, op.aboveId)} 바로 위로`;
     }
+    case "unmerge": {
+      const names = op.layerIds.map((id) => name(entriesBefore, tree, id));
+      return `병합 해제: ${names.join(", ")}`;
+    }
     case "exclude":
       return `제외: ${op.layerIds.length}개 레이어`;
     default:

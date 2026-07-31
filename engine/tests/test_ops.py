@@ -152,3 +152,45 @@ def test_path_prefix_filters_only_autogen_groups():
     }
     finalize_names(entries, nodes_by_id, "pathPrefix")
     assert [e["finalName"] for e in entries] == ["photo", "Group Photos_image"]
+
+
+def test_unmerge_pulls_one_layer_out_and_leaves_the_rest_merged():
+    plan = build_export_plan(INCLUDED, [
+        {"op": "merge", "layerIds": [3, 4, 5], "name": "BG"},
+        {"op": "unmerge", "layerIds": [4]},
+    ])
+    merged = [e for e in plan if len(e["sourceIds"]) > 1][0]
+    assert merged["sourceIds"] == [3, 5] and merged["name"] == "BG"
+    assert {"entryId": 4, "sourceIds": [4], "name": None} in plan
+
+
+def test_unmerge_keeps_the_layer_in_the_export():
+    plan = build_export_plan(INCLUDED, [
+        {"op": "merge", "layerIds": [3, 4, 5], "name": "BG"},
+        {"op": "unmerge", "layerIds": [4]},
+    ])
+    assert sorted(i for e in plan for i in e["sourceIds"]) == [3, 4, 5]
+
+
+def test_unmerging_every_source_dissolves_the_merge():
+    plan = build_export_plan(INCLUDED, [
+        {"op": "merge", "layerIds": [3, 4, 5], "name": "BG"},
+        {"op": "unmerge", "layerIds": [3, 4, 5]},
+    ])
+    assert sorted(ids(plan)) == [3, 4, 5]
+    assert all(e["name"] is None for e in plan)
+
+
+def test_unmerge_on_an_unmerged_layer_does_nothing():
+    assert build_export_plan(INCLUDED, [{"op": "unmerge", "layerIds": [4]}]) == \
+        build_export_plan(INCLUDED, [])
+
+
+def test_engine_and_ui_agree_on_unmerge():
+    # src/lib/opsReducer.ts의 같은 시나리오와 결과가 일치해야 한다.
+    plan = build_export_plan(INCLUDED, [
+        {"op": "merge", "layerIds": [3, 4, 5], "name": "BG"},
+        {"op": "unmerge", "layerIds": [4]},
+    ])
+    merged_idx = next(i for i, e in enumerate(plan) if len(e["sourceIds"]) > 1)
+    assert plan[merged_idx + 1]["entryId"] == 4

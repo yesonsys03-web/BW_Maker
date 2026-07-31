@@ -134,6 +134,15 @@ export function LayerTree({
     [allLeaves, ops.ops]
   );
   const exportLabels = useMemo(() => exportLabelsBySourceId(planEntries), [planEntries]);
+  // 지금 어떤 병합에 묶여 있는 소스 레이어들 — 자기 자신이 아닌 항목에 담겨
+  // 있으면 병합된 것이다. "병합에서 빼기"의 대상 판정용.
+  const mergedSourceIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (const entry of planEntries) {
+      for (const id of entry.sourceIds) if (entry.entryId !== id) ids.add(id);
+    }
+    return ids;
+  }, [planEntries]);
   const filtering = isFiltering(filterMode, query);
   const filteredLeaves = useMemo(
     () => filterLeaves(allLeaves, { mode: filterMode, query, matchedIds }),
@@ -323,6 +332,18 @@ export function LayerTree({
     } finally {
       setAutoMerging(false);
     }
+  }
+
+  /**
+   * 선택한 레이어를 병합에서 빼내 단독 레이어로 되돌린다. 자동 병합이 요소를
+   * 잘못 묶었을 때의 탈출구다 — 내보내기에서 빼는 것과 달리 산출물에는 남는다.
+   * 병합 행 자체를 골랐다면 그 병합에 묶인 소스 전부를 꺼낸다(= 병합 해제).
+   */
+  function handleUnmerge(ids: number[]) {
+    setContextMenu(null);
+    const targets = expandRowIds(ids).filter((id) => mergedSourceIds.has(id));
+    if (targets.length === 0) return;
+    onPushOp({ op: "unmerge", layerIds: targets });
   }
 
   function handleBulkInclude(include: boolean) {
@@ -643,6 +664,14 @@ export function LayerTree({
             onClick={() => openRenameModal(contextMenu.ids)}
           >
             이름변경...
+          </button>
+          <button
+            type="button"
+            disabled={expandRowIds(contextMenu.ids).every((id) => !mergedSourceIds.has(id))}
+            title="병합에서만 빼냅니다. 레이어는 그대로 내보내집니다."
+            onClick={() => handleUnmerge(contextMenu.ids)}
+          >
+            병합에서 빼기
           </button>
           <button type="button" onClick={() => handleExclude(contextMenu.ids)}>
             내보내기에서 제외

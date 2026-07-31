@@ -141,3 +141,50 @@ test("reorder is skipped when its reference entry is no longer included", () => 
 test("reorder to the bottom still works when its own entry survives", () => {
   expect(ids(buildEntries(INC, [{ op: "reorder", layerId: 5, aboveId: null }]))).toEqual([5, 3, 4]);
 });
+
+// unmerge: 자동 병합이 잘못 묶었을 때 그 레이어만 단독으로 되돌린다.
+// "내보내기에서 제외"와 달리 산출물에는 남는다.
+const MERGE_THREE = [{ op: "merge" as const, layerIds: [3, 4, 5], name: "BG" }];
+
+test("unmerge pulls one layer out and leaves the rest merged", () => {
+  const entries = buildEntries(INC, [...MERGE_THREE, { op: "unmerge", layerIds: [4] }]);
+  const merged = entries.find((e) => e.sourceIds.length > 1);
+  expect(merged?.sourceIds).toEqual([3, 5]);
+  expect(merged?.name).toBe("BG");
+  const solo = entries.find((e) => e.entryId === 4);
+  expect(solo).toEqual({ entryId: 4, sourceIds: [4], name: null });
+});
+
+test("unmerge keeps the extracted layer in the export, unlike an exclude", () => {
+  const entries = buildEntries(INC, [...MERGE_THREE, { op: "unmerge", layerIds: [4] }]);
+  expect(entries.flatMap((e) => e.sourceIds).sort()).toEqual([3, 4, 5]);
+});
+
+test("unmerge places the extracted layer directly above the merge it came from", () => {
+  const entries = buildEntries(INC, [...MERGE_THREE, { op: "unmerge", layerIds: [4] }]);
+  const mergedIdx = entries.findIndex((e) => e.sourceIds.length > 1);
+  expect(entries[mergedIdx + 1].entryId).toBe(4);
+});
+
+test("unmerging every source dissolves the merge entirely", () => {
+  const entries = buildEntries(INC, [...MERGE_THREE, { op: "unmerge", layerIds: [3, 4, 5] }]);
+  expect(entries.map((e) => e.entryId).sort((a, b) => a - b)).toEqual([3, 4, 5]);
+  expect(entries.every((e) => e.name === null)).toBe(true);
+});
+
+test("a merge left with one source keeps its name", () => {
+  const entries = buildEntries(INC, [...MERGE_THREE, { op: "unmerge", layerIds: [3, 4] }]);
+  expect(entries.find((e) => e.sourceIds.includes(5))?.name).toBe("BG");
+});
+
+test("unmerge on a layer that is not merged does nothing", () => {
+  const plain = buildEntries(INC, []);
+  expect(buildEntries(INC, [{ op: "unmerge", layerIds: [4] }])).toEqual(plain);
+});
+
+test("unmerge is undone by dropping the op, restoring the full merge", () => {
+  const withUnmerge = buildEntries(INC, [...MERGE_THREE, { op: "unmerge", layerIds: [4] }]);
+  expect(withUnmerge.find((e) => e.sourceIds.length > 1)?.sourceIds).toEqual([3, 5]);
+  const undone = buildEntries(INC, MERGE_THREE);
+  expect(undone.find((e) => e.sourceIds.length > 1)?.sourceIds).toEqual([3, 4, 5]);
+});
