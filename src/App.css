@@ -465,6 +465,108 @@ input[type="text"] {
   padding: 0.3em 0;
 }
 
+/* ---------- layer filter bar ---------- */
+
+/* 스크롤되는 .layer-tree 안에 sticky로 붙는다 — 수백 줄을 훑는 도중에도
+   필터와 개수 표시가 항상 보여야 한다. */
+.layer-filter-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+  padding: 0.45em 0.5em;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.layer-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+}
+
+.layer-filter-search {
+  flex: 1;
+  min-width: 0;
+}
+
+.layer-filter-clear {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  line-height: 1;
+  padding: 0.2em 0.45em;
+}
+
+.layer-filter-clear:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.layer-filter-modes {
+  display: flex;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+}
+
+.layer-filter-modes button {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-size: 0.85em;
+  padding: 0.15em 0.55em;
+}
+
+.layer-filter-modes button:hover:not(.active) {
+  color: var(--text);
+  background: var(--bg-2);
+  border-color: transparent;
+}
+
+.layer-filter-modes button.active {
+  color: var(--text);
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.layer-filter-count {
+  margin-left: auto;
+  font-size: 0.8em;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.layer-filter-bulk button {
+  font-size: 0.82em;
+  padding: 0.2em 0.6em;
+}
+
+.layer-filter-note {
+  margin: 0;
+  font-size: 0.78em;
+  line-height: 1.35;
+  color: var(--text-dim);
+}
+
+.layer-filter-note code {
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 0.25em;
+}
+
+.layer-filter-empty {
+  padding: 1em;
+  margin: 0;
+  color: var(--text-dim);
+  text-align: center;
+}
+
 .tree-row {
   display: flex;
   align-items: center;
@@ -562,7 +664,33 @@ input[type="text"] {
   object-fit: contain;
 }
 
+.node-label {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .node-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 평면 목록의 한 줄: 이름 아래에 조상 경로를 깔아, 그룹마다 똑같이 "LINE"이라
+   불리는 레이어들을 구분한다. */
+.tree-row-flat {
+  align-items: flex-start;
+  padding-top: 0.3em;
+  padding-bottom: 0.3em;
+}
+
+.tree-row-flat .node-label {
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.node-breadcrumb {
+  font-size: 0.75em;
+  color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
 }

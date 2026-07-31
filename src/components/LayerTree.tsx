@@ -1,4 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  LAYER_FILTER_LABELS,
+  LAYER_FILTER_MODES,
+  applyBulkInclude,
+  bulkTogglableIds,
+  filterLeaves,
+  flattenLeaves,
+  isFiltering,
+  isLineFallbackActive,
+  type LayerFilterMode,
+} from "../lib/layerFilter";
 import type { OpsState } from "../lib/opsReducer";
 import type { Operation, TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
@@ -85,15 +96,37 @@ export function LayerTree({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [modal, setModal] = useState<ModalState | null>(null);
   const [nameValue, setNameValue] = useState("");
+  const [filterMode, setFilterMode] = useState<LayerFilterMode>("all");
+  const [query, setQuery] = useState("");
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
   const previewHiddenSet = useMemo(() => new Set(ops.previewHiddenIds), [ops.previewHiddenIds]);
   const matchedSet = useMemo(() => new Set(matchedIds), [matchedIds]);
 
+  const allLeaves = useMemo(() => (tree ? flattenLeaves(tree) : []), [tree]);
+  const filtering = isFiltering(filterMode, query);
+  const filteredLeaves = useMemo(
+    () =>
+      filterLeaves(allLeaves, {
+        mode: filterMode,
+        query,
+        matchedIds,
+        includedIds: ops.includedIds,
+      }),
+    [allLeaves, filterMode, query, matchedIds, ops.includedIds]
+  );
+
+  // shift-범위 선택의 기준 순서. 평면 목록일 때는 화면에 보이는 그 순서가
+  // 곧 범위이고, 트리일 때는 접힌 그룹 안쪽을 건너뛴 순서다.
   const visibleOrder = useMemo(
-    () => (tree ? collectVisibleLeafOrder(tree, collapsedIds) : []),
-    [tree, collapsedIds]
+    () =>
+      filtering
+        ? filteredLeaves.map((l) => l.node.id)
+        : tree
+          ? collectVisibleLeafOrder(tree, collapsedIds)
+          : [],
+    [filtering, filteredLeaves, tree, collapsedIds]
   );
 
   // Layer ids are only unique within a single session, so switching the
@@ -108,6 +141,8 @@ export function LayerTree({
     setLastClickedId(null);
     setContextMenu(null);
     setModal(null);
+    setFilterMode("all");
+    setQuery("");
   }, [path]);
 
   useEffect(() => {
@@ -208,6 +243,17 @@ export function LayerTree({
     onSetIncluded(ops.includedIds.filter((id) => !idSet.has(id)));
   }
 
+  /**
+   * 지금 화면에 보이는 leaf 전체를 한 번에 체크/해제한다. 필터로 좁힌 뒤
+   * 하나씩 누르지 않아도 되게 하는 것이 이 패널의 목적이므로, 대상은 항상
+   * "필터 결과"이지 트리 전체가 아니다.
+   */
+  function handleBulkInclude(include: boolean) {
+    const targets = bulkTogglableIds(filteredLeaves);
+    if (targets.length === 0) return;
+    onSetIncluded(applyBulkInclude(ops.includedIds, targets, include));
+  }
+
   function submitModal() {
     if (!modal) return;
     if (nameValue.trim().length === 0) return;
@@ -255,22 +301,33 @@ export function LayerTree({
       );
     }
 
+    return renderLeaf(node, { indentPx: depth * 16 + 8 });
+  }
+
+  /**
+   * leaf 한 줄. 트리 보기와 평면 목록이 같은 함수를 쓰기 때문에 체크박스·눈
+   * 토글·선택·우클릭 메뉴 동작이 두 보기에서 완전히 동일하다. `breadcrumb`이
+   * 주어지면 평면 목록 모드로, 이름 아래에 조상 경로를 함께 그린다.
+   */
+  function renderLeaf(node: TreeNode, opts: { indentPx: number; breadcrumb?: string }) {
+    const isMatched = matchedSet.has(node.id);
     const included = includedSet.has(node.id);
     const hidden = previewHiddenSet.has(node.id);
     const selected = selectedIds.has(node.id);
     const disabledCheckbox = node.kind !== "pixel";
+    const flat = opts.breadcrumb !== undefined;
 
     return (
       <div
         key={node.id}
-        className={`tree-row tree-row-leaf${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
-        style={indent}
-        role="treeitem"
+        className={`tree-row tree-row-leaf${flat ? " tree-row-flat" : ""}${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
+        style={{ paddingLeft: `${opts.indentPx}px` }}
+        role={flat ? "listitem" : "treeitem"}
         aria-selected={selected}
         onClick={(e) => handleRowClick(node.id, e)}
         onContextMenu={(e) => handleContextMenu(node.id, e)}
       >
-        <span className="fold-toggle-slot" />
+        {!flat && <span className="fold-toggle-slot" />}
         <input
           type="checkbox"
           className="include-checkbox"
@@ -296,7 +353,14 @@ export function LayerTree({
             {thumbs[node.id] && <img className="node-thumb" src={thumbs[node.id]} alt="" draggable={false} />}
           </span>
         )}
-        <span className="node-name">{node.name}</span>
+        <span className="node-label">
+          <span className="node-name">{node.name}</span>
+          {flat && opts.breadcrumb!.length > 0 && (
+            <span className="node-breadcrumb" title={opts.breadcrumb}>
+              {opts.breadcrumb}
+            </span>
+          )}
+        </span>
         {node.kind !== "pixel" && <span className="node-kind">{node.kind}</span>}
       </div>
     );
@@ -304,9 +368,70 @@ export function LayerTree({
 
   return (
     <div className="layer-tree">
-      <div className="tree-body" role="tree">
-        {tree.map((node) => renderNode(node, 0))}
+      <div className="layer-filter-bar">
+        <div className="layer-filter-row">
+          <input
+            type="text"
+            className="layer-filter-search"
+            value={query}
+            placeholder="레이어 이름 / 그룹 경로 검색"
+            onChange={(e) => setQuery(e.currentTarget.value)}
+          />
+          {query.length > 0 && (
+            <button type="button" className="layer-filter-clear" onClick={() => setQuery("")} aria-label="검색어 지우기">
+              ×
+            </button>
+          )}
+        </div>
+        <div className="layer-filter-row">
+          <div className="layer-filter-modes" role="group" aria-label="레이어 필터">
+            {LAYER_FILTER_MODES.map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={mode === filterMode ? "active" : undefined}
+                aria-pressed={mode === filterMode}
+                onClick={() => setFilterMode(mode)}
+              >
+                {LAYER_FILTER_LABELS[mode]}
+              </button>
+            ))}
+          </div>
+          <span className="layer-filter-count">
+            {filtering ? `${filteredLeaves.length} / ${allLeaves.length}` : `${allLeaves.length}개`}
+          </span>
+        </div>
+        {filtering && (
+          <div className="layer-filter-row layer-filter-bulk">
+            <button type="button" onClick={() => handleBulkInclude(true)}>
+              표시 전체 선택
+            </button>
+            <button type="button" onClick={() => handleBulkInclude(false)}>
+              표시 전체 해제
+            </button>
+          </div>
+        )}
+        {isLineFallbackActive(filterMode, matchedIds) && (
+          <p className="layer-filter-note">
+            프리셋을 아직 적용하지 않아 이름에 <code>line</code>이 들어간 레이어를 보여줍니다. 프리셋을
+            적용하면 그 매칭 결과로 바뀝니다.
+          </p>
+        )}
       </div>
+
+      {filtering ? (
+        <div className="tree-body tree-body-flat" role="list">
+          {filteredLeaves.length === 0 ? (
+            <p className="layer-filter-empty">조건에 맞는 레이어가 없습니다.</p>
+          ) : (
+            filteredLeaves.map((l) => renderLeaf(l.node, { indentPx: 8, breadcrumb: l.breadcrumb }))
+          )}
+        </div>
+      ) : (
+        <div className="tree-body" role="tree">
+          {tree.map((node) => renderNode(node, 0))}
+        </div>
+      )}
 
       {contextMenu && (
         <div ref={menuRef} className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
