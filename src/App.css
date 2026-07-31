@@ -1280,3 +1280,12 @@ input[type="text"] {
   color: #f2c94c;
   border-color: #7a6a2a;
 }
+
+/* 병합 결과 행. 원본 레이어가 아니라 내보내기 계획의 항목이므로 구분되게 둔다. */
+.tree-row-merged {
+  box-shadow: inset 2px 0 0 #f2c94c;
+}
+
+.tree-row-merged .node-name {
+  color: #f2c94c;
+}

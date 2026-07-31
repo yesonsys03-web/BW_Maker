@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import {
   applyBulkInclude,
   bulkTogglableIds,
+  collapseMergedRows,
   filterLeaves,
   flattenLeaves,
   isFiltering,
@@ -131,4 +132,63 @@ test("applyBulkInclude adds without duplicating and keeps ids sorted", () => {
 
 test("applyBulkInclude removes only the targeted ids", () => {
   expect(applyBulkInclude([1, 2, 4, 5], [2, 4], false)).toEqual([1, 5]);
+});
+
+// collapseMergedRows: 평면 목록에서 병합 결과를 한 줄로 보여준다. 트리는 원본
+// 구조를 비춰야 해서 접을 수 없지만(다른 그룹끼리 병합하면 어디에 둘지 없음),
+// 평면 목록에는 그룹이 없어 그 문제가 사라진다.
+const entry = (entryId: number, sourceIds: number[], name: string | null) => ({
+  entryId,
+  sourceIds,
+  name,
+});
+
+test("collapseMergedRows folds a merge into a single row at its first source's slot", () => {
+  const rows = collapseMergedRows(leaves, [
+    entry(1, [1], null),
+    entry(-1, [2, 4], "Chair2"),
+    entry(5, [5], null),
+    entry(6, [6], null),
+  ]);
+  expect(rows.map((r) => (r.kind === "merged" ? r.name : r.leaf.node.id))).toEqual([
+    1,
+    "Chair2",
+    5,
+    6,
+  ]);
+});
+
+test("a merged row carries its sources and the merge's total source count", () => {
+  const rows = collapseMergedRows(leaves, [entry(-1, [2, 4], "Chair2")]);
+  const merged = rows.find((r) => r.kind === "merged");
+  expect(merged).toBeDefined();
+  if (merged?.kind !== "merged") throw new Error("unreachable");
+  expect(merged.leaves.map((l) => l.node.id)).toEqual([2, 4]);
+  expect(merged.sourceCount).toBe(2);
+});
+
+test("collapseMergedRows leaves plain and renamed entries as their own rows", () => {
+  const rows = collapseMergedRows(leaves, [entry(1, [1], "OUTLINE"), entry(2, [2], null)]);
+  expect(rows.every((r) => r.kind === "leaf")).toBe(true);
+});
+
+test("collapseMergedRows is a passthrough when nothing is merged", () => {
+  const rows = collapseMergedRows(leaves, leaves.map((l) => entry(l.node.id, [l.node.id], null)));
+  expect(rows.map((r) => (r.kind === "leaf" ? r.leaf.node.id : -1))).toEqual([1, 2, 4, 5, 6]);
+});
+
+test("a merged row appears once even though it has several sources in the list", () => {
+  const rows = collapseMergedRows(leaves, [entry(-1, [1, 2, 4], "All")]);
+  expect(rows.filter((r) => r.kind === "merged")).toHaveLength(1);
+  expect(rows).toHaveLength(3); // 병합 1줄 + 5, 6
+});
+
+test("a merge whose sources are mostly filtered out still shows the visible ones", () => {
+  // 검색으로 좁혀 소스 하나만 보이는 경우에도 그 행은 병합 항목으로 보여야 한다.
+  const onlyOne = leaves.filter((l) => l.node.id === 4);
+  const rows = collapseMergedRows(onlyOne, [entry(-1, [2, 4], "Chair2")]);
+  expect(rows).toHaveLength(1);
+  if (rows[0].kind !== "merged") throw new Error("병합 행이어야 한다");
+  expect(rows[0].leaves.map((l) => l.node.id)).toEqual([4]);
+  expect(rows[0].sourceCount).toBe(2);
 });

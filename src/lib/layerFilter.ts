@@ -1,3 +1,4 @@
+import type { Entry } from "./opsReducer";
 import type { TreeNode } from "./types";
 
 /**
@@ -124,4 +125,53 @@ export function applyBulkInclude(includedIds: number[], targetIds: number[], inc
   }
   const drop = new Set(targetIds);
   return includedIds.filter((id) => !drop.has(id));
+}
+
+/** 평면 목록의 한 행: 소스 leaf 하나, 또는 여러 소스가 합쳐진 병합 항목 하나. */
+export type FlatRow =
+  | { kind: "leaf"; leaf: FlatLeaf }
+  | { kind: "merged"; entryId: number; name: string; leaves: FlatLeaf[]; sourceCount: number };
+
+/**
+ * 병합된 소스들을 한 행으로 접는다.
+ *
+ * 트리 보기는 원본 PSD 구조를 그대로 비춰야 해서 병합을 접을 수 없다 — 서로 다른
+ * 그룹의 레이어를 병합하면 그 행을 어느 그룹에 둘지 답이 없기 때문이다. 평면
+ * 목록에는 그룹이 없으므로 그 문제가 사라지고, 내보내기 결과와 같은 모양
+ * ("Chair2" 한 줄)으로 보여줄 수 있다.
+ *
+ * 행 위치는 그 병합의 소스 중 목록에서 가장 먼저 나오는 자리다.
+ */
+export function collapseMergedRows(leaves: FlatLeaf[], entries: Entry[]): FlatRow[] {
+  const entryBySource = new Map<number, Entry>();
+  for (const entry of entries) {
+    if (entry.sourceIds.length < 2) continue;
+    for (const sourceId of entry.sourceIds) entryBySource.set(sourceId, entry);
+  }
+  if (entryBySource.size === 0) return leaves.map((leaf) => ({ kind: "leaf", leaf }));
+
+  const present = new Set(leaves.map((l) => l.node.id));
+  const emitted = new Set<number>();
+  const out: FlatRow[] = [];
+
+  for (const leaf of leaves) {
+    const entry = entryBySource.get(leaf.node.id);
+    if (entry === undefined) {
+      out.push({ kind: "leaf", leaf });
+      continue;
+    }
+    if (emitted.has(entry.entryId)) continue;
+    emitted.add(entry.entryId);
+    out.push({
+      kind: "merged",
+      entryId: entry.entryId,
+      // 이름 없는 병합은 있을 수 없지만(병합은 항상 이름을 받는다) 타입상 열려 있다.
+      name: entry.name ?? "(이름 없음)",
+      // 필터에 걸려 지금 보이는 소스만 묶는다. 개수는 병합 전체 기준으로 알린다.
+      leaves: leaves.filter((l) => entry.sourceIds.includes(l.node.id) && present.has(l.node.id)),
+      sourceCount: entry.sourceIds.length,
+    });
+  }
+
+  return out;
 }

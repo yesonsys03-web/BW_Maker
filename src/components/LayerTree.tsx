@@ -4,10 +4,12 @@ import {
   LAYER_FILTER_MODES,
   applyBulkInclude,
   bulkTogglableIds,
+  collapseMergedRows,
   filterLeaves,
   flattenLeaves,
   isFiltering,
   isLineFallbackActive,
+  type FlatRow,
   type LayerFilterMode,
 } from "../lib/layerFilter";
 import { exportLabelsBySourceId, type OpsState } from "../lib/opsReducer";
@@ -114,16 +116,37 @@ export function LayerTree({
     [allLeaves, filterMode, query, matchedIds]
   );
 
+  // 평면 목록에서는 병합된 소스들을 한 행으로 접는다. 트리 보기는 원본 PSD
+  // 구조를 비춰야 해서 접을 수 없다 — 다른 그룹끼리 병합했을 때 그 행을 어느
+  // 그룹에 둘지 답이 없기 때문이다.
+  const flatRows = useMemo(
+    () => collapseMergedRows(filteredLeaves, ops.entries),
+    [filteredLeaves, ops.entries]
+  );
+
+  // 행 id → 그 행이 대표하는 소스 레이어 id들. 병합 행의 체크박스·눈·제외는
+  // 묶인 소스 전체에 적용돼야 한다.
+  const sourcesByRowId = useMemo(() => {
+    const map = new Map<number, number[]>();
+    for (const row of flatRows) {
+      if (row.kind === "merged") map.set(row.entryId, row.leaves.map((l) => l.node.id));
+    }
+    return map;
+  }, [flatRows]);
+
+  const expandRowIds = (ids: number[]): number[] =>
+    ids.flatMap((id) => sourcesByRowId.get(id) ?? [id]);
+
   // shift-범위 선택의 기준 순서. 평면 목록일 때는 화면에 보이는 그 순서가
   // 곧 범위이고, 트리일 때는 접힌 그룹 안쪽을 건너뛴 순서다.
   const visibleOrder = useMemo(
     () =>
       filtering
-        ? filteredLeaves.map((l) => l.node.id)
+        ? flatRows.map((r) => (r.kind === "merged" ? r.entryId : r.leaf.node.id))
         : tree
           ? collectVisibleLeafOrder(tree, collapsedIds)
           : [],
-    [filtering, filteredLeaves, tree, collapsedIds]
+    [filtering, flatRows, tree, collapsedIds]
   );
 
   // Layer ids are only unique within a single session, so switching the
@@ -236,7 +259,7 @@ export function LayerTree({
 
   function handleExclude(ids: number[]) {
     setContextMenu(null);
-    const idSet = new Set(ids);
+    const idSet = new Set(expandRowIds(ids));
     onSetIncluded(ops.includedIds.filter((id) => !idSet.has(id)));
   }
 
@@ -380,6 +403,63 @@ export function LayerTree({
     );
   }
 
+  /**
+   * 병합 결과 한 행. 트리에서는 원본 두 행이 그대로 있지만(구조를 비추므로),
+   * 평면 목록에서는 내보내기 결과와 같은 모양으로 한 줄만 보인다. 체크박스·눈은
+   * 묶인 소스 전체에 한꺼번에 적용된다.
+   */
+  function renderMergedRow(row: Extract<FlatRow, { kind: "merged" }>) {
+    const sourceIds = row.leaves.map((l) => l.node.id);
+    const selected = selectedIds.has(row.entryId);
+    const isMatched = sourceIds.some((id) => matchedSet.has(id));
+    const included = sourceIds.some((id) => includedSet.has(id));
+    const hidden = sourceIds.length > 0 && sourceIds.every((id) => previewHiddenSet.has(id));
+    const sourceNames = row.leaves.map((l) => l.node.name).join(" + ");
+    const fullPaths = row.leaves.map((l) => (l.breadcrumb ? `${l.breadcrumb} / ${l.node.name}` : l.node.name));
+
+    return (
+      <div
+        key={`merged-${row.entryId}`}
+        className={`tree-row tree-row-leaf tree-row-flat tree-row-merged${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
+        style={{ paddingLeft: "8px" }}
+        role="listitem"
+        aria-selected={selected}
+        onClick={(e) => handleRowClick(row.entryId, e)}
+        onContextMenu={(e) => handleContextMenu(row.entryId, e)}
+      >
+        <input
+          type="checkbox"
+          className="include-checkbox"
+          checked={included}
+          onClick={(e) => e.stopPropagation()}
+          onChange={() => onSetIncluded(applyBulkInclude(ops.includedIds, sourceIds, !included))}
+        />
+        <button
+          type="button"
+          className={`eye-toggle${hidden ? " eye-hidden" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSetPreviewHidden(sourceIds, !hidden);
+          }}
+          aria-label="미리보기 토글"
+        >
+          👁
+        </button>
+        {/* 병합 결과의 썸네일은 없다. 소스 중 하나를 보여주면 합쳐진 그림인 양
+            오해되므로 자리만 비워 정렬을 맞춘다. */}
+        <span className="node-thumb-slot" />
+        <span className="node-label">
+          <span className="node-name" title={row.name}>
+            {row.name}
+          </span>
+          <span className="node-breadcrumb" title={fullPaths.join("\n")}>
+            {sourceNames} ({row.sourceCount}장 병합)
+          </span>
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className="layer-tree">
       <div className="layer-filter-bar">
@@ -435,10 +515,14 @@ export function LayerTree({
 
       {filtering ? (
         <div className="tree-body tree-body-flat" role="list">
-          {filteredLeaves.length === 0 ? (
+          {flatRows.length === 0 ? (
             <p className="layer-filter-empty">조건에 맞는 레이어가 없습니다.</p>
           ) : (
-            filteredLeaves.map((l) => renderLeaf(l.node, { indentPx: 8, breadcrumb: l.breadcrumb }))
+            flatRows.map((row) =>
+              row.kind === "merged"
+                ? renderMergedRow(row)
+                : renderLeaf(row.leaf.node, { indentPx: 8, breadcrumb: row.leaf.breadcrumb })
+            )
           )}
         </div>
       ) : (
