@@ -60,6 +60,9 @@ def build_export_plan(included_ids, operations):
             do_merge([e["entryId"] for e in entries], op["name"])
         elif kind == "unmerge":
             # 병합에서 빼내 단독 항목으로 되돌린다(src/lib/opsReducer.ts와 같은 규칙).
+            # 한 병합에서 여러 장을 뺄 때 전부 같은 자리에 끼워넣으면 서로의 순서가
+            # 뒤집힌다 — 다시 묶으면 그것이 소스 쌓임 순서가 되므로 뺀 순서를 지킨다.
+            placed = {}  # host entryId -> 이번 op에서 그 위에 넣은 수
             for layer_id in op["layerIds"]:
                 host = next(
                     (e for e in entries
@@ -70,7 +73,9 @@ def build_export_plan(included_ids, operations):
                     continue
                 host["sourceIds"] = [i for i in host["sourceIds"] if i != layer_id]
                 extracted = {"entryId": layer_id, "sourceIds": [layer_id], "name": None}
-                entries.insert(entries.index(host) + 1, extracted)
+                above = placed.get(host["entryId"], 0)
+                entries.insert(entries.index(host) + 1 + above, extracted)
+                placed[host["entryId"]] = above + 1
                 by_id[layer_id] = extracted
                 if not host["sourceIds"]:
                     entries.remove(host)

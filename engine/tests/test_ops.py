@@ -194,3 +194,30 @@ def test_engine_and_ui_agree_on_unmerge():
     ])
     merged_idx = next(i for i, e in enumerate(plan) if len(e["sourceIds"]) > 1)
     assert plan[merged_idx + 1]["entryId"] == 4
+
+
+def test_unmerging_several_layers_keeps_their_order():
+    # 여러 장을 한 번에 빼면 뺀 순서가 그대로 아래→위 순서로 남아야 한다.
+    # 자동 병합을 다른 규칙으로 다시 걸 때 이 순서가 소스 쌓임 순서가 된다.
+    plan = build_export_plan(INCLUDED, [
+        {"op": "merge", "layerIds": [3, 4, 5], "name": "BG"},
+        {"op": "unmerge", "layerIds": [3, 4, 5]},
+    ])
+    assert ids(plan) == [3, 4, 5]
+
+
+def test_engine_and_ui_agree_on_re_running_auto_merge_with_another_rule():
+    # src/lib/opsReducer.test.ts "re-running auto-merge with another rule ..."와 같은
+    # 시나리오. UI가 얹어주는 unmerge + 보정된 병합 id를 그대로 재생한다.
+    plan = build_export_plan([1, 2, 3, 4, 5], [
+        # 1차: 역할 접미사 규칙 — 전부 BG 한 장
+        {"op": "merge", "layerIds": [1, 2, 3, 4, 5], "name": "BG"},
+        {"op": "reorder", "layerId": -1, "aboveId": None},
+        # 2차: 깊이 평면 규칙 — 먼저 풀고 BG/MG로 다시 묶는다
+        {"op": "unmerge", "layerIds": [1, 2, 3, 4, 5]},
+        {"op": "merge", "layerIds": [1, 5], "name": "BG"},
+        {"op": "merge", "layerIds": [2, 3, 4], "name": "MG"},
+        {"op": "reorder", "layerId": -2, "aboveId": None},
+        {"op": "reorder", "layerId": -3, "aboveId": -2},
+    ])
+    assert [(e["name"], e["sourceIds"]) for e in plan] == [("BG", [1, 5]), ("MG", [2, 3, 4])]

@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
-import { buildEntries, exportLabelsBySourceId, opsReducer, OpsState } from "./opsReducer";
+import { autoMergeOps, buildEntries, exportLabelsBySourceId, opsReducer, OpsState } from "./opsReducer";
+import type { Operation } from "./types";
 
 const INC = [3, 4, 5];
 const ids = (e: { entryId: number }[]) => e.map((x) => x.entryId);
@@ -187,4 +188,92 @@ test("unmerge is undone by dropping the op, restoring the full merge", () => {
   expect(withUnmerge.find((e) => e.sourceIds.length > 1)?.sourceIds).toEqual([3, 5]);
   const undone = buildEntries(INC, MERGE_THREE);
   expect(undone.find((e) => e.sourceIds.length > 1)?.sourceIds).toEqual([3, 4, 5]);
+});
+
+// autoMergeOps: 자동 병합을 "이미 병합된 상태" 위에 얹는 경우. 규칙을 바꿔 다시
+// 누르는 것이 정상 사용인데, 예전에는 새 병합이 원본 레이어 id를 가리켜 대상을
+// 찾지 못하고 조용히 무시됐다 — 화면도 산출물도 그대로였다.
+const AUTO_INC = [1, 2, 3, 4, 5];
+// 엔진 auto_merge_operations의 실제 출력(스크린샷의 5장 기준).
+const ROLE_OPS: Operation[] = [
+  { op: "merge", layerIds: [1, 2, 3, 4, 5], name: "BG" },
+  { op: "reorder", layerId: -1, aboveId: null },
+];
+const PLANE_OPS: Operation[] = [
+  { op: "merge", layerIds: [1, 5], name: "BG" },
+  { op: "merge", layerIds: [2, 3, 4], name: "MG" },
+  { op: "reorder", layerId: -1, aboveId: null },
+  { op: "reorder", layerId: -2, aboveId: -1 },
+];
+const fresh = (includedIds: number[]): OpsState => ({
+  includedIds,
+  previewHiddenIds: [],
+  ops: [],
+  entries: buildEntries(includedIds, []),
+});
+const withOps = (includedIds: number[], ops: Operation[]): OpsState => ({
+  includedIds,
+  previewHiddenIds: [],
+  ops,
+  entries: buildEntries(includedIds, ops),
+});
+
+test("autoMergeOps leaves the engine ops alone when nothing is merged yet", () => {
+  expect(autoMergeOps(PLANE_OPS, fresh(AUTO_INC), AUTO_INC)).toEqual(PLANE_OPS);
+});
+
+test("autoMergeOps unmerges the targets first when they are already merged", () => {
+  const pushed = autoMergeOps(PLANE_OPS, withOps(AUTO_INC, ROLE_OPS), AUTO_INC);
+  expect(pushed[0]).toEqual({ op: "unmerge", layerIds: [1, 2, 3, 4, 5] });
+});
+
+test("autoMergeOps shifts merge ids past the merges already consumed", () => {
+  const pushed = autoMergeOps(PLANE_OPS, withOps(AUTO_INC, ROLE_OPS), AUTO_INC);
+  // ROLE_OPS의 merge 하나가 -1을 이미 썼으므로 새 병합은 -2, -3이다.
+  expect(pushed.slice(1)).toEqual([
+    { op: "merge", layerIds: [1, 5], name: "BG" },
+    { op: "merge", layerIds: [2, 3, 4], name: "MG" },
+    { op: "reorder", layerId: -2, aboveId: null },
+    { op: "reorder", layerId: -3, aboveId: -2 },
+  ]);
+});
+
+test("re-running auto-merge with another rule actually re-splits the layers", () => {
+  const state = withOps(AUTO_INC, ROLE_OPS);
+  expect(state.entries).toEqual([{ entryId: -1, sourceIds: [1, 2, 3, 4, 5], name: "BG" }]);
+
+  const entries = buildEntries(AUTO_INC, [...state.ops, ...autoMergeOps(PLANE_OPS, state, AUTO_INC)]);
+  expect(entries.map((e) => [e.name, e.sourceIds])).toEqual([
+    ["BG", [1, 5]], // BG는 맨 아래
+    ["MG", [2, 3, 4]],
+  ]);
+});
+
+test("autoMergeOps only unmerges the layers it is about to re-merge", () => {
+  // 3,4는 다른 병합에 묶여 있고 자동 병합 대상(1,2,5)에는 없다 — 건드리지 않는다.
+  const state = withOps(AUTO_INC, [{ op: "merge", layerIds: [3, 4], name: "KEEP" }]);
+  const pushed = autoMergeOps([{ op: "merge", layerIds: [1, 2, 5], name: "BG" }], state, [1, 2, 5]);
+  expect(pushed).toEqual([{ op: "merge", layerIds: [1, 2, 5], name: "BG" }]);
+  const entries = buildEntries(AUTO_INC, [...state.ops, ...pushed]);
+  expect(entries.find((e) => e.name === "KEEP")?.sourceIds).toEqual([3, 4]);
+  expect(entries.find((e) => e.name === "BG")?.sourceIds).toEqual([1, 2, 5]);
+});
+
+test("unmerging several layers at once keeps their order, so re-merging restacks them the same", () => {
+  const entries = buildEntries(INC, [...MERGE_THREE, { op: "unmerge", layerIds: [3, 4, 5] }]);
+  expect(ids(entries)).toEqual([3, 4, 5]); // index 0 = 맨 아래
+  const remerged = buildEntries(INC, [
+    ...MERGE_THREE,
+    { op: "unmerge", layerIds: [3, 4, 5] },
+    { op: "merge", layerIds: [3, 4, 5], name: "BG" },
+  ]);
+  expect(remerged[0].sourceIds).toEqual([3, 4, 5]);
+});
+
+test("autoMergeOps restacks the same way no matter what order the panel lists its targets", () => {
+  const state = withOps(AUTO_INC, ROLE_OPS);
+  const replay = (targets: number[]) =>
+    buildEntries(AUTO_INC, [...state.ops, ...autoMergeOps(PLANE_OPS, state, targets)]);
+  expect(replay([...AUTO_INC].reverse())).toEqual(replay(AUTO_INC));
+  expect(replay([...AUTO_INC].reverse()).map((e) => e.sourceIds)).toEqual([[1, 5], [2, 3, 4]]);
 });

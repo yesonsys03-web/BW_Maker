@@ -14,7 +14,13 @@ import {
   type LayerFilterMode,
 } from "../lib/layerFilter";
 import { autoMergeOperations, autoMergePreview } from "../lib/engine";
-import { buildEntries, exportLabelsBySourceId, type OpsState } from "../lib/opsReducer";
+import {
+  autoMergeOps,
+  buildEntries,
+  exportLabelsBySourceId,
+  mergedSourceIds as mergedSourceIdsOf,
+  type OpsState,
+} from "../lib/opsReducer";
 import { toEngineError } from "../lib/preview";
 import type { EngineError, MergeRule, Operation, TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
@@ -145,15 +151,8 @@ export function LayerTree({
     [allLeaves, ops.ops]
   );
   const exportLabels = useMemo(() => exportLabelsBySourceId(planEntries), [planEntries]);
-  // 지금 어떤 병합에 묶여 있는 소스 레이어들 — 자기 자신이 아닌 항목에 담겨
-  // 있으면 병합된 것이다. "병합에서 빼기"의 대상 판정용.
-  const mergedSourceIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const entry of planEntries) {
-      for (const id of entry.sourceIds) if (entry.entryId !== id) ids.add(id);
-    }
-    return ids;
-  }, [planEntries]);
+  // "병합에서 빼기"의 대상 판정용.
+  const mergedSourceIds = useMemo(() => mergedSourceIdsOf(planEntries), [planEntries]);
   const filtering = isFiltering(filterMode, query);
   const filteredLeaves = useMemo(
     () => filterLeaves(allLeaves, { mode: filterMode, query, matchedIds }),
@@ -371,7 +370,10 @@ export function LayerTree({
     setAutoMerging(true);
     try {
       const { operations } = await autoMergeOperations(sid, targets, roleTokens, rule);
-      for (const op of operations) onPushOp(op);
+      // 규칙을 바꿔 다시 누르는 것이 정상 사용이다. 이미 병합된 상태 위에 그대로
+      // 얹으면 새 병합이 대상을 못 찾고 무시되므로, autoMergeOps가 먼저 풀고
+      // 병합 항목 id를 현재 상태에 맞춰준다.
+      for (const op of autoMergeOps(operations, ops, targets)) onPushOp(op);
     } catch (e) {
       onError("자동 병합 실패", toEngineError(e));
     } finally {

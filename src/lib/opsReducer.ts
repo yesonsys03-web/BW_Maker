@@ -104,6 +104,10 @@ export function buildEntries(includedIds: number[], ops: Operation[]): Entry[] {
       // 병합에서 빼내 단독 항목으로 되돌린다. 자동 병합이 요소를 잘못 묶었을 때
       // 그 레이어만 꺼내는 용도라, 대상은 항상 원본 레이어 id다.
       case "unmerge": {
+        // 한 병합에서 여러 장을 뺄 때, 전부 같은 자리에 끼워넣으면 서로의 순서가
+        // 뒤집힌다(나중에 뺀 것이 아래로 간다). 다시 묶을 때 이 순서가 그대로
+        // 소스 쌓임 순서가 되므로, 뺀 순서를 그대로 유지한다.
+        const placed = new Map<number, number>(); // host entryId -> 이번 op에서 그 위에 넣은 수
         for (const layerId of op.layerIds) {
           // "자기 자신이 아닌 항목에 담겨 있으면" 병합된 것이다. 소스가 하나만
           // 남은 병합 항목까지 포함해야, 전부 빼냈을 때 병합이 완전히 사라진다.
@@ -112,7 +116,9 @@ export function buildEntries(includedIds: number[], ops: Operation[]): Entry[] {
           host.sourceIds = host.sourceIds.filter((id) => id !== layerId);
           const extracted: Entry = { entryId: layerId, sourceIds: [layerId], name: null };
           // 배열 index 0 = 맨 아래. 꺼낸 레이어는 원래 있던 병합 바로 위에 둔다.
-          entries.splice(entries.indexOf(host) + 1, 0, extracted);
+          const above = placed.get(host.entryId) ?? 0;
+          entries.splice(entries.indexOf(host) + 1 + above, 0, extracted);
+          placed.set(host.entryId, above + 1);
           byId.set(layerId, extracted);
           if (host.sourceIds.length === 0) {
             entries.splice(entries.indexOf(host), 1);
@@ -147,6 +153,64 @@ export function buildEntries(includedIds: number[], ops: Operation[]): Entry[] {
   }
 
   return entries;
+}
+
+/** 지금 어떤 병합에 묶여 있는 소스 레이어들 — 자기 자신이 아닌 항목에 담겨 있으면 병합된 것이다. */
+export function mergedSourceIds(entries: Entry[]): Set<number> {
+  const ids = new Set<number>();
+  for (const entry of entries) {
+    for (const id of entry.sourceIds) if (entry.entryId !== id) ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * 대상 중 이미 다른 병합에 묶여 있는 것들. 오름차순 = 아래→위(includedIds와 같은
+ * 규약)로 돌려준다 — 빼내는 순서가 그대로 다시 묶일 때의 쌓임 순서가 되므로,
+ * 호출 쪽의 목록 순서와 무관하게 원래 순서를 지킨다.
+ */
+function alreadyMerged(entries: Entry[], targetIds: number[]): number[] {
+  const merged = mergedSourceIds(entries);
+  return targetIds.filter((id) => merged.has(id)).sort((a, b) => a - b);
+}
+
+/**
+ * 자동 병합 결과를 "지금 상태 위에 얹을 수 있는" 연산 목록으로 바꾼다.
+ *
+ * 엔진의 자동 병합은 아무것도 병합되지 않은 상태를 가정한다. 그대로 얹으면 두
+ * 군데가 어긋난다:
+ *   1. merge가 가리키는 원본 레이어 id는 이미 병합된 뒤에는 항목 목록에 없다
+ *      (병합 항목 id로 바뀌어 있다). buildEntries는 대상을 못 찾으면 조용히
+ *      건너뛰므로, 규칙을 바꿔 다시 눌러도 화면이 그대로였다. 그래서 대상 중
+ *      이미 병합된 것을 먼저 unmerge로 풀어 원래 id를 되살린다.
+ *   2. 병합 항목 id는 merge/flatten 하나당 하나씩 세션 전체에서 소비되는데,
+ *      엔진은 자기 병합이 -1부터 시작한다고 보고 reorder를 붙인다. 이미 소비된
+ *      수만큼 밀어주지 않으면 reorder가 엉뚱한 항목을 가리켜 순서가 엉킨다.
+ */
+export function autoMergeOps(
+  engineOps: Operation[],
+  state: OpsState,
+  targetIds: number[]
+): Operation[] {
+  const toUnmerge = alreadyMerged(state.entries, targetIds);
+
+  // unmerge는 병합 항목 id를 소비하지 않으므로 앞에 붙어도 아래 보정에 영향이 없다.
+  const consumed = state.ops.filter((op) => op.op === "merge" || op.op === "flatten").length;
+  const shift = (id: number) => (id < 0 ? id - consumed : id);
+  const rebased = engineOps.map((op): Operation => {
+    switch (op.op) {
+      case "merge":
+        return { ...op, layerIds: op.layerIds.map(shift) };
+      case "rename":
+        return { ...op, layerId: shift(op.layerId) };
+      case "reorder":
+        return { ...op, layerId: shift(op.layerId), aboveId: op.aboveId === null ? null : shift(op.aboveId) };
+      default:
+        return op;
+    }
+  });
+
+  return toUnmerge.length > 0 ? [{ op: "unmerge", layerIds: toUnmerge }, ...rebased] : rebased;
 }
 
 export function opsReducer(state: OpsState, action: OpsAction): OpsState {
