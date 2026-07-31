@@ -2,17 +2,21 @@ import type { TreeNode } from "./types";
 
 /**
  * 레이어 패널의 보기 모드. 소스 PSD는 레이어가 수백 장이라 전체 트리에서
- * 라인 레이어를 골라내는 것이 실질적으로 어렵다 — "라인만"/"포함됨"은 트리를
- * 접어두고 해당 leaf만 평면으로 나열한다.
+ * 라인 레이어를 골라내는 것이 실질적으로 어렵다 — "라인만"은 트리를 접어두고
+ * 해당 leaf만 평면으로 나열한다.
+ *
+ * "포함됨"(체크된 것만) 모드도 한때 있었으나 뺐다: 프리셋을 적용하면
+ * includedIds가 매칭 결과로 세팅되므로 주 워크플로에서 "라인만"과 같은 목록이
+ * 되고, 내보낼 대상 확인은 내보내기 다이얼로그가 순서·이름·검증까지 보여주는
+ * 더 나은 자리를 이미 갖고 있다.
  */
-export type LayerFilterMode = "all" | "line" | "included";
+export type LayerFilterMode = "all" | "line";
 
-export const LAYER_FILTER_MODES: readonly LayerFilterMode[] = ["all", "line", "included"];
+export const LAYER_FILTER_MODES: readonly LayerFilterMode[] = ["all", "line"];
 
 export const LAYER_FILTER_LABELS: Record<LayerFilterMode, string> = {
   all: "전체",
   line: "라인만",
-  included: "포함됨",
 };
 
 /** 프리셋 매칭 결과가 아직 없을 때 "라인만"이 대신 쓰는 이름 규칙. */
@@ -74,7 +78,6 @@ export interface LayerFilterInput {
   mode: LayerFilterMode;
   query: string;
   matchedIds: number[];
-  includedIds: number[];
 }
 
 /**
@@ -91,9 +94,6 @@ export function filterLeaves(leaves: FlatLeaf[], input: LayerFilterInput): FlatL
 
   if (input.mode === "line") {
     const ids = new Set(lineLeafIds(leaves, input.matchedIds));
-    out = out.filter((l) => ids.has(l.node.id));
-  } else if (input.mode === "included") {
-    const ids = new Set(input.includedIds);
     out = out.filter((l) => ids.has(l.node.id));
   }
 

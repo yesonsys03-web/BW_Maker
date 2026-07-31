@@ -87,7 +87,6 @@ test("isLineFallbackActive only reports the fallback in line mode without matche
   expect(isLineFallbackActive("line", [])).toBe(true);
   expect(isLineFallbackActive("line", [2])).toBe(false);
   expect(isLineFallbackActive("all", [])).toBe(false);
-  expect(isLineFallbackActive("included", [])).toBe(false);
 });
 
 test("isFiltering is false only for the untouched all-mode view", () => {
@@ -95,36 +94,30 @@ test("isFiltering is false only for the untouched all-mode view", () => {
   expect(isFiltering("all", "   ")).toBe(false);
   expect(isFiltering("all", "line")).toBe(true);
   expect(isFiltering("line", "")).toBe(true);
-  expect(isFiltering("included", "")).toBe(true);
 });
 
 test("filterLeaves in line mode keeps only the line leaves", () => {
-  const out = filterLeaves(leaves, { mode: "line", query: "", matchedIds: [], includedIds: [] });
+  const out = filterLeaves(leaves, { mode: "line", query: "", matchedIds: [] });
   expect(out.map((l) => l.node.id)).toEqual([2, 4]);
 });
 
-test("filterLeaves in included mode keeps only checked leaves", () => {
-  const out = filterLeaves(leaves, { mode: "included", query: "", matchedIds: [], includedIds: [1, 4] });
-  expect(out.map((l) => l.node.id)).toEqual([1, 4]);
-});
-
 test("filterLeaves in all mode with no query keeps everything", () => {
-  const out = filterLeaves(leaves, { mode: "all", query: "", matchedIds: [], includedIds: [] });
+  const out = filterLeaves(leaves, { mode: "all", query: "", matchedIds: [] });
   expect(out.map((l) => l.node.id)).toEqual([1, 2, 4, 5, 6]);
 });
 
 test("the query matches the breadcrumb too, so a group name narrows the list", () => {
-  const out = filterLeaves(leaves, { mode: "all", query: "pipes", matchedIds: [], includedIds: [] });
+  const out = filterLeaves(leaves, { mode: "all", query: "pipes", matchedIds: [] });
   expect(out.map((l) => l.node.id)).toEqual([4, 5]);
 });
 
 test("query and mode compose — the same-named LINE rows are told apart by path", () => {
-  const out = filterLeaves(leaves, { mode: "line", query: "PIPES", matchedIds: [], includedIds: [] });
+  const out = filterLeaves(leaves, { mode: "line", query: "PIPES", matchedIds: [] });
   expect(out.map((l) => l.node.id)).toEqual([4]);
 });
 
 test("a query matching nothing yields an empty list rather than everything", () => {
-  const out = filterLeaves(leaves, { mode: "all", query: "zzz", matchedIds: [], includedIds: [] });
+  const out = filterLeaves(leaves, { mode: "all", query: "zzz", matchedIds: [] });
   expect(out).toEqual([]);
 });
 

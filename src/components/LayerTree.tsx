@@ -107,14 +107,8 @@ export function LayerTree({
   const allLeaves = useMemo(() => (tree ? flattenLeaves(tree) : []), [tree]);
   const filtering = isFiltering(filterMode, query);
   const filteredLeaves = useMemo(
-    () =>
-      filterLeaves(allLeaves, {
-        mode: filterMode,
-        query,
-        matchedIds,
-        includedIds: ops.includedIds,
-      }),
-    [allLeaves, filterMode, query, matchedIds, ops.includedIds]
+    () => filterLeaves(allLeaves, { mode: filterMode, query, matchedIds }),
+    [allLeaves, filterMode, query, matchedIds]
   );
 
   // shift-범위 선택의 기준 순서. 평면 목록일 때는 화면에 보이는 그 순서가
