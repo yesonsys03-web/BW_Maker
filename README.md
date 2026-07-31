@@ -16,7 +16,7 @@
 uv를 따로 깔 필요는 없습니다 — 엔진이 앱 안에 들어 있습니다.
 
 - **윈도우:** `BW.Maker_<버전>_x64-setup.exe` (또는 `.msi`)
-- **macOS:** `.dmg` (Apple Silicon)
+- **macOS:** `.dmg` — 기계에 맞는 것으로. `aarch64`가 Apple Silicon, `x64`가 인텔입니다.
 
 ### 서명이 없습니다
 
@@ -83,6 +83,10 @@ PSD 열기 → 썸네일 → 한글 경로로 내보내기 + 검증 → 에러 �
 `macos-installer.yml`). `v*` 태그를 push하면 그 태그의 릴리스 자산으로 올라가고, 수동 실행
 (workflow_dispatch)은 초안 릴리스에 올립니다. 태그와 앱 버전은 `src-tauri/tauri.conf.json`의
 `version` 하나에서 나옵니다.
+
+인텔 macOS만 예외입니다. 워크플로의 macOS 러너는 Apple Silicon이고 PyInstaller는 크로스 컴파일이
+안 되므로, 인텔용은 인텔 맥에서 위 두 명령으로 빌드해 `gh release upload <태그> <dmg 경로>`로
+붙입니다.
 
 ### 테스트
 
