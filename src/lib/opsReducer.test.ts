@@ -32,8 +32,11 @@ test("reorder above and to bottom", () => {
   expect(ids(buildEntries(INC, [{ op: "reorder", layerId: 5, aboveId: null }]))).toEqual([5, 3, 4]);
 });
 
-test("unknown ref throws", () => {
-  expect(() => buildEntries(INC, [{ op: "rename", layerId: 99, name: "x" }])).toThrow();
+test("an op referring to a layer that is no longer included is skipped, not fatal", () => {
+  // 체크 해제는 일상적인 동작이다. 그 레이어를 가리키던 작업 때문에 전체가
+  // 실패하면 아티스트는 무관한 편집을 되돌려야 한다.
+  expect(() => buildEntries(INC, [{ op: "rename", layerId: 99, name: "x" }])).not.toThrow();
+  expect(ids(buildEntries(INC, [{ op: "rename", layerId: 99, name: "x" }]))).toEqual(INC);
 });
 
 test("reorder self-reference (aboveId === layerId) throws", () => {
@@ -91,4 +94,50 @@ test("exportLabelsBySourceId follows a merge that is later renamed", () => {
   expect(label?.name).toBe("CHAIR_LINE");
   expect(label?.merged).toBe(true);
   expect(label?.sourceCount).toBe(2);
+});
+
+
+// 병합에 참여한 레이어의 체크를 푸는 경우. 예전에는 buildEntries가 던져서
+// "포함 상태 변경 실패 — 먼저 병합을 되돌리세요" 에러가 떴다.
+const MERGE_CHAIR = [{ op: "merge" as const, layerIds: [3, 4], name: "Chair2" }];
+
+test("unchecking one source of a merge leaves the other carrying the merged name", () => {
+  const entries = buildEntries([4, 5], MERGE_CHAIR);
+  const chair = entries.find((e) => e.sourceIds.includes(4));
+  expect(chair?.name).toBe("Chair2");
+  expect(chair?.sourceIds).toEqual([4]);
+  expect(entries).toHaveLength(2);
+});
+
+test("unchecking every source of a merge drops it entirely", () => {
+  const entries = buildEntries([5], MERGE_CHAIR);
+  expect(entries).toEqual([{ entryId: 5, sourceIds: [5], name: null }]);
+});
+
+test("re-checking a source restores the merge, since ops replay from scratch", () => {
+  const entries = buildEntries(INC, MERGE_CHAIR);
+  const merged = entries.find((e) => e.sourceIds.length === 2);
+  expect(merged?.sourceIds).toEqual([3, 4]);
+  expect(merged?.name).toBe("Chair2");
+});
+
+test("a merge reduced to one source still answers to its merged entry id", () => {
+  // 뒤따르는 작업(예: 병합 결과 이름변경)이 id를 잃지 않아야 한다.
+  const full = buildEntries(INC, MERGE_CHAIR);
+  const mergedId = full.find((e) => e.sourceIds.length === 2)!.entryId;
+  const entries = buildEntries([4, 5], [
+    ...MERGE_CHAIR,
+    { op: "rename", layerId: mergedId, name: "CHAIR_LINE" },
+  ]);
+  expect(entries.find((e) => e.sourceIds.includes(4))?.name).toBe("CHAIR_LINE");
+});
+
+test("reorder is skipped when its reference entry is no longer included", () => {
+  const ops = [{ op: "reorder" as const, layerId: 5, aboveId: 3 }];
+  expect(() => buildEntries([4, 5], ops)).not.toThrow();
+  expect(ids(buildEntries([4, 5], ops))).toEqual([4, 5]);
+});
+
+test("reorder to the bottom still works when its own entry survives", () => {
+  expect(ids(buildEntries(INC, [{ op: "reorder", layerId: 5, aboveId: null }]))).toEqual([5, 3, 4]);
 });

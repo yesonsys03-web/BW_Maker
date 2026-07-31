@@ -196,20 +196,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         const next = opsReducer(current, { type: "setIncluded", includedIds: action.includedIds });
         return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
       } catch (e) {
-        const original = errorFrom(e);
+        // 원래는 여기서 "이 레이어를 참조하는 편집이 있으니 먼저 되돌리라"는
+        // 안내로 실제 메시지를 덮어썼다. 그 상황(병합에 쓰인 레이어의 체크 해제)
+        // 자체가 이제 정상 동작이므로 — buildEntries가 남은 것들로 재생한다 —
+        // 여기까지 오는 건 짐작할 게 아니라 진짜 결함이다. 메시지를 그대로 보인다.
         return {
           ...state,
-          errors: [
-            ...state.errors,
-            {
-              title: "포함 상태 변경 실패",
-              error: {
-                message:
-                  "이 레이어를 참조하는 편집 작업이 있습니다. 먼저 관련 편집(병합/이름변경 등)을 되돌린 뒤 다시 시도하세요.",
-                traceback: original.traceback,
-              },
-            },
-          ],
+          errors: [...state.errors, { title: "포함 상태 변경 실패", error: errorFrom(e) }],
         };
       }
     }

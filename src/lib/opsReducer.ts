@@ -27,27 +27,46 @@ export type OpsAction =
  * TS mirror of engine/psd_engine/ops.py build_export_plan. Same semantics:
  * merge inserts at the topmost source position with sourceIds bottom→top,
  * merge entryIds count down from -1 and may be re-merged; flatten merges
- * every current entry; reorder aboveId=null moves to the bottom; unknown
- * refs throw. "exclude" is not supported here — the checkbox-driven
- * includedIds/setIncluded replaces it.
+ * every current entry; reorder aboveId=null moves to the bottom.
+ * "exclude" is not supported here — the checkbox-driven includedIds/
+ * setIncluded replaces it.
+ *
+ * ops는 includedIds 위에서 매번 처음부터 재생된다. 그래서 어떤 작업이 가리키던
+ * 레이어의 체크가 풀리면 그 작업은 실패가 아니라 남은 것들에 대해서만 성립한다
+ * (2장 병합에서 하나가 빠지면 나머지 하나가 그 이름을 이어받는 식). 체크를 다시
+ * 켜면 재생 결과가 원래대로 돌아온다.
  */
 export function buildEntries(includedIds: number[], ops: Operation[]): Entry[] {
   const entries: Entry[] = includedIds.map((id) => ({ entryId: id, sourceIds: [id], name: null }));
   const byId = new Map<number, Entry>(entries.map((e) => [e.entryId, e]));
   let mergeCounter = 0;
 
-  const require_ = (entryId: number): Entry => {
-    const e = byId.get(entryId);
-    if (e === undefined) throw new Error(`unknown entry id: ${entryId}`);
-    return e;
-  };
-
   const doMerge = (entryIds: number[], name: string | null) => {
-    const group = entryIds.map((id) => require_(id));
-    if (group.length < 2) throw new Error("merge needs at least 2 layers");
+    // includedIds가 무엇이 내보내지는지의 기준이다. 체크를 푼 레이어는 애초에
+    // 산출물에 없으므로, 그 레이어를 참조하던 병합은 "실패"가 아니라 남은
+    // 것들끼리의 병합으로 성립한다. 예전에는 여기서 예외가 나서, 병합에 참여한
+    // 레이어의 체크를 푸는 것만으로 "먼저 병합을 되돌리라"는 에러가 떴다.
+    const group = entryIds
+      .map((id) => byId.get(id))
+      .filter((e): e is Entry => e !== undefined);
+
+    // 병합 항목 id는 결과와 무관하게 소비한다 — 그래야 이 병합을 가리키는
+    // 뒤쪽 작업(예: 병합 결과의 이름변경)의 id가 어긋나지 않는다.
+    mergeCounter -= 1;
+
+    if (group.length === 0) return;
+    if (group.length === 1) {
+      // 합칠 상대가 없다. 남은 항목이 그 병합의 자리(id·이름)를 이어받는다.
+      const only = group[0];
+      byId.delete(only.entryId);
+      only.entryId = mergeCounter;
+      only.name = name;
+      byId.set(only.entryId, only);
+      return;
+    }
+
     const groupSorted = [...group].sort((a, b) => entries.indexOf(a) - entries.indexOf(b));
     const topIndex = entries.indexOf(groupSorted[groupSorted.length - 1]);
-    mergeCounter -= 1;
     const merged: Entry = {
       entryId: mergeCounter,
       sourceIds: groupSorted.flatMap((e) => e.sourceIds),
@@ -67,9 +86,15 @@ export function buildEntries(includedIds: number[], ops: Operation[]): Entry[] {
     switch (op.op) {
       case "exclude":
         throw new Error("exclude op is not supported by buildEntries; use setIncluded instead");
-      case "rename":
-        require_(op.layerId).name = op.name;
+      // rename/reorder도 같은 이유로 대상이 사라졌으면 조용히 건너뛴다: 그
+      // 레이어는 이미 내보내기 대상이 아니므로 이름을 바꾸거나 순서를 옮길
+      // 것이 없다. 나중에 다시 체크하면 ops를 처음부터 재생하므로 그대로
+      // 되살아난다.
+      case "rename": {
+        const e = byId.get(op.layerId);
+        if (e !== undefined) e.name = op.name;
         break;
+      }
       case "merge":
         doMerge(op.layerIds, op.name);
         break;
@@ -77,18 +102,23 @@ export function buildEntries(includedIds: number[], ops: Operation[]): Entry[] {
         doMerge(entries.map((e) => e.entryId), op.name);
         break;
       case "reorder": {
-        const e = require_(op.layerId);
-        entries.splice(entries.indexOf(e), 1);
+        const e = byId.get(op.layerId);
+        if (e === undefined) break;
         if (op.aboveId === null) {
+          entries.splice(entries.indexOf(e), 1);
           entries.splice(0, 0, e);
-        } else {
-          const above = require_(op.aboveId);
-          const aboveIdx = entries.indexOf(above);
-          if (aboveIdx === -1) {
-            throw new Error(`reorder: aboveId ${op.aboveId} not found in entries (self-reference?)`);
-          }
-          entries.splice(aboveIdx + 1, 0, e);
+          break;
         }
+        // 기준이던 항목이 사라졌으면 "그 위로"가 성립하지 않는다. 억지로 다른
+        // 자리에 끼워넣지 않고 원래 자리에 둔다.
+        const above = byId.get(op.aboveId);
+        if (above === undefined) break;
+        entries.splice(entries.indexOf(e), 1);
+        const aboveIdx = entries.indexOf(above);
+        if (aboveIdx === -1) {
+          throw new Error(`reorder: aboveId ${op.aboveId} not found in entries (self-reference?)`);
+        }
+        entries.splice(aboveIdx + 1, 0, e);
         break;
       }
       default:

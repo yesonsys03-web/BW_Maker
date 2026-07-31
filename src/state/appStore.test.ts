@@ -151,28 +151,43 @@ describe("ops actions delegate to the active file's OpsState", () => {
     expect(s.errors).toHaveLength(0);
   });
 
-  test("pushOp with an invalid reference is caught and reported via the error stack (no throw)", () => {
+  test("pushOp naming a layer that isn't in the export set changes nothing and raises nothing", () => {
+    // ops는 includedIds 위에서 재생되므로, 내보내기 대상이 아닌 레이어를 가리키는
+    // 작업은 적용할 대상이 없다. 예전에는 여기서 예외가 났다.
     const s0 = opened();
     let s: AppState | undefined;
     expect(() => {
       s = appReducer(s0, { type: "pushOp", path: "/a.psd", op: { op: "rename", layerId: 999, name: "x" } });
     }).not.toThrow();
-    expect(s!.errors).toHaveLength(1);
-    expect(s!.errors[0].error.message).toBeTruthy();
-    // the ops state itself is left untouched by the failed op.
-    expect(s!.opsByPath["/a.psd"]).toEqual(s0.opsByPath["/a.psd"]);
+    expect(s!.errors).toHaveLength(0);
+    expect(s!.opsByPath["/a.psd"].entries).toEqual(s0.opsByPath["/a.psd"].entries);
   });
 
-  test("setIncluded referencing a layer used by an existing op is caught with a clear message (no throw, no silent no-op)", () => {
+  test("unchecking a layer used by a merge succeeds, leaving the merge on what remains", () => {
+    // 회귀 방지: 예전에는 "포함 상태 변경 실패 — 먼저 병합을 되돌리세요"가 떴다.
+    // 체크 해제는 일상적인 동작이므로 무관한 편집을 되돌리게 만들면 안 된다.
     const s0 = opened();
     const merged = appReducer(s0, { type: "pushOp", path: "/a.psd", op: { op: "merge", layerIds: [1, 2], name: "M" } });
     let s: AppState | undefined;
     expect(() => {
-      s = appReducer(merged, { type: "setIncluded", path: "/a.psd", includedIds: [1, 5] }); // drops layer 2, referenced by the merge
+      s = appReducer(merged, { type: "setIncluded", path: "/a.psd", includedIds: [1, 5] }); // 병합에 쓰인 2를 뺀다
     }).not.toThrow();
-    expect(s!.errors).toHaveLength(1);
-    expect(s!.errors[0].error.message).toContain("참조하는 편집");
-    expect(s!.opsByPath["/a.psd"]).toEqual(merged.opsByPath["/a.psd"]);
+    expect(s!.errors).toHaveLength(0);
+    expect(s!.opsByPath["/a.psd"].includedIds).toEqual([1, 5]);
+    const survivor = s!.opsByPath["/a.psd"].entries.find((e) => e.sourceIds.includes(1));
+    expect(survivor?.name).toBe("M");
+    expect(survivor?.sourceIds).toEqual([1]);
+  });
+
+  test("re-checking that layer restores the two-source merge", () => {
+    const s0 = opened();
+    const merged = appReducer(s0, { type: "pushOp", path: "/a.psd", op: { op: "merge", layerIds: [1, 2], name: "M" } });
+    const dropped = appReducer(merged, { type: "setIncluded", path: "/a.psd", includedIds: [1, 5] });
+    const restored = appReducer(dropped, { type: "setIncluded", path: "/a.psd", includedIds: [1, 2, 5] });
+    const entry = restored.opsByPath["/a.psd"].entries.find((e) => e.sourceIds.length === 2);
+    expect(entry?.sourceIds).toEqual([1, 2]);
+    expect(entry?.name).toBe("M");
+    expect(restored.errors).toHaveLength(0);
   });
 
   test("togglePreview flips a layer id in previewHiddenIds", () => {
@@ -217,7 +232,7 @@ describe("ops actions delegate to the active file's OpsState", () => {
     expect(s.errors).toHaveLength(0);
   });
 
-  test("applyPresetResult with an internally inconsistent operations array is caught via the error stack (no throw, no partial state)", () => {
+  test("applyPresetResult applies the match even when an operation names a layer outside it", () => {
     const s0 = opened();
     let s: AppState | undefined;
     expect(() => {
@@ -228,10 +243,10 @@ describe("ops actions delegate to the active file's OpsState", () => {
         operations: [{ op: "rename", layerId: 999, name: "x" }], // 999 isn't in matchedLayerIds
       });
     }).not.toThrow();
-    expect(s!.errors).toHaveLength(1);
-    expect(s!.errors[0].error.message).toBeTruthy();
-    expect(s!.opsByPath["/a.psd"]).toEqual(s0.opsByPath["/a.psd"]);
-    expect(s!.matchedIds).toEqual(s0.matchedIds);
+    expect(s!.errors).toHaveLength(0);
+    // 매칭 결과는 반영되고, 대상이 없는 작업만 아무 일도 하지 않는다.
+    expect(s!.matchedIds).toEqual([1]);
+    expect(s!.opsByPath["/a.psd"].entries).toEqual([{ entryId: 1, sourceIds: [1], name: null }]);
   });
 });
 
