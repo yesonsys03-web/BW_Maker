@@ -11,6 +11,12 @@ import { OpsHistory } from "./components/OpsHistory";
 import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
 import { loadPngDataUrl, renderThumbnails } from "./lib/engine";
+import {
+  DEFAULT_TREE_PANEL_WIDTH,
+  TREE_PANEL_WIDTH_STORAGE_KEY,
+  clampTreePanelWidth,
+  parseTreePanelWidth,
+} from "./lib/layout";
 import { pixelLeafIds, toEngineError } from "./lib/preview";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
 import type { Preset } from "./lib/types";
@@ -54,6 +60,33 @@ function AppShell() {
   // keying by path — not a flat id map — avoids collisions across files).
   const [thumbsByPath, setThumbsByPath] = useState<Record<string, Record<number, string>>>({});
   const fetchedPathsRef = useRef<Set<string>>(new Set());
+
+  // 레이어 패널 폭. 파일이 아니라 사람에게 붙는 설정이라 재시작을 넘어 유지된다.
+  const [treeWidth, setTreeWidth] = useState(() =>
+    parseTreePanelWidth(window.localStorage.getItem(TREE_PANEL_WIDTH_STORAGE_KEY))
+  );
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  function handleResizeStart(e: React.PointerEvent<HTMLDivElement>) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { startX: e.clientX, startWidth: treeWidth };
+  }
+
+  function handleResizeMove(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    // 핸들은 패널 왼쪽 모서리에 있으므로 왼쪽으로 끌수록 넓어진다.
+    setTreeWidth(clampTreePanelWidth(drag.startWidth - (e.clientX - drag.startX), window.innerWidth));
+  }
+
+  function handleResizeEnd(e: React.PointerEvent<HTMLDivElement>) {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    window.localStorage.setItem(TREE_PANEL_WIDTH_STORAGE_KEY, String(treeWidth));
+  }
 
   const [bottomTab, setBottomTab] = useState<BottomTab>("history");
   const [exportOpen, setExportOpen] = useState(false);
@@ -143,7 +176,7 @@ function AppShell() {
   }, [state.files]);
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" style={{ gridTemplateColumns: `240px 1fr ${treeWidth}px` }}>
       <EngineStatus onRestarted={engineRestarted} onError={pushError} />
 
       <PresetBar
@@ -188,6 +221,22 @@ function AppShell() {
       </div>
 
       <div className="layer-tree-panel">
+        <div
+          className="panel-resize-handle"
+          role="separator"
+          aria-label="레이어 패널 폭 조절"
+          aria-orientation="vertical"
+          onPointerDown={handleResizeStart}
+          onPointerMove={handleResizeMove}
+          onPointerUp={handleResizeEnd}
+          onPointerCancel={handleResizeEnd}
+          onDoubleClick={() => {
+            const reset = clampTreePanelWidth(DEFAULT_TREE_PANEL_WIDTH, window.innerWidth);
+            setTreeWidth(reset);
+            window.localStorage.setItem(TREE_PANEL_WIDTH_STORAGE_KEY, String(reset));
+          }}
+          title="드래그해서 폭 조절 (더블클릭: 기본값)"
+        />
         <LayerTree
           tree={activeFile?.tree}
           path={activeFile?.path}

@@ -288,7 +288,9 @@ export function LayerTree({
             >
               👁
             </button>
-            <span className="node-name">{node.name}</span>
+            <span className="node-name" title={node.name}>
+              {node.name}
+            </span>
           </div>
           {!collapsed && (node.children ?? []).map((child) => renderNode(child, depth + 1))}
         </div>
@@ -348,7 +350,9 @@ export function LayerTree({
           </span>
         )}
         <span className="node-label">
-          <span className="node-name">{node.name}</span>
+          <span className="node-name" title={node.name}>
+            {node.name}
+          </span>
           {flat && opts.breadcrumb!.length > 0 && (
             <span className="node-breadcrumb" title={opts.breadcrumb}>
               {opts.breadcrumb}

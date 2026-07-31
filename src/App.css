@@ -458,12 +458,32 @@ input[type="text"] {
 
 .layer-tree-panel {
   grid-area: tree;
+  position: relative;
   min-height: 0;
   overflow: hidden;
   background: var(--bg-1);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+}
+
+/* 레이어 이름은 길고 그룹 중첩은 깊어서 고정 폭으로는 반드시 잘린다. 패널
+   왼쪽 모서리에 붙는 드래그 핸들 — 히트 영역은 6px이지만 시각적으로는
+   기존 테두리만 보이다가 hover/드래그 때만 강조된다. */
+.panel-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  z-index: 20;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.panel-resize-handle:hover,
+.panel-resize-handle:active {
+  background: var(--accent);
 }
 
 .layer-tree {
