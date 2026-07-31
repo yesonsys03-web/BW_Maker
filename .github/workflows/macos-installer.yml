@@ -1,0 +1,66 @@
+# macOS 설치본(.app/.dmg)을 만들어 릴리스 자산으로 올린다.
+# windows-installer.yml의 복제본이며, 갈라지는 곳은 세 군데뿐이다:
+#   - 러너가 macos-latest(Apple Silicon)라 동결 트리플이 aarch64-apple-darwin
+#   - 동결 스크립트가 pwsh가 아니라 bash
+#   - 번들 타깃이 app + dmg
+#
+# 서명하지 않는다. 인증서가 아직 없고, 서명 없이 배포할 때의 Gatekeeper 안내는
+# README에 적는다. notarize를 하려면 동봉한 사이드카의 중첩 Mach-O(_internal의
+# .so/.dylib까지)를 개별 서명해야 한다 — --deep은 폐기됐다.
+name: macOS installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 릴리스 자산 업로드
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: npm ci
+
+      # 동결이 실패하면 여기서 빌드가 끝난다. 스크립트 안의 임포트 게이트와
+      # 스모크(engine/packaging/smoke.py)가 그 판단을 대신한다.
+      - name: Freeze the engine sidecar
+        run: bash scripts/build-engine.sh
+
+      - name: Build installers
+        run: npm run tauri build -- --bundles app dmg
+
+      - name: Read version
+        id: version
+        run: echo "version=$(jq -r .version src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          # 수동 실행은 초안으로. 태그 push만 공개 릴리스가 된다.
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          files: src-tauri/target/release/bundle/dmg/*.dmg
+          fail_on_unmatched_files: true
