@@ -43,37 +43,118 @@ impl Default for EngineState {
     }
 }
 
-fn engine_command() -> Command {
-    // dev: 저장소의 engine/ 프로젝트를 uv로 실행. (릴리스 사이드카는 Plan C)
-    let engine_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine");
-    let mut c = Command::new("uv");
-    c.args(["run", "python", "-m", "psd_engine"])
-        .current_dir(engine_dir)
-        // 요청 JSON은 UTF-8 원문으로 나간다(serde_json은 non-ASCII를 escape하지
-        // 않는다). 파이썬이 stdio를 로케일 인코딩으로 열면 한글 윈도우(cp949)에서
-        // 한글 경로가 든 첫 요청에 엔진이 UnicodeDecodeError로 죽는다. 엔진도
-        // 자기 쪽에서 UTF-8로 reconfigure하지만(psd_engine/rpc.py), 인터프리터가
-        // 처음부터 UTF-8로 뜨는 편이 낫다.
-        .env("PYTHONUTF8", "1")
+/// 동결 사이드카 디렉터리 이름에 들어가는 타깃 트리플. scripts/build-engine.sh와
+/// build-engine.ps1이 스테이징할 때 같은 문자열을 만든다 — 한쪽만 바뀌면 설치본이
+/// 사이드카를 못 찾는다. None이면 사이드카를 만들지 않는 플랫폼이다.
+fn engine_target_triple() -> Option<&'static str> {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some("x86_64-pc-windows-msvc")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("aarch64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some("x86_64-apple-darwin")
+    } else {
+        None
+    }
+}
+
+/// 동결 사이드카(onedir)의 진입 바이너리가 있을 만한 경로 전부.
+///
+/// Tauri는 bundle.resources를 번들 형식에 따라 다른 자리에 풀어놓는다: 윈도우
+/// NSIS/MSI는 실행 파일 옆, macOS .app은 Contents/Resources. 어느 쪽인지 런타임에
+/// 확실히 알 방법이 없으므로 현재 실행 파일 기준으로 네 곳을 모두 훑는다.
+///
+/// 저장소의 스테이징 디렉터리(src-tauri/binaries)는 일부러 후보에 넣지 않는다.
+/// 개발 모드는 uv 경로를 쓰므로 필요가 없고, 넣으면 빌드한 기계에서만 동봉 누락이
+/// 가려진다 — resources 글롭이 깨진 설치본이 로컬에서는 멀쩡히 도는 것처럼 보인다.
+fn bundled_engine_candidates(triple: &str) -> Vec<std::path::PathBuf> {
+    let dir_name = format!("psd-engine-{triple}");
+    let bin_name = format!("psd_engine{}", std::env::consts::EXE_SUFFIX);
+
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+            roots.push(dir.join("binaries"));
+            // macOS .app: Contents/MacOS/<exe> → 리소스는 Contents/Resources
+            if let Some(contents) = dir.parent() {
+                roots.push(contents.join("Resources"));
+                roots.push(contents.join("Resources").join("binaries"));
+            }
+        }
+    }
+    roots
+        .into_iter()
+        .map(|root| root.join(&dir_name).join(&bin_name))
+        .collect()
+}
+
+/// 배포 빌드가 실행할 동결 사이드카를 찾는다. 못 찾으면 훑은 경로를 그대로 담은
+/// 에러를 낸다 — uv로 몰래 넘어가지 않는다. 사용자 PC에 uv는 없고, 조용한
+/// fallback은 "무엇이 빠졌는지"를 통째로 감춘다.
+fn locate_bundled_engine() -> Result<std::path::PathBuf, String> {
+    let triple = engine_target_triple().ok_or_else(|| {
+        format!(
+            "no engine sidecar is built for this platform ({}/{})",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let candidates = bundled_engine_candidates(triple);
+    candidates.iter().find(|p| p.is_file()).cloned().ok_or_else(|| {
+        format!(
+            "bundled engine not found; looked in: {}",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
+fn engine_command() -> Result<Command, String> {
+    let mut c = if cfg!(debug_assertions) {
+        // dev: 저장소의 engine/ 프로젝트를 uv로 실행한다. 엔진을 고칠 때마다 다시
+        // 동결할 필요가 없다.
+        let engine_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine");
+        let mut c = Command::new("uv");
+        c.args(["run", "python", "-m", "psd_engine"]).current_dir(engine_dir);
+        c
+    } else {
+        // 릴리스: scripts/build-engine.*이 동결하고 tauri.conf의 bundle.resources가
+        // 동봉한 사이드카. 저장소도 uv도 Python도 없는 PC가 대상이다.
+        Command::new(locate_bundled_engine()?)
+    };
+    // 요청 JSON은 UTF-8 원문으로 나간다(serde_json은 non-ASCII를 escape하지
+    // 않는다). 파이썬이 stdio를 로케일 인코딩으로 열면 한글 윈도우(cp949)에서
+    // 한글 경로가 든 첫 요청에 엔진이 UnicodeDecodeError로 죽는다. 다만 동결
+    // 빌드는 PyInstaller가 인터프리터를 isolated config로 띄워 이 환경 변수를
+    // 무시할 수 있다 — 실제 방어선은 엔진 쪽 reconfigure(psd_engine/rpc.py의
+    // _as_utf8)이고, 여기 둘은 dev 경로에서 인터프리터가 처음부터 UTF-8로 뜨게
+    // 하는 역할이다.
+    c.env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // 윈도우에서 GUI 앱이 자식 프로세스를 띄우면 그 자식이 콘솔 창을 갖는다.
     // 앱 자체는 windows_subsystem="windows"라 콘솔이 없으므로, 엔진을 띄울 때와
-    // 재시작할 때마다 검은 창이 뜨는 것으로 보인다.
+    // 재시작할 때마다 검은 창이 뜨는 것으로 보인다. 사이드카를 콘솔 앱으로
+    // 동결하는 것(engine/packaging/psd_engine.spec)과 짝이다 — windowed로 얼면
+    // 윈도우에서 sys.stdout이 None이 되어 엔진이 응답 자체를 못 한다.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         c.creation_flags(CREATE_NO_WINDOW);
     }
-    c
+    Ok(c)
 }
 
 pub fn spawn_engine(app: &AppHandle) -> Result<(), String> {
     let state: State<EngineState> = app.state();
-    let mut child = engine_command().spawn().map_err(|e| e.to_string())?;
+    let mut child = engine_command()?.spawn().map_err(|e| e.to_string())?;
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take().ok_or("no stderr")?;
@@ -315,6 +396,44 @@ mod tests {
         // 새 세대의 pending은 그대로 살아있어야 한다.
         assert_eq!(pending.lock().unwrap().len(), 1);
         assert!(new_rx.try_recv().is_err(), "new request must still be awaiting its own response");
+    }
+
+    #[test]
+    fn bundled_engine_candidates_cover_every_installed_layout() {
+        // 후보는 current_exe(여기서는 테스트 바이너리) 기준이라 앞부분은 환경마다
+        // 다르다. 확인할 것은 꼬리 모양 — 디렉터리는 하이픈, 진입 바이너리는
+        // 밑줄이며 build-engine.sh/.ps1의 스테이징 이름과 정확히 같아야 한다 —
+        // 과, 번들 형식별 자리 네 곳이 모두 후보에 들어갔는지다.
+        let candidates = bundled_engine_candidates("x86_64-pc-windows-msvc");
+        let tail = std::path::Path::new("psd-engine-x86_64-pc-windows-msvc")
+            .join(format!("psd_engine{}", std::env::consts::EXE_SUFFIX));
+        assert_eq!(candidates.len(), 4, "current_exe 기준 후보 네 자리");
+        for c in &candidates {
+            assert!(c.ends_with(&tail), "{} must end with {}", c.display(), tail.display());
+        }
+        let shown: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+        // macOS .app: Contents/MacOS/<exe> → Contents/Resources[/binaries]
+        assert!(shown.iter().any(|p| p.contains("Resources")), "{shown:?}");
+        // 실행 파일 옆 binaries/ (윈도우 NSIS/MSI) + Resources/binaries (macOS)
+        assert!(shown.iter().filter(|p| p.contains("binaries")).count() >= 2, "{shown:?}");
+    }
+
+    #[test]
+    fn locate_bundled_engine_error_names_every_path_it_tried() {
+        // 사이드카가 테스트 바이너리 옆에 있을 리 없다. 이때 나오는 에러가 훑은
+        // 경로를 전부 담고 있어야 한다 — 설치본에서 엔진이 안 뜰 때 사용자에게
+        // 남는 단서가 이 문자열뿐이다(engine-dead 배너).
+        let Some(triple) = engine_target_triple() else {
+            return; // 사이드카를 만들지 않는 플랫폼 — 이 경로는 해당 없음
+        };
+        let err = locate_bundled_engine().expect_err("no sidecar beside the test binary");
+        for candidate in bundled_engine_candidates(triple) {
+            assert!(
+                err.contains(&candidate.display().to_string()),
+                "error must mention {}: {err}",
+                candidate.display()
+            );
+        }
     }
 
     #[test]
