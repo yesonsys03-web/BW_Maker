@@ -189,3 +189,30 @@ def test_rpc_unknown_method_error(fixture_psd):
         assert r2["result"] == {}
     finally:
         eng.close()
+
+
+def test_engine_survives_non_ascii_requests_under_a_legacy_locale(tmp_path):
+    """
+    한글 윈도우(cp949) 재현. 프런트는 요청 JSON을 UTF-8 원문으로 보내는데, 예전에는
+    파이썬이 stdin을 로케일 인코딩으로 읽어 한글 경로가 든 첫 요청에서
+    UnicodeDecodeError로 프로세스가 통째로 죽었다(요청 하나 실패가 아니라 엔진 사망).
+    PYTHONIOENCODING으로 그 로케일을 흉내내 회귀를 잡는다.
+    """
+    target = tmp_path / "한글 경로.psd"      # 존재하지 않는 파일 — 응답만 확인한다
+    # ensure_ascii=False가 핵심이다. 프런트의 serde_json은 non-ASCII를 escape하지
+    # 않고 UTF-8 원문을 그대로 파이프에 쓴다 — escape된 요청을 보내면 순수 ASCII라
+    # 로케일과 무관하게 통과해 버려서 이 테스트가 아무것도 잡지 못한다.
+    request = json.dumps({"id": 1, "method": "open_psd", "params": {"path": str(target)}},
+                         ensure_ascii=False)
+    proc = subprocess.run(
+        [sys.executable, "-m", "psd_engine"],
+        input=(request + "\n").encode("utf-8"),
+        capture_output=True,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        env={**os.environ, "PYTHONIOENCODING": "cp949", "PYTHONUTF8": "0"},
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    msg = json.loads(proc.stdout.decode("utf-8").splitlines()[0])
+    # 파일이 없다는 정상 에러 응답이어야 하고, 경로의 한글이 그대로 살아 있어야 한다.
+    assert msg["id"] == 1
+    assert "한글 경로.psd" in msg["error"]["message"]

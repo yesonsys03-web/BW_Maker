@@ -179,11 +179,30 @@ class Engine:
         return method(**request.get("params", {}))
 
 
+def _as_utf8(stream):
+    """
+    stdio를 UTF-8로 못박는다.
+
+    프런트(src-tauri/src/engine.rs)는 요청 JSON을 UTF-8 원문 그대로 파이프에
+    쓰는데(serde_json은 non-ASCII를 escape하지 않는다), 파이썬은 stdin을
+    로케일 인코딩으로 읽는다. 한글 윈도우(cp949)에서는 한글 경로·프리셋 이름·
+    레이어 이름이 든 첫 요청에서 `for line in stdin`이 UnicodeDecodeError로
+    터졌고, 그 예외는 요청 하나가 아니라 엔진 프로세스 전체를 죽였다.
+
+    응답 쪽은 json.dumps의 ensure_ascii가 한글을 \\uXXXX로 escape해 주므로
+    원래도 안전했지만, 나가는 쪽도 같이 고정해 로케일에 기대지 않게 한다.
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:      # 테스트가 넘기는 StringIO 등에는 없다
+        reconfigure(encoding="utf-8")
+    return stream
+
+
 def main(stdin=None, stdout=None):
     from .patches import apply_pytoshop_patches
     apply_pytoshop_patches()
-    stdin = stdin or sys.stdin
-    stdout = stdout or sys.stdout
+    stdin = stdin or _as_utf8(sys.stdin)
+    stdout = stdout or _as_utf8(sys.stdout)
     engine = Engine(out=stdout)
     for line in stdin:
         line = line.strip()

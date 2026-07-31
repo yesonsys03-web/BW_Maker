@@ -49,9 +49,25 @@ fn engine_command() -> Command {
     let mut c = Command::new("uv");
     c.args(["run", "python", "-m", "psd_engine"])
         .current_dir(engine_dir)
+        // 요청 JSON은 UTF-8 원문으로 나간다(serde_json은 non-ASCII를 escape하지
+        // 않는다). 파이썬이 stdio를 로케일 인코딩으로 열면 한글 윈도우(cp949)에서
+        // 한글 경로가 든 첫 요청에 엔진이 UnicodeDecodeError로 죽는다. 엔진도
+        // 자기 쪽에서 UTF-8로 reconfigure하지만(psd_engine/rpc.py), 인터프리터가
+        // 처음부터 UTF-8로 뜨는 편이 낫다.
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // 윈도우에서 GUI 앱이 자식 프로세스를 띄우면 그 자식이 콘솔 창을 갖는다.
+    // 앱 자체는 windows_subsystem="windows"라 콘솔이 없으므로, 엔진을 띄울 때와
+    // 재시작할 때마다 검은 창이 뜨는 것으로 보인다.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
     c
 }
 
