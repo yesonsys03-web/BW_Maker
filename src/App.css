@@ -611,6 +611,9 @@ input[type="text"] {
   gap: 0.35em;
   padding: 0.25em 0.5em;
   cursor: default;
+  /* Tauri는 macOS에서 WKWebView를 쓴다. 접두사 없는 user-select만으로는 행을
+     shift로 훑을 때 행 대신 텍스트가 잡히는 일이 생긴다. */
+  -webkit-user-select: none;
   user-select: none;
   white-space: nowrap;
 }
@@ -1255,4 +1258,25 @@ input[type="text"] {
   font-size: 0.78em;
   line-height: 1.4;
   color: var(--text-dim);
+}
+
+/* 병합/이름변경 결과 배지. 트리는 원본 구조를 보여주므로, 그 행이 내보내기에서
+   어떤 이름으로 나가는지를 여기에 붙인다. */
+.node-export-label {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 0.72em;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 0.35em;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-export-label.merged {
+  color: #f2c94c;
+  border-color: #7a6a2a;
 }

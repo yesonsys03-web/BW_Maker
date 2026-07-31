@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { buildEntries, opsReducer, OpsState } from "./opsReducer";
+import { buildEntries, exportLabelsBySourceId, opsReducer, OpsState } from "./opsReducer";
 
 const INC = [3, 4, 5];
 const ids = (e: { entryId: number }[]) => e.map((x) => x.entryId);
@@ -46,4 +46,49 @@ test("undo recomputes entries", () => {
   expect(ids(s.entries)).toEqual([-1]);
   s = opsReducer(s, { type: "undo" });
   expect(ids(s.entries)).toEqual([3, 4, 5]);
+});
+
+// exportLabelsBySourceId: 병합/이름변경은 트리에 나타나지 않으므로, 각 소스 행에
+// "내보낼 때 이렇게 나간다"를 붙이기 위한 매핑.
+test("exportLabelsBySourceId maps every source of a merge to the merged name", () => {
+  const entries = buildEntries([1, 2, 3], [{ op: "merge", layerIds: [1, 2], name: "Chair2" }]);
+  const labels = exportLabelsBySourceId(entries);
+  expect(labels.get(1)).toEqual({ name: "Chair2", merged: true, sourceCount: 2 });
+  expect(labels.get(2)).toEqual({ name: "Chair2", merged: true, sourceCount: 2 });
+});
+
+test("exportLabelsBySourceId leaves plain copies unlabelled", () => {
+  const entries = buildEntries([1, 2, 3], [{ op: "merge", layerIds: [1, 2], name: "Chair2" }]);
+  expect(exportLabelsBySourceId(entries).has(3)).toBe(false);
+});
+
+test("exportLabelsBySourceId labels a rename without calling it a merge", () => {
+  const entries = buildEntries([1, 2], [{ op: "rename", layerId: 1, name: "OUTLINE" }]);
+  expect(exportLabelsBySourceId(entries).get(1)).toEqual({
+    name: "OUTLINE",
+    merged: false,
+    sourceCount: 1,
+  });
+});
+
+test("exportLabelsBySourceId is empty when nothing has been edited", () => {
+  expect(exportLabelsBySourceId(buildEntries([1, 2, 3], [])).size).toBe(0);
+});
+
+test("exportLabelsBySourceId follows a merge that is later renamed", () => {
+  // rename은 소스 레이어 id가 아니라 항목(entry) id를 가리킨다. 병합은 새 항목
+  // id를 만들어내므로 그 id로 이름을 바꿔야 한다.
+  const merged = buildEntries([1, 2], [{ op: "merge", layerIds: [1, 2], name: "Chair2" }]);
+  const mergedId = merged.find((e) => e.sourceIds.length === 2)!.entryId;
+  const entries = buildEntries(
+    [1, 2],
+    [
+      { op: "merge", layerIds: [1, 2], name: "Chair2" },
+      { op: "rename", layerId: mergedId, name: "CHAIR_LINE" },
+    ]
+  );
+  const label = exportLabelsBySourceId(entries).get(2);
+  expect(label?.name).toBe("CHAIR_LINE");
+  expect(label?.merged).toBe(true);
+  expect(label?.sourceCount).toBe(2);
 });

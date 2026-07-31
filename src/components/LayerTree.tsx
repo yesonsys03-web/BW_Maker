@@ -10,7 +10,7 @@ import {
   isLineFallbackActive,
   type LayerFilterMode,
 } from "../lib/layerFilter";
-import type { OpsState } from "../lib/opsReducer";
+import { exportLabelsBySourceId, type OpsState } from "../lib/opsReducer";
 import type { Operation, TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
 
@@ -103,6 +103,9 @@ export function LayerTree({
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
   const previewHiddenSet = useMemo(() => new Set(ops.previewHiddenIds), [ops.previewHiddenIds]);
   const matchedSet = useMemo(() => new Set(matchedIds), [matchedIds]);
+  // 병합/이름변경은 트리를 건드리지 않고 내보내기 계획에만 쌓인다. 그대로 두면
+  // 두 레이어를 병합해도 패널에서는 아무 변화가 없어 실패한 것처럼 보인다.
+  const exportLabels = useMemo(() => exportLabelsBySourceId(ops.entries), [ops.entries]);
 
   const allLeaves = useMemo(() => (tree ? flattenLeaves(tree) : []), [tree]);
   const filtering = isFiltering(filterMode, query);
@@ -312,6 +315,7 @@ export function LayerTree({
     const selected = selectedIds.has(node.id);
     const disabledCheckbox = node.kind !== "pixel";
     const flat = opts.breadcrumb !== undefined;
+    const exportLabel = exportLabels.get(node.id);
 
     return (
       <div
@@ -359,6 +363,18 @@ export function LayerTree({
             </span>
           )}
         </span>
+        {exportLabel && (
+          <span
+            className={`node-export-label${exportLabel.merged ? " merged" : ""}`}
+            title={
+              exportLabel.merged
+                ? `${exportLabel.sourceCount}장이 "${exportLabel.name}" 하나로 병합되어 내보내집니다.`
+                : `"${exportLabel.name}" 이름으로 내보내집니다.`
+            }
+          >
+            {exportLabel.merged ? `⤳ ${exportLabel.name} ×${exportLabel.sourceCount}` : `⤳ ${exportLabel.name}`}
+          </span>
+        )}
         {node.kind !== "pixel" && <span className="node-kind">{node.kind}</span>}
       </div>
     );

@@ -130,3 +130,36 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
       return state;
   }
 }
+
+export interface ExportLabel {
+  /** 내보낼 때 이 레이어가 갖게 될 이름. */
+  name: string;
+  /** 여러 소스가 하나로 합쳐진 항목인지. */
+  merged: boolean;
+  /** 그 병합에 함께 들어간 소스 레이어 수(병합이 아니면 1). */
+  sourceCount: number;
+}
+
+/**
+ * 소스 레이어 id → 그 레이어가 내보내기에서 갖게 될 이름.
+ *
+ * 레이어 트리는 원본 PSD 구조를 그대로 보여주고 병합/이름변경은 트리를 건드리지
+ * 않는다(내보내기 계획에만 쌓인다). 그래서 두 레이어를 병합해도 패널에서는 아무
+ * 일도 일어나지 않은 것처럼 보인다 — 이 매핑으로 각 행에 결과를 붙여준다.
+ *
+ * 이름이 붙지 않은 항목(단순 복사)은 원본 이름 그대로 나가므로 제외한다.
+ */
+export function exportLabelsBySourceId(entries: Entry[]): Map<number, ExportLabel> {
+  const out = new Map<number, ExportLabel>();
+  for (const entry of entries) {
+    if (entry.name === null) continue;
+    for (const sourceId of entry.sourceIds) {
+      out.set(sourceId, {
+        name: entry.name,
+        merged: entry.sourceIds.length > 1,
+        sourceCount: entry.sourceIds.length,
+      });
+    }
+  }
+  return out;
+}
