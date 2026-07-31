@@ -75,3 +75,9 @@ cp -R "${OUT_DIR}" "${DEST_DIR}"
 echo "→ ${DEST_DIR}"
 echo "  bundle size: $(du -sh "${DEST_DIR}" | cut -f1)"
 echo "  entry binary: ${DEST_DIR}/psd_engine"
+
+# 동결본이 실제로 말을 하는지 스테이징된 자리에서 확인한다. 모듈 누락이나 런타임
+# pytoshop 패치 실패는 여기서만 드러나고, 놓치면 설치본이 사용자 PC의 첫 요청에서
+# 죽는다. tauri build보다 앞이라, 실패하면 번들이 만들어지지 않는다.
+echo "Smoke-testing the frozen sidecar…"
+"${VENV_PY}" engine/packaging/smoke.py "${DEST_DIR}/psd_engine"

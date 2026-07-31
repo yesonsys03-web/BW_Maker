@@ -66,3 +66,10 @@ $SizeMB = [math]::Round((Get-ChildItem -Recurse $DestDir | Measure-Object Length
 Write-Host "-> $DestDir"
 Write-Host "  bundle size: ${SizeMB} MB"
 Write-Host "  entry binary: $DestDir/psd_engine.exe"
+
+# 동결본이 실제로 말을 하는지 스테이징된 자리에서 확인한다 — build-engine.sh와
+# 같은 이유이며, 한글 경로 요청이 실제로 죽는지 마는지는 cp949 로케일이 걸리는
+# 이 쪽에서 봐야 의미가 있다. tauri build보다 앞이라 실패하면 번들이 안 나온다.
+Write-Host "Smoke-testing the frozen sidecar..."
+& $VenvPython engine/packaging/smoke.py "$DestDir/psd_engine.exe"
+if ($LASTEXITCODE -ne 0) { throw "frozen sidecar smoke test failed" }
