@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { defaultExportPath, reorderArgs, resolveEntryName } from "../lib/exportFlow";
 import { exportPsd, onEngineEvent } from "../lib/engine";
@@ -68,6 +68,8 @@ export function ExportDialog({
   const [result, setResult] = useState<ExportResult | null>(null);
 
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const rowDragRef = useRef<{ index: number; x: number; y: number; active: boolean } | null>(null);
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
@@ -96,6 +98,52 @@ export function ExportDialog({
     const trimmed = renameValue.trim();
     if (trimmed.length > 0) onPushOp({ op: "rename", layerId: renamingId, name: trimmed });
     setRenamingId(null);
+  }
+
+  const DRAG_THRESHOLD_PX = 5;
+
+  /** 포인터 아래에 있는 행의 인덱스. 없으면 null. */
+  function rowIndexAt(x: number, y: number): number | null {
+    const el = document.elementFromPoint(x, y);
+    const row = el?.closest("[data-entry-index]");
+    if (!row) return null;
+    const raw = row.getAttribute("data-entry-index");
+    return raw === null ? null : Number(raw);
+  }
+
+  /**
+   * HTML5 드래그가 아니라 포인터 이벤트로 구현한다. Tauri의 dragDropEnabled가
+   * 켜져 있어야 파인더에서 PSD를 끌어다 놓을 수 있는데(FilePanel), 그게 켜져
+   * 있으면 OS가 드래그를 가로채 웹뷰 안의 drop 이벤트가 오지 않는다.
+   */
+  function beginRowDrag(e: React.PointerEvent<HTMLDivElement>, index: number) {
+    if (e.button !== 0) return;
+    rowDragRef.current = { index, x: e.clientX, y: e.clientY, active: false };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  function updateRowDrag(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = rowDragRef.current;
+    if (!drag) return;
+    if (!drag.active) {
+      // 이름 더블클릭 등 제자리 조작과 구분한다.
+      if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < DRAG_THRESHOLD_PX) return;
+      drag.active = true;
+      setDragIndex(drag.index);
+    }
+    setDropIndex(rowIndexAt(e.clientX, e.clientY));
+  }
+
+  function endRowDrag(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = rowDragRef.current;
+    rowDragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    const target = drag?.active ? rowIndexAt(e.clientX, e.clientY) : null;
+    setDragIndex(null);
+    setDropIndex(null);
+    if (drag?.active && target !== null) handleDrop(target);
   }
 
   function handleDrop(toIdx: number) {
@@ -162,11 +210,12 @@ export function ExportDialog({
             return (
               <div
                 key={entry.entryId}
-                className={`export-entry-row${dragIndex === i ? " dragging" : ""}`}
-                draggable
-                onDragStart={() => setDragIndex(i)}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={() => handleDrop(i)}
+                className={`export-entry-row${dragIndex === i ? " dragging" : ""}${dropIndex === i ? " drop-target" : ""}`}
+                data-entry-index={i}
+                onPointerDown={(e) => beginRowDrag(e, i)}
+                onPointerMove={updateRowDrag}
+                onPointerUp={endRowDrag}
+                onPointerCancel={endRowDrag}
               >
                 <span className="export-entry-handle">⠿</span>
                 {renamingId === entry.entryId ? (

@@ -1335,8 +1335,11 @@ input[type="text"] {
   position: sticky;
   bottom: 0;
   z-index: 15;
-  margin: 0.35em 0.5em;
-  padding: 0.7em 0.5em;
+  margin: 0;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   font-size: 0.82em;
   color: var(--text-dim);
@@ -1350,4 +1353,10 @@ input[type="text"] {
   border-color: var(--accent);
   border-style: solid;
   background: rgba(79, 140, 255, 0.12);
+}
+
+/* 순서 변경 중 놓일 자리 표시. 포인터 드래그라 브라우저 기본 드롭 표시가 없다. */
+.export-entry-row.drop-target {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
