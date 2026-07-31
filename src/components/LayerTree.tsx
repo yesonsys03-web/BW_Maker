@@ -111,6 +111,10 @@ export function LayerTree({
   const [filterMode, setFilterMode] = useState<LayerFilterMode>("all");
   const [query, setQuery] = useState("");
   const [autoMerging, setAutoMerging] = useState(false);
+  // 병합에서 빼내려고 끌고 있는 소스 레이어. 드롭 영역은 이때만 나타난다 —
+  // 평면 목록에는 삽입 지점이 없어서, 목적지를 분명한 영역 하나로 못박는다.
+  const [draggingSourceId, setDraggingSourceId] = useState<number | null>(null);
+  const [dropActive, setDropActive] = useState(false);
   // 펼쳐둔 병합 행(entryId). 병합하고 나면 원본이 화면에서 사라져 무엇이
   // 들어갔는지 확인할 수 없으므로, 접힌 채로 두되 열어볼 수 있게 한다.
   const [expandedMerges, setExpandedMerges] = useState<Set<number>>(new Set());
@@ -425,6 +429,16 @@ export function LayerTree({
         style={{ paddingLeft: `${opts.indentPx}px` }}
         role={flat ? "listitem" : "treeitem"}
         aria-selected={selected}
+        // 병합된 소스만 끌 수 있다 — 끌어낼 병합이 있어야 의미가 있다.
+        draggable={opts.nested === true}
+        onDragStart={(e) => {
+          e.dataTransfer.effectAllowed = "move";
+          setDraggingSourceId(node.id);
+        }}
+        onDragEnd={() => {
+          setDraggingSourceId(null);
+          setDropActive(false);
+        }}
         onClick={(e) => handleRowClick(node.id, e)}
         onContextMenu={(e) => handleContextMenu(node.id, e)}
       >
@@ -625,6 +639,26 @@ export function LayerTree({
 
       {filtering ? (
         <div className="tree-body tree-body-flat" role="list">
+          {draggingSourceId !== null && (
+            <div
+              className={`unmerge-dropzone${dropActive ? " active" : ""}`}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                setDropActive(true);
+              }}
+              onDragLeave={() => setDropActive(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                const id = draggingSourceId;
+                setDropActive(false);
+                setDraggingSourceId(null);
+                if (id !== null) handleUnmerge([id]);
+              }}
+            >
+              여기에 놓으면 병합에서 빠집니다
+            </div>
+          )}
           {flatRows.length === 0 ? (
             <p className="layer-filter-empty">조건에 맞는 레이어가 없습니다.</p>
           ) : (
