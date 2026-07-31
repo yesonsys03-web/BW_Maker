@@ -68,6 +68,21 @@ export async function renderPreview(
 }
 
 /**
+ * Renders the document as saved — the PSD's own stored flattened preview.
+ * Independent of layer count (a 165-layer plate costs ~0.2s here versus
+ * several seconds to compose one), so it's what fills the canvas the moment
+ * a file opens, before the artist has selected anything.
+ */
+export async function renderDocumentPreview(
+  sessionId: number,
+  maxSize: number
+): Promise<{ pngPath: string }> {
+  return callEngine("render_document_preview", { sessionId, maxSize }) as Promise<{
+    pngPath: string;
+  }>;
+}
+
+/**
  * Renders thumbnail images for layers.
  */
 export async function renderThumbnails(

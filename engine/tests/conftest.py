@@ -45,3 +45,20 @@ def fixture_psd(tmp_path):
     p = tmp_path / "fixture.psd"
     write_psd(p, [ref, art])
     return p
+
+
+@pytest.fixture
+def blend_mode_psd(tmp_path):
+    """
+    아래에 흰 'base'(255), 그 위에 MULTIPLY 'shade'(64)가 얹힌 문서.
+
+    원본 스택 안에서 합성하면 곱연산이 적용돼 어두워지지만, export_psd는 모든
+    레이어를 normal/255로 기록하므로 내보낸 PSD에서는 shade가 그냥 그대로
+    덮인다. 미리보기가 어느 쪽을 재현하는지 가르는 픽스처다.
+    """
+    p = tmp_path / "blend.psd"
+    write_psd(p, [
+        make_image("shade", 64, 0, 0, 16, 16, blend=enums.BlendMode.multiply),
+        make_image("base", 255, 0, 0, 32, 32),
+    ], width=32, height=32)
+    return p

@@ -371,6 +371,24 @@ input[type="text"] {
   cursor: grabbing;
 }
 
+/* 원본 보기와 내보내기 미리보기는 같은 캔버스에 다른 그림을 그린다(전자는
+   블렌드/클리핑 포함, 후자는 내보내기가 그렇듯 제거된 상태). 어느 쪽을 보고
+   있는지 항상 드러나야 한다. */
+.preview-mode-badge {
+  position: absolute;
+  top: 0.5em;
+  left: 0.5em;
+  font-size: 0.78em;
+  color: var(--text-dim);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25em 0.6em;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 35%);
+  cursor: default;
+  user-select: none;
+}
+
 .preview-bg-toggle {
   position: absolute;
   top: 0.5em;

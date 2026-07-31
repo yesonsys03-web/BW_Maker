@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 from psd_tools import PSDImage
 
-from psd_engine.render import extract_rgba, merge_rgba, render_preview, render_thumbnails
+from psd_engine import render as render_mod
+from psd_engine.render import (extract_rgba, merge_rgba, render_document_preview,
+                               render_preview, render_thumbnails)
 from psd_engine.tree import build_tree
 
 
@@ -108,6 +110,91 @@ def test_render_preview_handles_empty_visible_set(fixture_psd, tmp_path):
     preview = render_preview(s, [], max_size=32, out_dir=tmp_path)
     from PIL import Image
     im = Image.open(preview)
+    assert im.size[0] > 0 and im.size[1] > 0
+
+
+def test_render_preview_stacks_selected_layers_bottom_to_top(fixture_psd, tmp_path):
+    # 'fill'(128, 전체 캔버스) 아래, 'lines'(200, (10,10)-(30,20)) 위. max_size를
+    # 캔버스보다 크게 줘 축소 없이 원본 좌표로 확인한다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    im = Image.open(render_preview(s, [2, 5], max_size=256, out_dir=tmp_path)).convert("RGBA")
+    arr = np.array(im)
+    assert arr[0, 0, 0] == 128        # fill만 있는 곳
+    assert arr[15, 15, 0] == 200      # lines가 위에 겹친 곳
+
+
+def test_render_preview_leaves_unselected_area_transparent(fixture_psd, tmp_path):
+    # 배경은 UI가 흰색/체커/검정 중에 골라 깔기 때문에 엔진은 투명하게 남긴다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    im = Image.open(render_preview(s, [5], max_size=256, out_dir=tmp_path)).convert("RGBA")
+    arr = np.array(im)
+    assert arr[0, 0, 3] == 0          # 'lines' bbox 밖
+    assert arr[15, 15, 3] == 255      # 'lines' 안
+
+
+def test_render_preview_ignores_source_blend_mode(blend_mode_psd, tmp_path):
+    # export_psd가 모든 레이어를 normal/255로 기록하므로, 내보낸 PSD에서 MULTIPLY
+    # 레이어는 곱해지지 않고 그대로 덮인다. 미리보기도 그 결과를 보여야 한다 —
+    # 원본 스택대로 곱해서 보여주면 실제 산출물과 다른 그림이 된다.
+    from PIL import Image
+    s = _session(blend_mode_psd)
+    ids = sorted(s["layers_by_id"])
+    im = Image.open(render_preview(s, ids, max_size=256, out_dir=tmp_path)).convert("RGBA")
+    value = np.array(im)[8, 8, 0]
+    assert value == 64, f"shade 픽셀이 그대로 덮여야 하는데 {value} (MULTIPLY 적용 시 64*255/255=64보다 어두워짐)"
+
+
+def test_render_preview_reuses_decoded_tiles_across_calls(fixture_psd, tmp_path):
+    # 체크박스 토글마다 PSD 채널을 다시 푸는 것이 느림의 근원이었다. 두 번째
+    # 호출은 캐시만으로 그려져야 한다 — layers_by_id에서 레이어를 없애버려도
+    # 같은 그림이 나오는 것으로 확인한다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    first = np.array(Image.open(render_preview(s, [2, 5], max_size=256, out_dir=tmp_path)))
+    assert len(s["preview_tiles"]) == 2
+
+    s["layers_by_id"] = {}          # 캐시 미스가 나면 KeyError로 드러난다
+    second = np.array(Image.open(render_preview(s, [2, 5], max_size=256, out_dir=tmp_path)))
+    assert np.array_equal(first, second)
+
+
+def test_preview_tile_cache_is_keyed_by_scale(fixture_psd, tmp_path):
+    # 배율이 다르면 타일도 달라야 한다 — 같은 키로 재사용하면 엉뚱한 크기로 그려진다.
+    s = _session(fixture_psd)
+    render_preview(s, [5], max_size=256, out_dir=tmp_path)
+    render_preview(s, [5], max_size=16, out_dir=tmp_path)
+    assert len(s["preview_tiles"]) == 2
+
+
+def test_preview_tile_cache_evicts_over_budget(fixture_psd, tmp_path, monkeypatch):
+    # 640MB급 PSD를 두 세션까지 열어두므로 캐시는 상한이 있어야 한다.
+    monkeypatch.setattr(render_mod, "PREVIEW_TILE_BUDGET_BYTES", 1)
+    s = _session(fixture_psd)
+    render_preview(s, [2, 4, 5], max_size=256, out_dir=tmp_path)
+    assert len(s["preview_tiles"]) == 1
+
+
+def test_render_preview_skips_empty_layer(fixture_psd, tmp_path):
+    # 그린 적 없는 빈 레이어(0x0)가 섞여도 전체가 죽지 않고 건너뛴다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    s["layers_by_id"][999] = types.SimpleNamespace(
+        mask=None, name="reflections", topil=lambda: None,
+        width=0, height=0, left=0, top=0, is_group=lambda: False,
+    )
+    im = Image.open(render_preview(s, [2, 999, 5], max_size=256, out_dir=tmp_path))
+    assert np.array(im)[15, 15, 0] == 200
+
+
+def test_render_document_preview_uses_stored_composite(fixture_psd, tmp_path):
+    # 레이어 수와 무관하게 저장된 병합 이미지를 쓰는 경로. 파일을 막 연 시점의
+    # 첫 화면용이라 크기만 맞으면 된다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    im = Image.open(render_document_preview(s, max_size=32, out_dir=tmp_path))
+    assert max(im.size) <= 32
     assert im.size[0] > 0 and im.size[1] > 0
 
 

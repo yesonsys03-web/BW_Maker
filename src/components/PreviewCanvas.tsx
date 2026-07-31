@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { loadPngDataUrl, renderPreview } from "../lib/engine";
+import { loadPngDataUrl, renderDocumentPreview, renderPreview } from "../lib/engine";
 import {
   PREVIEW_BACKGROUNDS,
   PREVIEW_BACKGROUND_LABELS,
   PREVIEW_BACKGROUND_STORAGE_KEY,
+  isDocumentView,
   nextScale,
   parsePreviewBackground,
   toEngineError,
@@ -25,7 +26,13 @@ interface PreviewCanvasProps {
   onError: (title: string, error: EngineError) => void;
 }
 
-const DEBOUNCE_MS = 400;
+/**
+ * 연속된 토글을 한 번의 렌더로 묶는 대기 시간. 400ms였던 값인데, 그때는 렌더
+ * 한 번이 수십 초라 최대한 묶는 것이 이득이었다. 지금은 캐시된 타일 합성이라
+ * 50ms 안에 끝나므로 디바운스가 오히려 체감 지연의 대부분이 된다. 빠르게
+ * 연타하는 경우만 묶일 정도로 줄인다.
+ */
+const DEBOUNCE_MS = 120;
 const PREVIEW_MAX_SIZE = 1500;
 
 /**
@@ -78,6 +85,8 @@ export function PreviewCanvas({
     [tree, includedIds, previewHiddenIds]
   );
 
+  const documentView = useMemo(() => isDocumentView(tree, visibleIds), [tree, visibleIds]);
+
   // Switching files (a new `path`) invalidates anything in flight/shown and
   // resets the view. Keyed on `path`, not `sessionId`: a transparent
   // session-refresh reopen (LRU eviction, see sessionRetry.ts) changes
@@ -112,6 +121,11 @@ export function PreviewCanvas({
       return;
     }
 
+    // 문서 보기는 저장된 병합 이미지를 그대로 쓰므로 즉시 끝난다. 파일을 연
+    // 직후가 바로 이 경우라, 여기에 디바운스를 걸면 첫 화면만 늦어진다.
+    // 합성 미리보기는 연속 토글을 묶어야 하므로 디바운스를 유지한다.
+    const delay = documentView ? 0 : DEBOUNCE_MS;
+
     const timer = window.setTimeout(() => {
       const sid = sessionIdRef.current;
       if (!sid) return;
@@ -122,7 +136,10 @@ export function PreviewCanvas({
           const { pngPath } = await withEvictedSessionRetry(
             path,
             sid,
-            (s) => renderPreview(s, visibleIds, PREVIEW_MAX_SIZE),
+            (s) =>
+              documentView
+                ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
+                : renderPreview(s, visibleIds, PREVIEW_MAX_SIZE),
             (result) => onSessionRefreshed(path, result)
           );
           const dataUrl = await loadPngDataUrl(pngPath);
@@ -135,10 +152,10 @@ export function PreviewCanvas({
           onError("미리보기 렌더링 실패", toEngineError(e));
         }
       })();
-    }, DEBOUNCE_MS);
+    }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [path, visibleIds, onSessionRefreshed, onError]);
+  }, [path, visibleIds, documentView, onSessionRefreshed, onError]);
 
   // Callback ref (not a plain ref + mount-only effect): the viewport div only
   // exists once sessionId/visibleIds make this component render past the
@@ -210,6 +227,16 @@ export function PreviewCanvas({
             style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
           />
         )}
+      </div>
+      <div
+        className="preview-mode-badge"
+        title={
+          documentView
+            ? "저장된 원본 이미지입니다. 레이어를 고르면 내보내기 결과 미리보기로 바뀝니다."
+            : "선택한 레이어만 쌓아 올린 결과 — 내보낸 PSD가 이렇게 보입니다. 원본의 블렌드 모드·클리핑은 내보내기에서 제거되므로 여기에도 적용되지 않습니다."
+        }
+      >
+        {documentView ? "원본" : "내보내기 미리보기"}
       </div>
       <div className="preview-bg-toggle" role="group" aria-label="미리보기 배경">
         {PREVIEW_BACKGROUNDS.map((bg) => (

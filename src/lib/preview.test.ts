@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   DEFAULT_PREVIEW_BACKGROUND,
+  isDocumentView,
   MAX_PREVIEW_SCALE,
   MIN_PREVIEW_SCALE,
   PREVIEW_BACKGROUNDS,
@@ -12,12 +13,12 @@ import {
 } from "./preview";
 import type { TreeNode } from "./types";
 
-function leaf(id: number, kind: string): TreeNode {
+function leaf(id: number, kind: string, visible = true): TreeNode {
   return {
     id,
     name: `layer${id}`,
     kind,
-    visible: true,
+    visible,
     blendMode: "normal",
     opacity: 100,
     bbox: [0, 0, 10, 10],
@@ -125,4 +126,33 @@ test("every background has a label for the toggle button", () => {
   for (const bg of PREVIEW_BACKGROUNDS) {
     expect(PREVIEW_BACKGROUND_LABELS[bg]).toBeTruthy();
   }
+});
+
+// isDocumentView: 파일을 막 연 직후인지 판정한다. buildInitialOpsState가
+// includedIds = 픽셀 leaf 전부 / previewHiddenIds = visible이 false인 leaf로
+// 세팅하므로, 초기 visible 집합은 "visible=true인 픽셀 leaf 전부"다.
+const mixedVisibility: TreeNode[] = [
+  leaf(1, "pixel"),
+  leaf(2, "pixel", false),
+  group(3, [leaf(4, "type"), leaf(5, "pixel")]),
+];
+
+test("isDocumentView is true for the set a freshly opened file produces", () => {
+  expect(isDocumentView(mixedVisibility, [1, 5])).toBe(true);
+});
+
+test("isDocumentView is false once a layer is switched off", () => {
+  expect(isDocumentView(mixedVisibility, [1])).toBe(false);
+});
+
+test("isDocumentView is false when a layer the PSD had hidden gets switched on", () => {
+  expect(isDocumentView(mixedVisibility, [1, 2, 5])).toBe(false);
+});
+
+test("isDocumentView ignores ordering", () => {
+  expect(isDocumentView(mixedVisibility, [5, 1])).toBe(true);
+});
+
+test("isDocumentView is false with no tree yet", () => {
+  expect(isDocumentView(undefined, [])).toBe(false);
 });

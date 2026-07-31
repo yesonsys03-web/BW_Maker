@@ -57,6 +57,35 @@ export function pixelLeafIds(tree: TreeNode[]): number[] {
   return out;
 }
 
+/**
+ * True when the visible set is still exactly what opening the file produced —
+ * every pixel leaf the PSD had switched on (see buildInitialOpsState).
+ *
+ * That state has no export to preview yet, and composing it means decoding
+ * every layer in the document (seconds on a real plate), so the canvas shows
+ * the PSD's own stored flattened preview instead, which is instant. The two
+ * are not the same picture: the stored one is the artwork with its blend modes
+ * and clipping intact, while a composed preview shows what export writes —
+ * a flat stack. PreviewCanvas labels which one is on screen rather than
+ * letting them be mistaken for each other.
+ */
+export function isDocumentView(tree: TreeNode[] | undefined, visibleIds: number[]): boolean {
+  if (!tree) return false;
+  const initial: number[] = [];
+
+  function walk(nodes: TreeNode[]) {
+    for (const node of nodes) {
+      if (isGroup(node)) walk(node.children ?? []);
+      else if (node.kind === "pixel" && node.visible) initial.push(node.id);
+    }
+  }
+
+  walk(tree);
+  if (initial.length !== visibleIds.length) return false;
+  const visible = new Set(visibleIds);
+  return initial.every((id) => visible.has(id));
+}
+
 /** Normalizes a thrown value into the app's EngineError shape (mirrors appStore's errorFrom). */
 export function toEngineError(e: unknown): EngineError {
   if (e instanceof EngineRpcError) return { message: e.message, traceback: e.traceback };

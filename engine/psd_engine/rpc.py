@@ -11,7 +11,7 @@ from pathlib import Path
 from .export import export_psd as _export
 from .matching import match_preset, preset_operations
 from .ops import build_export_plan, finalize_names
-from .render import render_preview, render_thumbnails
+from .render import render_document_preview, render_preview, render_thumbnails
 from .session import SessionStore
 from .verify import verify_export
 
@@ -37,7 +37,8 @@ def _emit(obj, out):
 class Engine:
     _ALLOWED_METHODS = {
         "open_psd", "close_session", "render_thumbnails",
-        "render_preview", "apply_preset", "export_psd", "batch_run",
+        "render_preview", "render_document_preview",
+        "apply_preset", "export_psd", "batch_run",
     }
 
     def __init__(self, out=None):
@@ -84,6 +85,11 @@ class Engine:
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
         return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir)}
+
+    def render_document_preview(self, sessionId, maxSize=1500):
+        s = self.store.get(sessionId)
+        out_dir = self._fresh_render_dir("preview")
+        return {"pngPath": render_document_preview(s, maxSize, out_dir)}
 
     def apply_preset(self, sessionId, preset):
         s = self.store.get(sessionId)
