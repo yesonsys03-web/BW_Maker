@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { loadPngDataUrl, renderPreview } from "../lib/engine";
-import { nextScale, toEngineError, visibleIdsForPreview } from "../lib/preview";
+import {
+  PREVIEW_BACKGROUNDS,
+  PREVIEW_BACKGROUND_LABELS,
+  PREVIEW_BACKGROUND_STORAGE_KEY,
+  nextScale,
+  parsePreviewBackground,
+  toEngineError,
+  visibleIdsForPreview,
+  type PreviewBackground,
+} from "../lib/preview";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { FileStatus } from "../state/appStore";
 import type { EngineError, OpenResult, TreeNode } from "../lib/types";
@@ -41,6 +50,17 @@ export function PreviewCanvas({
   const [loading, setLoading] = useState(false);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  // 배경 선택은 파일/세션이 아니라 사람에게 붙는 설정이므로 파일 전환·재시작을
+  // 넘어 유지된다. 프리셋(appdata JSON)과 달리 내보내기 결과에 아무 영향이 없는
+  // 순수 표시 설정이라 localStorage에 둔다.
+  const [background, setBackground] = useState<PreviewBackground>(() =>
+    parsePreviewBackground(window.localStorage.getItem(PREVIEW_BACKGROUND_STORAGE_KEY))
+  );
+
+  function chooseBackground(next: PreviewBackground) {
+    setBackground(next);
+    window.localStorage.setItem(PREVIEW_BACKGROUND_STORAGE_KEY, next);
+  }
 
   const requestIdRef = useRef(0);
   const draggingRef = useRef<{ x: number; y: number } | null>(null);
@@ -174,7 +194,7 @@ export function PreviewCanvas({
   return (
     <div className="preview-canvas">
       <div
-        className="preview-viewport"
+        className={`preview-viewport preview-bg-${background}`}
         ref={viewportCallbackRef}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -190,6 +210,19 @@ export function PreviewCanvas({
             style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
           />
         )}
+      </div>
+      <div className="preview-bg-toggle" role="group" aria-label="미리보기 배경">
+        {PREVIEW_BACKGROUNDS.map((bg) => (
+          <button
+            key={bg}
+            type="button"
+            className={bg === background ? "active" : undefined}
+            aria-pressed={bg === background}
+            onClick={() => chooseBackground(bg)}
+          >
+            {PREVIEW_BACKGROUND_LABELS[bg]}
+          </button>
+        ))}
       </div>
       {loading && (
         <div className="preview-spinner-overlay" role="status" aria-label="렌더링 중">

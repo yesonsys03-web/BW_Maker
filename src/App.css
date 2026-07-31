@@ -346,6 +346,19 @@ input[type="text"] {
   justify-content: center;
   cursor: grab;
   touch-action: none;
+}
+
+/* 라인 추출 결과는 어두운 선 + 투명 배경이라 체커보드 위에서는 안 보인다.
+   기본은 흰색이고, 투명 여부를 확인해야 할 때 체커보드로 바꾼다. */
+.preview-viewport.preview-bg-white {
+  background-color: #ffffff;
+}
+
+.preview-viewport.preview-bg-black {
+  background-color: #000000;
+}
+
+.preview-viewport.preview-bg-checker {
   background-color: var(--bg-0);
   background-image: linear-gradient(45deg, var(--bg-2) 25%, transparent 25%),
     linear-gradient(-45deg, var(--bg-2) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--bg-2) 75%),
@@ -356,6 +369,40 @@ input[type="text"] {
 
 .preview-viewport:active {
   cursor: grabbing;
+}
+
+.preview-bg-toggle {
+  position: absolute;
+  top: 0.5em;
+  right: 0.5em;
+  display: flex;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  /* 흰 배경 위에 떠 있는 다크 컨트롤이라 경계가 묻히지 않게 그림자를 준다. */
+  box-shadow: 0 1px 4px rgb(0 0 0 / 35%);
+}
+
+.preview-bg-toggle button {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-size: 0.85em;
+  padding: 0.2em 0.6em;
+}
+
+.preview-bg-toggle button:hover:not(.active) {
+  color: var(--text);
+  background: var(--bg-2);
+  border-color: transparent;
+}
+
+.preview-bg-toggle button.active {
+  color: var(--text);
+  background: var(--accent-dim);
+  border-color: var(--accent);
 }
 
 .preview-image {

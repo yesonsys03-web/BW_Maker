@@ -1,5 +1,15 @@
 import { expect, test } from "vitest";
-import { MAX_PREVIEW_SCALE, MIN_PREVIEW_SCALE, nextScale, pixelLeafIds, visibleIdsForPreview } from "./preview";
+import {
+  DEFAULT_PREVIEW_BACKGROUND,
+  MAX_PREVIEW_SCALE,
+  MIN_PREVIEW_SCALE,
+  PREVIEW_BACKGROUNDS,
+  PREVIEW_BACKGROUND_LABELS,
+  nextScale,
+  parsePreviewBackground,
+  pixelLeafIds,
+  visibleIdsForPreview,
+} from "./preview";
 import type { TreeNode } from "./types";
 
 function leaf(id: number, kind: string): TreeNode {
@@ -93,4 +103,26 @@ test("nextScale clamps at MAX_PREVIEW_SCALE on a large zoom-in", () => {
 test("nextScale never leaves the [MIN_PREVIEW_SCALE, MAX_PREVIEW_SCALE] range", () => {
   expect(nextScale(MIN_PREVIEW_SCALE, 500)).toBeGreaterThanOrEqual(MIN_PREVIEW_SCALE);
   expect(nextScale(MAX_PREVIEW_SCALE, -500)).toBeLessThanOrEqual(MAX_PREVIEW_SCALE);
+});
+
+test("parsePreviewBackground keeps every known background value", () => {
+  for (const bg of PREVIEW_BACKGROUNDS) {
+    expect(parsePreviewBackground(bg)).toBe(bg);
+  }
+});
+
+test("parsePreviewBackground falls back to white when nothing is stored yet", () => {
+  expect(parsePreviewBackground(null)).toBe("white");
+  expect(DEFAULT_PREVIEW_BACKGROUND).toBe("white");
+});
+
+test("parsePreviewBackground falls back to the default on an unknown stored value", () => {
+  expect(parsePreviewBackground("grey")).toBe(DEFAULT_PREVIEW_BACKGROUND);
+  expect(parsePreviewBackground("")).toBe(DEFAULT_PREVIEW_BACKGROUND);
+});
+
+test("every background has a label for the toggle button", () => {
+  for (const bg of PREVIEW_BACKGROUNDS) {
+    expect(PREVIEW_BACKGROUND_LABELS[bg]).toBeTruthy();
+  }
 });

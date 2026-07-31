@@ -78,6 +78,38 @@ export function isEvictedSessionError(e: unknown): boolean {
   return toEngineError(e).message.includes("unknown or evicted session");
 }
 
+/**
+ * 미리보기 뒤에 깔리는 배경. 라인 추출 결과는 투명 배경에 어두운 선만 남는
+ * 경우가 많아 체커보드 위에서는 사실상 보이지 않는다. 그래서 기본값은
+ * "white"이고, 대신 체커보드(투명 여부 확인용)와 검정(밝은 선 확인용)을
+ * 언제든 고를 수 있게 남겨둔다.
+ */
+export type PreviewBackground = "white" | "checker" | "black";
+
+export const PREVIEW_BACKGROUNDS: readonly PreviewBackground[] = ["white", "checker", "black"];
+
+export const PREVIEW_BACKGROUND_LABELS: Record<PreviewBackground, string> = {
+  white: "흰색",
+  checker: "투명",
+  black: "검정",
+};
+
+export const DEFAULT_PREVIEW_BACKGROUND: PreviewBackground = "white";
+
+export const PREVIEW_BACKGROUND_STORAGE_KEY = "psdLineExport.previewBackground";
+
+/**
+ * localStorage에 저장된 배경 설정을 읽는다. 값이 없거나(첫 실행) 아는 값이
+ * 아니면(옵션 이름이 바뀐 구버전 설정) 기본값으로 되돌린다 — 이건 에러 흡수가
+ * 아니라 저장된 문자열의 파싱 규칙이다. localStorage 접근 자체가 실패하면
+ * 그대로 throw시켜 드러낸다.
+ */
+export function parsePreviewBackground(raw: string | null): PreviewBackground {
+  return PREVIEW_BACKGROUNDS.includes(raw as PreviewBackground)
+    ? (raw as PreviewBackground)
+    : DEFAULT_PREVIEW_BACKGROUND;
+}
+
 export const MIN_PREVIEW_SCALE = 0.1;
 export const MAX_PREVIEW_SCALE = 8;
 
