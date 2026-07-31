@@ -128,9 +128,7 @@ def test_rpc_non_dict_json_doesnt_crash_engine(fixture_psd):
 
 def test_render_preview_no_path_collision_across_calls(fixture_psd):
     # render_preview must not overwrite its previous output on re-render
-    # (webview cache would otherwise serve stale images) — but the previous
-    # call's dir is cleaned up once superseded, so only the latest survives
-    # (see test_render_dirs_do_not_accumulate_across_kinds for the leak fix).
+    # (webview cache would otherwise serve stale images).
     engine = rpc.Engine(out=io.StringIO())
     r = engine.open_psd(str(fixture_psd))
     sid = r["sessionId"]
@@ -139,8 +137,22 @@ def test_render_preview_no_path_collision_across_calls(fixture_psd):
     r2 = engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=32)
 
     assert r1["pngPath"] != r2["pngPath"]
-    assert not os.path.exists(r1["pngPath"])
     assert os.path.exists(r2["pngPath"])
+
+
+def test_superseded_preview_survives_the_next_render(fixture_psd):
+    # 프런트는 render_preview 응답을 받은 뒤 pngPath를 별도의 IPC 왕복으로
+    # 읽는다(read_file_b64). 그 사이 다음 render_preview가 시작돼도 방금
+    # 돌려준 PNG는 아직 읽을 수 있어야 한다 — 즉시 삭제하면 실사용에서
+    # "preview.png: No such file or directory"로 미리보기가 깨진다.
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(fixture_psd))
+    sid = r["sessionId"]
+
+    r1 = engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=32)
+    engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=32)
+
+    assert os.path.exists(r1["pngPath"])
 
 
 def test_render_dirs_do_not_accumulate_across_kinds(fixture_psd):
@@ -152,14 +164,15 @@ def test_render_dirs_do_not_accumulate_across_kinds(fixture_psd):
     r = engine.open_psd(str(fixture_psd))
     sid = r["sessionId"]
 
-    for _ in range(5):
+    calls = rpc.RENDER_DIR_GENERATIONS + 5
+    for _ in range(calls):
         engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=32)
-    for _ in range(5):
+    for _ in range(calls):
         engine.render_thumbnails(sid, layerIds=[2, 5], maxSize=32)
 
-    # At most one surviving dir per kind (preview, thumbnails) under the
-    # engine's temp root — not one per call.
-    assert len(list(engine.tmp.iterdir())) == 2
+    # 종류(preview/thumbnails)당 살아남는 디렉터리는 최근 세대 수만큼으로
+    # 묶인다 — 호출당 하나씩 쌓이지 않는다.
+    assert len(list(engine.tmp.iterdir())) == 2 * rpc.RENDER_DIR_GENERATIONS
 
 
 def test_rpc_unknown_method_error(fixture_psd):
