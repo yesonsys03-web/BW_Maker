@@ -8,19 +8,30 @@ def build_export_plan(included_ids, operations):
     by_id = {e["entryId"]: e for e in entries}
     merge_counter = 0
 
-    def require(entry_id):
-        if entry_id not in by_id:
-            raise KeyError(f"unknown entry id: {entry_id}")
-        return by_id[entry_id]
-
     def do_merge(entry_ids, name):
         nonlocal merge_counter
-        group = [require(i) for i in entry_ids]
-        if len(group) < 2:
-            raise ValueError("merge needs at least 2 layers")
+        # included_ids가 "무엇이 내보내지는가"의 기준이다. 체크를 푼 레이어는
+        # 산출물에 없으므로, 그것을 가리키던 병합은 잘못된 것이 아니라 남은
+        # 것들끼리의 병합으로 성립한다(src/lib/opsReducer.ts와 같은 규칙 —
+        # 두 쪽이 어긋나면 UI에서는 되는데 내보내기만 실패한다).
+        group = [by_id[i] for i in entry_ids if i in by_id]
+
+        # 병합 항목 id는 결과와 무관하게 소비한다 — 이 병합을 가리키는 뒤쪽
+        # 작업(예: 병합 결과의 이름변경)의 id가 어긋나지 않도록.
+        merge_counter -= 1
+
+        if not group:
+            return
+        if len(group) == 1:
+            only = group[0]
+            del by_id[only["entryId"]]
+            only["entryId"] = merge_counter
+            only["name"] = name
+            by_id[merge_counter] = only
+            return
+
         group_sorted = sorted(group, key=entries.index)
         top_index = entries.index(group_sorted[-1])
-        merge_counter -= 1
         merged = {
             "entryId": merge_counter,
             "sourceIds": [sid for e in group_sorted for sid in e["sourceIds"]],
@@ -36,23 +47,32 @@ def build_export_plan(included_ids, operations):
         kind = op["op"]
         if kind == "exclude":
             for lid in op["layerIds"]:
-                e = require(lid)
-                entries.remove(e)
-                del by_id[lid]
+                e = by_id.pop(lid, None)
+                if e is not None:
+                    entries.remove(e)
         elif kind == "rename":
-            require(op["layerId"])["name"] = op["name"]
+            e = by_id.get(op["layerId"])
+            if e is not None:
+                e["name"] = op["name"]
         elif kind == "merge":
             do_merge(op["layerIds"], op["name"])
         elif kind == "flatten":
             do_merge([e["entryId"] for e in entries], op["name"])
         elif kind == "reorder":
-            e = require(op["layerId"])
-            entries.remove(e)
-            above = op.get("aboveId")
-            if above is None:
+            e = by_id.get(op["layerId"])
+            above_id = op.get("aboveId")
+            if e is None:
+                continue
+            if above_id is None:
+                entries.remove(e)
                 entries.insert(0, e)
-            else:
-                entries.insert(entries.index(require(above)) + 1, e)
+                continue
+            above = by_id.get(above_id)
+            # 기준이던 항목이 사라졌으면 "그 위로"가 성립하지 않는다. 원래 자리에 둔다.
+            if above is None:
+                continue
+            entries.remove(e)
+            entries.insert(entries.index(above) + 1, e)
         else:
             raise ValueError(f"unknown op: {kind!r}")
     return entries

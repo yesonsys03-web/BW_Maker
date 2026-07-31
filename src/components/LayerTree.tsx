@@ -12,7 +12,7 @@ import {
   type FlatRow,
   type LayerFilterMode,
 } from "../lib/layerFilter";
-import { exportLabelsBySourceId, type OpsState } from "../lib/opsReducer";
+import { buildEntries, exportLabelsBySourceId, type OpsState } from "../lib/opsReducer";
 import type { Operation, TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
 
@@ -105,11 +105,21 @@ export function LayerTree({
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
   const previewHiddenSet = useMemo(() => new Set(ops.previewHiddenIds), [ops.previewHiddenIds]);
   const matchedSet = useMemo(() => new Set(matchedIds), [matchedIds]);
-  // 병합/이름변경은 트리를 건드리지 않고 내보내기 계획에만 쌓인다. 그대로 두면
-  // 두 레이어를 병합해도 패널에서는 아무 변화가 없어 실패한 것처럼 보인다.
-  const exportLabels = useMemo(() => exportLabelsBySourceId(ops.entries), [ops.entries]);
 
   const allLeaves = useMemo(() => (tree ? flattenLeaves(tree) : []), [tree]);
+
+  // 병합/이름변경은 트리를 건드리지 않고 내보내기 계획에만 쌓인다. 그대로 두면
+  // 두 레이어를 병합해도 패널에서는 아무 변화가 없어 실패한 것처럼 보인다.
+  //
+  // ops.entries가 아니라 "모든 leaf 위에 ops를 재생한" 결과를 쓴다. ops.entries는
+  // 체크된 레이어만으로 만들어지므로, 표시 전체 해제를 누르면 병합이 사라진 것처럼
+  // 목록이 두 줄로 돌아가 버린다. 병합은 체크 상태와 무관한 결정이고, 체크는
+  // "이걸 내보낼지"일 뿐이므로 패널 구조가 그것 때문에 바뀌면 안 된다.
+  const planEntries = useMemo(
+    () => buildEntries(allLeaves.map((l) => l.node.id), ops.ops),
+    [allLeaves, ops.ops]
+  );
+  const exportLabels = useMemo(() => exportLabelsBySourceId(planEntries), [planEntries]);
   const filtering = isFiltering(filterMode, query);
   const filteredLeaves = useMemo(
     () => filterLeaves(allLeaves, { mode: filterMode, query, matchedIds }),
@@ -120,8 +130,8 @@ export function LayerTree({
   // 구조를 비춰야 해서 접을 수 없다 — 다른 그룹끼리 병합했을 때 그 행을 어느
   // 그룹에 둘지 답이 없기 때문이다.
   const flatRows = useMemo(
-    () => collapseMergedRows(filteredLeaves, ops.entries),
-    [filteredLeaves, ops.entries]
+    () => collapseMergedRows(filteredLeaves, planEntries),
+    [filteredLeaves, planEntries]
   );
 
   // 행 id → 그 행이 대표하는 소스 레이어 id들. 병합 행의 체크박스·눈·제외는
@@ -412,7 +422,8 @@ export function LayerTree({
     const sourceIds = row.leaves.map((l) => l.node.id);
     const selected = selectedIds.has(row.entryId);
     const isMatched = sourceIds.some((id) => matchedSet.has(id));
-    const included = sourceIds.some((id) => includedSet.has(id));
+    const allIncluded = sourceIds.length > 0 && sourceIds.every((id) => includedSet.has(id));
+    const someIncluded = sourceIds.some((id) => includedSet.has(id));
     const hidden = sourceIds.length > 0 && sourceIds.every((id) => previewHiddenSet.has(id));
     const sourceNames = row.leaves.map((l) => l.node.name).join(" + ");
     const fullPaths = row.leaves.map((l) => (l.breadcrumb ? `${l.breadcrumb} / ${l.node.name}` : l.node.name));
@@ -430,9 +441,14 @@ export function LayerTree({
         <input
           type="checkbox"
           className="include-checkbox"
-          checked={included}
+          checked={allIncluded}
+          // 일부만 체크된 병합은 "부분 포함"이다 — 체크됨/해제됨 어느 쪽으로도
+          // 표시하면 거짓말이 된다. indeterminate는 DOM 속성이라 ref로 건다.
+          ref={(el) => {
+            if (el) el.indeterminate = someIncluded && !allIncluded;
+          }}
           onClick={(e) => e.stopPropagation()}
-          onChange={() => onSetIncluded(applyBulkInclude(ops.includedIds, sourceIds, !included))}
+          onChange={() => onSetIncluded(applyBulkInclude(ops.includedIds, sourceIds, !allIncluded))}
         />
         <button
           type="button"

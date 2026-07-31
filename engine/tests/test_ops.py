@@ -20,9 +20,51 @@ def test_exclude():
     assert ids(plan) == [3, 5]
 
 
-def test_exclude_unknown_raises():
-    with pytest.raises(KeyError):
-        build_export_plan(INCLUDED, [{"op": "exclude", "layerIds": [99]}])
+def test_op_naming_a_layer_outside_the_included_set_is_skipped():
+    # included_ids가 기준이므로, 거기 없는 레이어를 가리키는 작업은 적용할 대상이
+    # 없다. 예전에는 KeyError를 던져 내보내기 전체가 실패했다 — 병합에 쓰인
+    # 레이어의 체크를 푸는 것만으로 재현된다.
+    assert ids(build_export_plan(INCLUDED, [{"op": "exclude", "layerIds": [99]}])) == INCLUDED
+    assert ids(build_export_plan(INCLUDED, [{"op": "rename", "layerId": 99, "name": "x"}])) == INCLUDED
+
+
+def test_merge_drops_sources_that_are_not_included():
+    # 3과 4를 병합해뒀다가 3의 체크를 푼 상태. 남은 4가 병합의 이름을 이어받는다.
+    plan = build_export_plan([4, 5], [{"op": "merge", "layerIds": [3, 4], "name": "M"}])
+    merged = [e for e in plan if 4 in e["sourceIds"]][0]
+    assert merged["name"] == "M"
+    assert merged["sourceIds"] == [4]
+    assert len(plan) == 2
+
+
+def test_merge_with_no_included_sources_left_does_nothing():
+    plan = build_export_plan([5], [{"op": "merge", "layerIds": [3, 4], "name": "M"}])
+    assert plan == [{"entryId": 5, "sourceIds": [5], "name": None}]
+
+
+def test_a_merge_reduced_to_one_source_keeps_its_merged_entry_id():
+    # 뒤따르는 작업이 병합 결과를 가리킬 수 있어야 한다.
+    plan = build_export_plan(
+        [4, 5],
+        [
+            {"op": "merge", "layerIds": [3, 4], "name": "M"},
+            {"op": "rename", "layerId": -1, "name": "RENAMED"},
+        ],
+    )
+    assert [e for e in plan if 4 in e["sourceIds"]][0]["name"] == "RENAMED"
+
+
+def test_reorder_is_skipped_when_its_reference_is_not_included():
+    plan = build_export_plan([4, 5], [{"op": "reorder", "layerId": 5, "aboveId": 3}])
+    assert ids(plan) == [4, 5]
+
+
+def test_engine_and_ui_agree_on_a_merge_missing_one_source():
+    # src/lib/opsReducer.ts의 같은 시나리오와 결과가 일치해야 한다. 어긋나면
+    # 화면에서는 멀쩡한데 내보내기만 실패한다.
+    plan = build_export_plan([1, 5], [{"op": "merge", "layerIds": [1, 2], "name": "M"}])
+    survivor = [e for e in plan if 1 in e["sourceIds"]][0]
+    assert (survivor["name"], survivor["sourceIds"]) == ("M", [1])
 
 
 def test_rename():
