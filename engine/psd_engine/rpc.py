@@ -97,7 +97,8 @@ class Engine:
         matched = match_preset(s["tree"], preset)
         return {
             "matchedLayerIds": matched,
-            "operations": preset_operations(s["tree"], matched, preset),
+            "operations": preset_operations(s["tree"], matched, preset,
+                                            source_stem=Path(s["path"]).stem),
         }
 
     def batch_run(self, paths, preset, outputDir=None, overwrite=False):

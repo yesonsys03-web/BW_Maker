@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { DEFAULT_LINE_COLOR } from "../lib/presets";
+import { DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS } from "../lib/presets";
 import type { Preset } from "../lib/types";
 
 export type PresetDialogMode = "edit" | "saveAs";
@@ -19,7 +19,14 @@ interface PresetDialogProps {
 }
 
 const INCLUDE_TYPES: Preset["include"]["type"][] = ["contains", "regex"];
-const MERGE_MODES: Preset["merge"][] = ["none", "all", "perGroup"];
+const MERGE_MODES: Preset["merge"][] = ["none", "all", "perGroup", "byRole"];
+
+const MERGE_LABELS: Record<Preset["merge"], string> = {
+  none: "병합 없음",
+  all: "전체 병합",
+  perGroup: "그룹별 병합",
+  byRole: "역할별 병합 (BG/UL/OL)",
+};
 const NAMING_MODES: Preset["naming"][] = ["pathPrefix", "original"];
 
 function parseGroupPrefixes(text: string): string[] {
@@ -46,6 +53,9 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   const [matchGroups, setMatchGroups] = useState(preset.matchGroups);
   const [includeHidden, setIncludeHidden] = useState(preset.includeHidden);
   const [merge, setMerge] = useState<Preset["merge"]>(preset.merge);
+  const [roleTokensText, setRoleTokensText] = useState(
+    (preset.roleTokens ?? DEFAULT_ROLE_TOKENS).join(", ")
+  );
   const [naming, setNaming] = useState<Preset["naming"]>(preset.naming);
   const [outputSuffix, setOutputSuffix] = useState(preset.outputSuffix);
   const [embedPreview, setEmbedPreview] = useState(preset.embedPreview);
@@ -98,6 +108,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       matchGroups,
       includeHidden,
       merge,
+      roleTokens: parseGroupPrefixes(roleTokensText),
       naming,
       outputSuffix,
       embedPreview,
@@ -202,7 +213,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
             <select value={merge} onChange={(e) => setMerge(e.currentTarget.value as Preset["merge"])}>
               {MERGE_MODES.map((m) => (
                 <option key={m} value={m}>
-                  {m === "none" ? "병합 없음" : m === "all" ? "전체 병합" : "그룹별 병합"}
+                  {MERGE_LABELS[m]}
                 </option>
               ))}
             </select>
@@ -219,6 +230,23 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
             </select>
           </label>
         </div>
+
+        {merge === "byRole" && (
+          <label className="preset-field">
+            <span>역할 접미사 (쉼표 구분, 아래→위 순서)</span>
+            <input
+              type="text"
+              value={roleTokensText}
+              onChange={(e) => setRoleTokensText(e.currentTarget.value)}
+              placeholder="UL, OL_UL, OL"
+            />
+            <span className="preset-hint">
+              그룹 이름이 이 접미사로 끝나면 그 역할로 묶습니다(<code>CHAIR2_UL</code> → UL).
+              어디에도 걸리지 않은 레이어는 <code>BG</code>로 묶여 맨 아래에 깔립니다.
+              결과 레이어 이름은 원본 파일명 + 역할입니다.
+            </span>
+          </label>
+        )}
 
         <label className="preset-field">
           <span>출력 파일명 접미사</span>

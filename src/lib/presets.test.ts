@@ -48,6 +48,7 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     outputSuffix: "_LINE",
     embedPreview: true,
     lineColor: null,          // 기본은 원본 레이어 색 유지
+    roleTokens: ["UL", "OL_UL", "OL"],
   });
 });
 
@@ -108,6 +109,7 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
     matchGroups: false,
     includeHidden: false,
     merge: "perGroup",
+    roleTokens: ["UL", "OL"],
     naming: "original",
     outputSuffix: "_FX",
     embedPreview: false,
@@ -194,4 +196,37 @@ test("isValidLineColor matches the engine's #RRGGBB rule", () => {
   expect(isValidLineColor("000000")).toBe(false);
   expect(isValidLineColor("#GGGGGG")).toBe(false);
   expect(isValidLineColor("")).toBe(false);
+});
+
+// roleTokens: byRole 병합용. 이 항목이 생기기 전 파일에는 없다.
+test("loadPresets fills in the default role tokens for a preset saved before they existed", async () => {
+  const { roleTokens: _dropped, ...legacy } = DEFAULT_PRESET;
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([legacy]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.roleTokens).toEqual(["UL", "OL_UL", "OL"]);
+});
+
+test("loadPresets keeps a custom role token order, since it sets the stacking order", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, roleTokens: ["OL", "UL"] }]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.roleTokens).toEqual(["OL", "UL"]);
+});
+
+test("loadPresets rejects role tokens that are not a string array", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, roleTokens: "UL,OL" }]));
+
+  await expect(loadPresets()).rejects.toThrow(/roleTokens/);
+});
+
+test("loadPresets accepts the byRole merge mode", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, merge: "byRole" }]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.merge).toBe("byRole");
 });

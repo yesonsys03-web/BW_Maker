@@ -33,7 +33,12 @@ export interface Preset {
   excludeGroupPrefixes: string[];
   matchGroups: boolean;
   includeHidden: boolean;
-  merge: "none" | "all" | "perGroup";
+  merge: "none" | "all" | "perGroup" | "byRole";
+  /**
+   * "byRole" 병합이 쓰는 역할 접미사. 목록 순서가 곧 쌓는 순서다(아래→위).
+   * 토큰을 못 찾은 레이어는 BG로 묶여 항상 맨 아래에 깔린다.
+   */
+  roleTokens: string[];
   naming: "pathPrefix" | "original";
   outputSuffix: string;
   embedPreview: boolean;

@@ -16,7 +16,8 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
         matched = match_preset(s["tree"], preset)
         if not matched:
             raise ValueError(f"no layers matched in {path}")
-        operations = preset_operations(s["tree"], matched, preset)
+        operations = preset_operations(s["tree"], matched, preset,
+                                       source_stem=Path(path).stem)
         entries = finalize_names(
             build_export_plan(matched, operations),
             s["nodes_by_id"], preset["naming"],

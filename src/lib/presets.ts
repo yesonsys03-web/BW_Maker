@@ -11,6 +11,7 @@ export const DEFAULT_PRESET: Preset = {
   matchGroups: true,
   includeHidden: true,
   merge: "none",
+  roleTokens: ["UL", "OL_UL", "OL"],
   naming: "pathPrefix",
   outputSuffix: "_LINE",
   embedPreview: true,
@@ -33,7 +34,10 @@ async function presetsFilePath(): Promise<string> {
 }
 
 const INCLUDE_TYPES = new Set(["contains", "regex"]);
-const MERGE_MODES = new Set(["none", "all", "perGroup"]);
+const MERGE_MODES = new Set(["none", "all", "perGroup", "byRole"]);
+
+/** byRole 병합의 기본 역할 토큰(아래→위 순서). 엔진 DEFAULT_ROLE_TOKENS와 같다. */
+export const DEFAULT_ROLE_TOKENS = ["UL", "OL_UL", "OL"];
 const NAMING_MODES = new Set(["pathPrefix", "original"]);
 
 /**
@@ -76,6 +80,13 @@ function validatePreset(value: unknown, index: number): Preset {
     throw new Error(`${prefix}.naming: "pathPrefix" 또는 "original"이 아닙니다.`);
   }
   if (typeof v.outputSuffix !== "string") throw new Error(`${prefix}.outputSuffix: 문자열이 아닙니다.`);
+  // roleTokens도 나중에 추가된 항목이라 그 전에 저장된 파일에는 없다 — 없으면
+  // 기본값으로 읽고, 들어있는데 모양이 어긋나면 통과시키지 않는다.
+  if (v.roleTokens !== undefined) {
+    if (!Array.isArray(v.roleTokens) || !v.roleTokens.every((t) => typeof t === "string")) {
+      throw new Error(`${prefix}.roleTokens: 문자열 배열이 아닙니다.`);
+    }
+  }
   if (typeof v.embedPreview !== "boolean") throw new Error(`${prefix}.embedPreview: boolean이 아닙니다.`);
   // lineColor는 나중에 추가된 항목이라, 그 이전에 저장된 presets.json에는 아예
   // 없다. 없는 것은 "원본 색 유지"(null)로 읽는다 — 형식이 깨진 값과 달리
@@ -98,6 +109,7 @@ function validatePreset(value: unknown, index: number): Preset {
     matchGroups: v.matchGroups,
     includeHidden: v.includeHidden,
     merge: v.merge as Preset["merge"],
+    roleTokens: (v.roleTokens as string[] | undefined) ?? [...DEFAULT_ROLE_TOKENS],
     naming: v.naming as Preset["naming"],
     outputSuffix: v.outputSuffix,
     embedPreview: v.embedPreview,
