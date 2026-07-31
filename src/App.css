@@ -772,6 +772,31 @@ input[type="text"] {
   background: var(--bg-3);
 }
 
+/* "병합에 넣기"의 목적지 목록. 파일에 병합이 많으면 길어지므로 접어두고,
+   펼쳤을 때는 메뉴 안에서 스크롤한다. */
+.context-submenu {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0.15em 0 0.15em 0.6em;
+  padding-left: 0.4em;
+  border-left: 1px solid var(--border);
+}
+
+.context-submenu button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1em;
+}
+
+.context-submenu-count {
+  flex-shrink: 0;
+  font-size: 0.78em;
+  color: var(--text-dim);
+}
+
 /* ---------- modal ---------- */
 
 .modal-overlay {

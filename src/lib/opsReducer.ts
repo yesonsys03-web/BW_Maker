@@ -213,6 +213,73 @@ export function autoMergeOps(
   return toUnmerge.length > 0 ? [{ op: "unmerge", layerIds: toUnmerge }, ...rebased] : rebased;
 }
 
+/** 우클릭 "병합에 넣기"의 목적지 하나. */
+export interface MergeDestination {
+  /** 기존 병합 항목이면 그 항목 id. 아직 없는 이름으로 새로 만들 목적지면 undefined. */
+  entryId?: number;
+  name: string;
+  /** 지금 그 병합에 들어 있는 소스 수. 새로 만들 목적지는 0. */
+  sourceCount: number;
+}
+
+/**
+ * 선택한 레이어를 넣을 수 있는 병합 목록.
+ *
+ * 자동 병합으로 BG/MG/FG를 만든 뒤 빠진 레이어를 주워담는 것이 주 용도지만,
+ * 아직 그 덩어리가 없을 때도 바로 만들 수 있어야 한다(자동 병합 없이 한두 장만
+ * 옮기는 경우). 그래서 기존 병합 항목 + 아직 없는 평면 이름을 함께 돌려준다.
+ */
+export function mergeDestinations(
+  entries: Entry[],
+  targetIds: number[],
+  planeTokens: readonly string[]
+): MergeDestination[] {
+  const targets = new Set(targetIds);
+  const existing = entries
+    // 병합 항목만. 그리고 그 병합의 소스가 전부 선택된 것이라면 목적지가 아니다
+    // (자기 자신에게 넣는 셈이라 아무 일도 일어나지 않는다).
+    .filter((e) => e.sourceIds.length > 1 && e.sourceIds.some((id) => !targets.has(id)))
+    .map((e) => ({ entryId: e.entryId, name: e.name ?? "merged", sourceCount: e.sourceIds.length }));
+
+  // 이미 있는 병합 이름은 "새로 만들기"로 다시 내밀지 않는다. existing이 아니라
+  // 모든 병합 항목에서 모아야 한다 — 선택한 것뿐인 병합은 위에서 목적지에서
+  // 빠지는데, 그것 때문에 같은 이름이 새 목적지로 되살아나면 안 된다.
+  const taken = new Set(
+    entries.filter((e) => e.sourceIds.length > 1 && e.name).map((e) => e.name!.toUpperCase())
+  );
+  const fresh = planeTokens
+    .filter((token) => !taken.has(token.toUpperCase()))
+    .map((token) => ({ name: token, sourceCount: 0 }));
+
+  return [...existing, ...fresh];
+}
+
+/**
+ * 선택한 레이어를 목적지 병합에 합치는 연산.
+ *
+ * 이미 다른 병합에 묶여 있는 레이어는 먼저 빼내야 한다 — 병합된 뒤에는 원본
+ * 레이어 id가 항목 목록에 없어서, 그냥 merge를 얹으면 조용히 무시된다
+ * (autoMergeOps와 같은 이유).
+ */
+export function mergeIntoOps(
+  entries: Entry[],
+  targetIds: number[],
+  dest: MergeDestination
+): Operation[] {
+  const host = dest.entryId === undefined ? undefined : entries.find((e) => e.entryId === dest.entryId);
+  // 이미 그 병합에 들어 있는 것은 옮길 것이 없다.
+  const moving = host ? targetIds.filter((id) => !host.sourceIds.includes(id)) : targetIds;
+  if (moving.length === 0) return [];
+
+  const ops: Operation[] = [];
+  const stuck = alreadyMerged(entries, moving);
+  if (stuck.length > 0) ops.push({ op: "unmerge", layerIds: stuck });
+  // 목적지 항목 자체를 함께 넘겨 그 덩어리에 흡수시킨다. 새로 만드는 경우는
+  // 선택한 것들끼리 묶고 이름만 목적지 이름으로 붙인다.
+  ops.push({ op: "merge", layerIds: host ? [host.entryId, ...moving] : moving, name: dest.name });
+  return ops;
+}
+
 export function opsReducer(state: OpsState, action: OpsAction): OpsState {
   switch (action.type) {
     case "reset": {

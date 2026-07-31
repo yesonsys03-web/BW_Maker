@@ -29,6 +29,13 @@ export interface OpenResult {
  */
 export type MergeRule = "role" | "group" | "plane";
 
+/**
+ * 깊이 평면 토큰(아래→위). 애니메이션 BG의 표준 납품 단위라 "이 레이어를 MG에
+ * 넣어줘"가 자주 나온다 — 우클릭 메뉴가 아직 없는 평면을 바로 만들 때 쓴다.
+ * engine/psd_engine/matching.py의 DEFAULT_PLANE_TOKENS와 같은 값이어야 한다.
+ */
+export const PLANE_TOKENS = ["BG", "MG", "FG"] as const;
+
 export type Operation =
   | { op: "exclude"; layerIds: number[] }
   | { op: "rename"; layerId: number; name: string }

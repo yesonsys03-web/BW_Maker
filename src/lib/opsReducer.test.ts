@@ -1,5 +1,13 @@
 import { expect, test } from "vitest";
-import { autoMergeOps, buildEntries, exportLabelsBySourceId, opsReducer, OpsState } from "./opsReducer";
+import {
+  autoMergeOps,
+  buildEntries,
+  exportLabelsBySourceId,
+  mergeDestinations,
+  mergeIntoOps,
+  opsReducer,
+  OpsState,
+} from "./opsReducer";
 import type { Operation } from "./types";
 
 const INC = [3, 4, 5];
@@ -276,4 +284,69 @@ test("autoMergeOps restacks the same way no matter what order the panel lists it
     buildEntries(AUTO_INC, [...state.ops, ...autoMergeOps(PLANE_OPS, state, targets)]);
   expect(replay([...AUTO_INC].reverse())).toEqual(replay(AUTO_INC));
   expect(replay([...AUTO_INC].reverse()).map((e) => e.sourceIds)).toEqual([[1, 5], [2, 3, 4]]);
+});
+
+// mergeDestinations / mergeIntoOps: 우클릭 → "병합에 넣기". 자동 병합이 규칙에
+// 걸리지 않아 빠뜨린 레이어를 기존 BG/MG/FG 덩어리에 나중에 주워담는 용도다.
+const PLANES = ["BG", "MG", "FG"] as const;
+// 1,5 = BG / 2,3,4 = MG 로 이미 갈라둔 상태(깊이 평면 자동 병합 결과).
+const SPLIT_OPS: Operation[] = [
+  { op: "merge", layerIds: [1, 5], name: "BG" },
+  { op: "merge", layerIds: [2, 3, 4], name: "MG" },
+];
+
+test("mergeDestinations lists the existing merges with their layer counts", () => {
+  const entries = buildEntries(AUTO_INC, SPLIT_OPS);
+  // 순서는 계획 순서(아래→위)다. 병합은 "가장 위 소스 자리"에 들어가므로 BG(1,5)를
+  // 먼저 묶어도 MG(2,3,4)가 아래에 온다 — 패널의 평면 목록과 같은 순서다.
+  expect(mergeDestinations(entries, [], PLANES)).toEqual([
+    { entryId: -2, name: "MG", sourceCount: 3 },
+    { entryId: -1, name: "BG", sourceCount: 2 },
+    { name: "FG", sourceCount: 0 }, // 아직 없는 평면은 새로 만들 목적지로
+  ]);
+});
+
+test("mergeDestinations drops a merge whose sources are all selected", () => {
+  // 자기 자신에게 넣는 셈이라 아무 일도 일어나지 않는다. 목적지에서 빠졌다고 해서
+  // 같은 이름이 "새로 만들기"로 되살아나서도 안 된다.
+  const entries = buildEntries(AUTO_INC, SPLIT_OPS);
+  expect(mergeDestinations(entries, [2, 3, 4], PLANES).map((d) => d.name)).toEqual(["BG", "FG"]);
+});
+
+test("merging a loose layer into an existing merge absorbs it", () => {
+  const included = [...AUTO_INC, 6];
+  const entries = buildEntries(included, SPLIT_OPS);
+  const dest = mergeDestinations(entries, [6], PLANES).find((d) => d.name === "MG")!;
+  const after = buildEntries(included, [...SPLIT_OPS, ...mergeIntoOps(entries, [6], dest)]);
+  expect(after.map((e) => [e.name, e.sourceIds])).toEqual([
+    ["BG", [1, 5]],
+    ["MG", [2, 3, 4, 6]],
+  ]);
+});
+
+test("merging a layer that sits in another merge moves it instead of doing nothing", () => {
+  const entries = buildEntries(AUTO_INC, SPLIT_OPS);
+  const dest = mergeDestinations(entries, [4], PLANES).find((d) => d.name === "BG")!;
+  const pushed = mergeIntoOps(entries, [4], dest);
+  expect(pushed[0]).toEqual({ op: "unmerge", layerIds: [4] }); // 먼저 MG에서 빼낸다
+  const after = buildEntries(AUTO_INC, [...SPLIT_OPS, ...pushed]);
+  expect(after.find((e) => e.name === "MG")?.sourceIds).toEqual([2, 3]);
+  // 옮겨온 4는 목적지 소스의 아래쪽에 붙는다(문서 순서 [1,4,5]가 아니다). 빼낸 항목은
+  // 원래 병합 바로 위 = BG 아래에 놓이고, merge는 현재 항목 순서대로 소스를 잇기
+  // 때문이다. 원래 위치까지 되살리려면 merge/unmerge의 자리 규칙을 바꿔야 한다.
+  expect(after.find((e) => e.name === "BG")?.sourceIds).toEqual([4, 1, 5]);
+});
+
+test("picking a plane that does not exist yet creates that merge", () => {
+  const entries = buildEntries(AUTO_INC, SPLIT_OPS);
+  const dest = mergeDestinations(entries, [2, 3], PLANES).find((d) => d.name === "FG")!;
+  const after = buildEntries(AUTO_INC, [...SPLIT_OPS, ...mergeIntoOps(entries, [2, 3], dest)]);
+  expect(after.find((e) => e.name === "FG")?.sourceIds).toEqual([2, 3]);
+  expect(after.find((e) => e.name === "MG")?.sourceIds).toEqual([4]);
+});
+
+test("merging layers that are already in the destination is a no-op", () => {
+  const entries = buildEntries(AUTO_INC, SPLIT_OPS);
+  const dest = mergeDestinations(entries, [], PLANES).find((d) => d.name === "MG")!;
+  expect(mergeIntoOps(entries, [2, 3], dest)).toEqual([]);
 });

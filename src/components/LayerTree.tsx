@@ -18,11 +18,14 @@ import {
   autoMergeOps,
   buildEntries,
   exportLabelsBySourceId,
+  mergeDestinations,
+  mergeIntoOps,
   mergedSourceIds as mergedSourceIdsOf,
+  type MergeDestination,
   type OpsState,
 } from "../lib/opsReducer";
 import { toEngineError } from "../lib/preview";
-import type { EngineError, MergeRule, Operation, TreeNode } from "../lib/types";
+import { PLANE_TOKENS, type EngineError, type MergeRule, type Operation, type TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
 
 interface LayerTreeProps {
@@ -131,6 +134,9 @@ export function LayerTree({
   // 펼쳐둔 병합 행(entryId). 병합하고 나면 원본이 화면에서 사라져 무엇이
   // 들어갔는지 확인할 수 없으므로, 접힌 채로 두되 열어볼 수 있게 한다.
   const [expandedMerges, setExpandedMerges] = useState<Set<number>>(new Set());
+  // 우클릭 메뉴 안에서 "병합에 넣기"를 펼쳤는지. 목적지 목록이 파일마다 다르고
+  // 길어질 수 있어 한 단계 접어둔다.
+  const [mergeIntoOpen, setMergeIntoOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
@@ -231,6 +237,9 @@ export function LayerTree({
       document.removeEventListener("keydown", onKey);
     };
   }, [ruleMenuOpen]);
+
+  // 메뉴가 새로 열리거나 닫히면 하위 메뉴는 접힌 상태에서 시작한다.
+  useEffect(() => setMergeIntoOpen(false), [contextMenu]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -391,6 +400,17 @@ export function LayerTree({
     const targets = expandRowIds(ids).filter((id) => mergedSourceIds.has(id));
     if (targets.length === 0) return;
     onPushOp({ op: "unmerge", layerIds: targets });
+  }
+
+  /**
+   * 선택한 레이어를 이미 있는 병합(BG/MG/FG …)에 합친다. 자동 병합이 규칙에 걸리지
+   * 않아 빠뜨린 레이어를 나중에 주워담는 용도다. 다른 병합에 묶여 있던 레이어는
+   * mergeIntoOps가 거기서 먼저 빼낸다 — 안 그러면 새 병합이 조용히 무시된다.
+   */
+  function handleMergeInto(dest: MergeDestination) {
+    const targets = contextMenu ? expandRowIds(contextMenu.ids) : [];
+    setContextMenu(null);
+    for (const op of mergeIntoOps(planEntries, targets, dest)) onPushOp(op);
   }
 
   function handleBulkInclude(include: boolean) {
@@ -729,6 +749,34 @@ export function LayerTree({
           >
             선택 병합...
           </button>
+          <button
+            type="button"
+            title="이미 만들어진 병합(BG/MG/FG …)에 선택한 레이어를 합칩니다."
+            onClick={() => setMergeIntoOpen((open) => !open)}
+          >
+            병합에 넣기 {mergeIntoOpen ? "▾" : "▸"}
+          </button>
+          {mergeIntoOpen && (
+            <div className="context-submenu">
+              {mergeDestinations(planEntries, expandRowIds(contextMenu.ids), PLANE_TOKENS).map((dest) => (
+                <button
+                  key={dest.entryId ?? `new-${dest.name}`}
+                  type="button"
+                  title={
+                    dest.entryId === undefined
+                      ? `${dest.name} 병합을 새로 만들어 선택한 레이어를 넣습니다.`
+                      : `${dest.name} 병합에 선택한 레이어를 더합니다.`
+                  }
+                  onClick={() => handleMergeInto(dest)}
+                >
+                  <span className="context-submenu-name">{dest.name}</span>
+                  <span className="context-submenu-count">
+                    {dest.entryId === undefined ? "새로 만들기" : `${dest.sourceCount}장`}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
           <button
             type="button"
             disabled={contextMenu.ids.length !== 1}
