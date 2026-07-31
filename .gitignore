@@ -15,6 +15,11 @@ dist-ssr
 # Rust / Tauri build output
 src-tauri/target/
 
+# PyInstaller 동결 사이드카 (scripts/build-engine.sh|.ps1). 100MB대 빌드 산출물이라
+# 커밋하지 않는다 — 릴리스 때 각 OS 러너가 네이티브로 다시 만든다.
+src-tauri/binaries/
+target/engine-*
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
