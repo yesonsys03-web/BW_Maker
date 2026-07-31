@@ -10,6 +10,26 @@
 
 아티스트 PC에 Python이 없다고 가정하고, 처리 엔진을 앱에 동봉하는 것을 전제로 설계했습니다.
 
+## 설치
+
+[Releases](https://github.com/yesonsys03-web/BW_Maker/releases)에서 내려받아 설치합니다. Python이나
+uv를 따로 깔 필요는 없습니다 — 엔진이 앱 안에 들어 있습니다.
+
+- **윈도우:** `BW.Maker_<버전>_x64-setup.exe` (또는 `.msi`)
+- **macOS:** `.dmg` (Apple Silicon)
+
+### 서명이 없습니다
+
+코드 서명 인증서를 아직 쓰지 않으므로 처음 실행할 때 OS가 막습니다. 악성이라는 뜻이 아니라
+"개발자를 확인할 수 없다"는 뜻입니다.
+
+- **윈도우 SmartScreen:** "Windows의 PC 보호" 창에서 **추가 정보 → 실행**.
+- **macOS Gatekeeper:** 앱을 **우클릭 → 열기**로 한 번 실행합니다. 그래도 막히면 시스템 설정 →
+  개인정보 보호 및 보안에서 "확인 없이 열기"를 누릅니다.
+
+백신이 PyInstaller로 만든 실행 파일을 오탐하는 일이 있습니다. UPX 압축을 쓰지 않아 오탐 확률을
+낮춰 두었지만, 사내 백신이 격리한다면 예외 등록이 필요할 수 있습니다.
+
 ## 구성
 
 ```
@@ -28,6 +48,9 @@ UI와 엔진은 **stdin/stdout 줄 단위 JSON-RPC**로만 통신합니다. 엔�
 UI에 노출**합니다. 엔진 프로세스가 죽으면 자동 재시작하지 않고 배너로 알린 뒤 재시작 버튼을 제공하며,
 패키지된 빌드에는 터미널이 없으므로 엔진 stderr의 마지막 줄들을 이벤트에 실어 함께 보여줍니다.
 
+배포 빌드가 동봉된 엔진을 못 찾았을 때도 마찬가지입니다. 개발용 `uv` 경로로 조용히 넘어가지 않고
+(사용자 PC에 uv는 없습니다) 찾아본 경로를 전부 담은 알림을 띄운 뒤 종료합니다.
+
 ## 개발
 
 필요한 것: Node.js, Rust 툴체인, [uv](https://docs.astral.sh/uv/) (Python 3.12+).
@@ -39,7 +62,27 @@ npm run tauri dev
 ```
 
 `npm run tauri dev`는 개발 중에는 엔진을 저장소의 `engine/` 프로젝트에서 `uv run`으로 띄웁니다.
-배포용 사이드카 번들링(PyInstaller + Tauri `externalBin`)은 아직 붙지 않았습니다.
+배포 빌드는 동봉된 동결 엔진을 실행합니다 — 아래 "배포 빌드" 참조.
+
+### 배포 빌드
+
+엔진을 PyInstaller로 동결(onedir)해 `src-tauri/binaries/psd-engine-<타깃 트리플>/`에 두면 Tauri가
+`bundle.resources`로 앱에 담습니다. 동결은 크로스 컴파일이 안 되므로 **내보낼 OS에서** 돌려야 합니다.
+
+```bash
+bash scripts/build-engine.sh          # macOS
+pwsh -File scripts/build-engine.ps1   # 윈도우
+npm run tauri build
+```
+
+`build-engine.*`는 동결 직후 `engine/packaging/smoke.py`로 동결본을 실제로 실행해 봅니다(한글 경로
+PSD 열기 → 썸네일 → 한글 경로로 내보내기 + 검증 → 에러 응답 → 정상 종료). 여기서 실패하면 빌드가
+멈춥니다. 모듈이 빠진 번들은 사용자 PC의 첫 요청에서야 정체를 드러내기 때문입니다.
+
+릴리스 설치본은 GitHub Actions가 만듭니다(`.github/workflows/windows-installer.yml`,
+`macos-installer.yml`). `v*` 태그를 push하면 그 태그의 릴리스 자산으로 올라가고, 수동 실행
+(workflow_dispatch)은 초안 릴리스에 올립니다. 태그와 앱 버전은 `src-tauri/tauri.conf.json`의
+`version` 하나에서 나옵니다.
 
 ### 테스트
 
