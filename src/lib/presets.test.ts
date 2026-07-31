@@ -49,6 +49,7 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     embedPreview: true,
     lineColor: null,          // 기본은 원본 레이어 색 유지
     roleTokens: ["UL", "OL_UL", "OL"],
+    splitLayers: false,       // 기본은 한 파일에 모두
   });
 });
 
@@ -114,6 +115,7 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
     outputSuffix: "_FX",
     embedPreview: false,
     lineColor: "#1A2B3C",
+    splitLayers: true,
   };
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([wellFormed]));
@@ -239,4 +241,29 @@ test("loadPresets migrates the short-lived byRole mode to byElement", async () =
 
   const [loaded] = await loadPresets();
   expect(loaded.merge).toBe("byElement");
+});
+
+// splitLayers: 레이어별 분리 내보내기. 이 항목이 생기기 전 파일에는 없다.
+test("loadPresets reads a preset saved before splitLayers existed as one-file", async () => {
+  const { splitLayers: _dropped, ...legacy } = DEFAULT_PRESET;
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([legacy]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.splitLayers).toBe(false);
+});
+
+test("loadPresets keeps splitLayers when it is set", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, splitLayers: true }]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.splitLayers).toBe(true);
+});
+
+test("loadPresets rejects a non-boolean splitLayers", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, splitLayers: "yes" }]));
+
+  await expect(loadPresets()).rejects.toThrow(/splitLayers/);
 });

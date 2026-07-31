@@ -16,6 +16,7 @@ export const DEFAULT_PRESET: Preset = {
   outputSuffix: "_LINE",
   embedPreview: true,
   lineColor: null,
+  splitLayers: false,
 };
 
 /** 색 통일을 켤 때 처음 제안하는 색. 라인 아트의 기본값. */
@@ -85,6 +86,10 @@ function validatePreset(value: unknown, index: number): Preset {
   if (typeof v.outputSuffix !== "string") throw new Error(`${prefix}.outputSuffix: 문자열이 아닙니다.`);
   // roleTokens도 나중에 추가된 항목이라 그 전에 저장된 파일에는 없다 — 없으면
   // 기본값으로 읽고, 들어있는데 모양이 어긋나면 통과시키지 않는다.
+  // splitLayers도 나중에 추가된 항목 — 없으면 기본값(합쳐서 한 파일)으로 읽는다.
+  if (v.splitLayers !== undefined && typeof v.splitLayers !== "boolean") {
+    throw new Error(`${prefix}.splitLayers: boolean이 아닙니다.`);
+  }
   if (v.roleTokens !== undefined) {
     if (!Array.isArray(v.roleTokens) || !v.roleTokens.every((t) => typeof t === "string")) {
       throw new Error(`${prefix}.roleTokens: 문자열 배열이 아닙니다.`);
@@ -117,6 +122,7 @@ function validatePreset(value: unknown, index: number): Preset {
     outputSuffix: v.outputSuffix,
     embedPreview: v.embedPreview,
     lineColor: (v.lineColor as string | null | undefined) ?? null,
+    splitLayers: (v.splitLayers as boolean | undefined) ?? false,
   };
 }
 

@@ -2,7 +2,9 @@ import numpy as np
 import pytest
 from psd_tools import PSDImage
 
-from psd_engine.export import export_psd
+from pathlib import Path
+
+from psd_engine.export import export_psd, export_psd_split, split_output_path
 from psd_engine.ops import build_export_plan, finalize_names
 from psd_engine.session import SessionStore
 from psd_engine.verify import verify_export
@@ -132,3 +134,66 @@ def test_export_rejects_a_malformed_line_color_before_writing(session, tmp_path)
     with pytest.raises(ValueError, match="invalid line color"):
         export_psd(session, _plan(session, [4], []), out_path, line_color="black")
     assert not out_path.exists()
+
+
+def test_split_export_writes_one_file_per_entry(session, tmp_path):
+    entries = _plan(session, [3, 4, 5], [{"op": "merge", "layerIds": [4, 5], "name": "M"}])
+    out = tmp_path / "shot_LINE.psd"
+    result = export_psd_split(session, entries, out)
+
+    paths = [o["outputPath"] for o in result["outputs"]]
+    assert [Path(p).name for p in paths] == ["shot_LINE_BG_hidden line.psd", "shot_LINE_M.psd"]
+    assert all(Path(p).exists() for p in paths)
+    assert result["layerCount"] == 2
+
+
+def test_each_split_file_keeps_the_document_canvas(session, tmp_path):
+    # 나중에 합성할 때 좌표가 맞아야 하므로 레이어 bbox로 자르지 않는다.
+    entries = _plan(session, [4, 5], [])
+    result = export_psd_split(session, entries, tmp_path / "s.psd")
+    src = session["psd"]
+    for out in result["outputs"]:
+        psd = PSDImage.open(out["outputPath"])
+        assert (psd.width, psd.height) == (src.width, src.height)
+        assert len(list(psd)) == 1
+
+
+def test_split_export_checks_every_target_before_writing_any(session, tmp_path):
+    entries = _plan(session, [4, 5], [])
+    out = tmp_path / "s.psd"
+    result = export_psd_split(session, entries, out)
+    second = Path(result["outputs"][1]["outputPath"])
+    first = Path(result["outputs"][0]["outputPath"])
+    first.unlink()                      # 첫 번째만 지우고 두 번째는 남겨둔다
+
+    with pytest.raises(FileExistsError, match=second.name):
+        export_psd_split(session, entries, out)
+    # 절반 쓰다 멈추면 안 되므로, 지웠던 첫 파일이 다시 생겨 있으면 안 된다.
+    assert not first.exists()
+
+
+def test_split_export_overwrites_when_asked(session, tmp_path):
+    entries = _plan(session, [4], [])
+    out = tmp_path / "s.psd"
+    export_psd_split(session, entries, out)
+    export_psd_split(session, entries, out, overwrite=True)
+
+
+def test_split_output_path_sanitizes_a_layer_name():
+    # 레이어 이름이 그대로 파일명이 되므로 경로 구분자 등을 정리한다.
+    assert Path(split_output_path("/tmp/a_LINE.psd", "BG/OL")).name == "a_LINE_BG_OL.psd"
+    assert Path(split_output_path("/tmp/a_LINE.psd", "")).name == "a_LINE_layer.psd"
+
+
+def test_split_export_applies_line_color_like_the_single_file_path(session, tmp_path):
+    entries = _plan(session, [4, 5], [])
+    result = export_psd_split(session, entries, tmp_path / "s.psd", line_color="#000000")
+    for out in result["outputs"]:
+        arr = np.array(list(PSDImage.open(out["outputPath"]))[0].topil().convert("RGBA"))
+        painted = arr[..., 3] > 0
+        assert (arr[painted][:, :3] == 0).all()
+
+
+def test_split_export_rejects_an_empty_plan(session, tmp_path):
+    with pytest.raises(ValueError, match="no entries to export"):
+        export_psd_split(session, [], tmp_path / "s.psd")

@@ -1,6 +1,7 @@
 """줄 단위 JSON-RPC 루프. 모든 예외는 traceback과 함께 반환(흡수 금지)."""
 import atexit
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -9,6 +10,7 @@ from collections import deque
 from pathlib import Path
 
 from .export import export_psd as _export
+from .export import export_psd_split as _export_split
 from .matching import auto_merge_operations, match_preset, preset_operations
 from .ops import build_export_plan, finalize_names
 from .render import render_document_preview, render_preview, render_thumbnails
@@ -117,7 +119,8 @@ class Engine:
                          overwrite=overwrite, progress=progress)
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
-                   embedPreview=True, overwrite=False, verify=True, lineColor=None):
+                   embedPreview=True, overwrite=False, verify=True, lineColor=None,
+                   splitLayers=False):
         s = self.store.get(sessionId)
         included = sorted(includedIds)
         for lid in included:
@@ -134,6 +137,25 @@ class Engine:
         def progress(stage, current, total):
             _emit({"event": "progress", "stage": stage,
                    "current": current, "total": total}, self.out)
+
+        if splitLayers:
+            result = _export_split(s, entries, outputPath, embed_preview=embedPreview,
+                                   overwrite=overwrite, progress=progress,
+                                   line_color=lineColor)
+            if verify:
+                # 파일마다 그 파일에 들어간 엔트리 하나로 검증한다.
+                for entry, out in zip(entries, result["outputs"]):
+                    out["verification"] = verify_export(s, [entry], out["outputPath"])
+                result["verification"] = {
+                    "ok": all(o["verification"]["ok"] for o in result["outputs"]),
+                    "canvasOk": all(o["verification"]["canvasOk"] for o in result["outputs"]),
+                    "layerCountOk": all(o["verification"]["layerCountOk"] for o in result["outputs"]),
+                    "expectedLayers": len(entries),
+                    "actualLayers": sum(o["verification"]["actualLayers"] for o in result["outputs"]),
+                    "layers": [l for o in result["outputs"] for l in o["verification"]["layers"]],
+                }
+            result["outputPath"] = os.path.dirname(result["outputs"][0]["outputPath"])
+            return result
 
         result = _export(s, entries, outputPath, embed_preview=embedPreview,
                          overwrite=overwrite, progress=progress, line_color=lineColor)

@@ -59,6 +59,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   const [naming, setNaming] = useState<Preset["naming"]>(preset.naming);
   const [outputSuffix, setOutputSuffix] = useState(preset.outputSuffix);
   const [embedPreview, setEmbedPreview] = useState(preset.embedPreview);
+  const [splitLayers, setSplitLayers] = useState(preset.splitLayers ?? false);
   // 색 통일은 "켜짐 여부"와 "어떤 색"을 따로 들고 있어야, 껐다 켜도 고르던 색이
   // 그대로 남는다. 저장 시점에만 lineColor(문자열 | null)로 합친다.
   const [normalizeColor, setNormalizeColor] = useState(preset.lineColor !== null);
@@ -113,6 +114,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       outputSuffix,
       embedPreview,
       lineColor: normalizeColor ? lineColor : null,
+      splitLayers,
     };
   }
 
@@ -266,6 +268,20 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           />
           <span>미리보기 이미지 포함하여 내보내기</span>
         </label>
+
+        <label className="preset-checkbox">
+          <input
+            type="checkbox"
+            checked={splitLayers}
+            onChange={(e) => setSplitLayers(e.currentTarget.checked)}
+          />
+          <span>레이어마다 파일 따로 내보내기</span>
+        </label>
+        <p className="preset-hint">
+          한 파일에 레이어를 모두 담는 대신, 레이어 하나당 PSD 하나를 씁니다
+          (<code>..._LINE_BG.psd</code>, <code>..._LINE_CHAIR1.psd</code> …).
+          캔버스 크기는 매 파일 원본 그대로라 다시 합칠 때 좌표가 맞습니다.
+        </p>
 
         <label className="preset-checkbox">
           <input

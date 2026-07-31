@@ -2,7 +2,7 @@
 import traceback
 from pathlib import Path
 
-from .export import export_psd
+from .export import export_psd, export_psd_split
 from .matching import match_preset, preset_operations
 from .ops import build_export_plan, finalize_names
 from .session import SessionStore
@@ -30,11 +30,21 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
             if progress:
                 progress(str(path), stage, current, total)
 
-        result = export_psd(s, entries, out_path,
-                            embed_preview=preset.get("embedPreview", True),
-                            overwrite=overwrite, progress=cb,
-                            line_color=preset.get("lineColor"))
-        verification = verify_export(s, entries, out_path)
+        if preset.get("splitLayers"):
+            result = export_psd_split(s, entries, out_path,
+                                      embed_preview=preset.get("embedPreview", True),
+                                      overwrite=overwrite, progress=cb,
+                                      line_color=preset.get("lineColor"))
+            for entry, out in zip(entries, result["outputs"]):
+                out["verification"] = verify_export(s, [entry], out["outputPath"])
+            verification = {"ok": all(o["verification"]["ok"] for o in result["outputs"])}
+            result["outputPath"] = str(out_dir)
+        else:
+            result = export_psd(s, entries, out_path,
+                                embed_preview=preset.get("embedPreview", True),
+                                overwrite=overwrite, progress=cb,
+                                line_color=preset.get("lineColor"))
+            verification = verify_export(s, entries, out_path)
         return {
             "path": str(path), "ok": verification["ok"],
             "outputPath": result["outputPath"],

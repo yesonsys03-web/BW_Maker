@@ -60,6 +60,7 @@ export function ExportDialog({
   const [outputSuffix, setOutputSuffix] = useState(preset?.outputSuffix ?? "_LINE");
   const [naming, setNaming] = useState<"pathPrefix" | "original">(preset?.naming ?? "pathPrefix");
   const [embedPreview, setEmbedPreview] = useState(preset?.embedPreview ?? true);
+  const [splitLayers, setSplitLayers] = useState(preset?.splitLayers ?? false);
   const [normalizeColor, setNormalizeColor] = useState((preset?.lineColor ?? null) !== null);
   const [lineColor, setLineColor] = useState(preset?.lineColor ?? DEFAULT_LINE_COLOR);
   const [exporting, setExporting] = useState(false);
@@ -125,7 +126,7 @@ export function ExportDialog({
         sessionId,
         (sid) =>
           exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true,
-                    normalizeColor ? lineColor : null),
+                    normalizeColor ? lineColor : null, splitLayers),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);
@@ -228,6 +229,15 @@ export function ExportDialog({
         <label className="preset-checkbox">
           <input
             type="checkbox"
+            checked={splitLayers}
+            onChange={(e) => setSplitLayers(e.currentTarget.checked)}
+          />
+          <span>레이어마다 파일 따로 내보내기</span>
+        </label>
+
+        <label className="preset-checkbox">
+          <input
+            type="checkbox"
             checked={normalizeColor}
             onChange={(e) => setNormalizeColor(e.currentTarget.checked)}
           />
@@ -264,10 +274,22 @@ export function ExportDialog({
                 {verificationOk ? "검증 통과" : "검증 실패"}
               </span>
               <span className="export-result-path" title={result.outputPath}>
-                {result.outputPath}
+                {result.outputs ? `${result.outputPath} (파일 ${result.outputs.length}개)` : result.outputPath}
               </span>
             </div>
-            {verification && (
+            {result.outputs && (
+              <ul className="export-result-files">
+                {result.outputs.map((o) => (
+                  <li key={o.outputPath} title={o.outputPath}>
+                    <span className={o.verification?.ok === false ? "fail" : "ok"}>
+                      {o.verification?.ok === false ? "실패" : "OK"}
+                    </span>
+                    {o.outputPath.split(/[/\\]/).pop()}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {verification && !result.outputs && (
               <>
                 {!verification.layerCountOk && (
                   <p className="export-result-count-mismatch">

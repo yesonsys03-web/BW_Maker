@@ -126,7 +126,8 @@ export async function exportPsd(
   embedPreview: boolean = true,
   overwrite: boolean = false,
   verify: boolean = true,
-  lineColor: string | null = null
+  lineColor: string | null = null,
+  splitLayers: boolean = false
 ): Promise<ExportResult> {
   return callEngine("export_psd", {
     sessionId,
@@ -138,6 +139,7 @@ export async function exportPsd(
     overwrite,
     verify,
     lineColor,
+    splitLayers,
   }) as Promise<ExportResult>;
 }
 

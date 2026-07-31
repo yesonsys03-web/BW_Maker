@@ -1,5 +1,7 @@
 """export plan → 새 PSD 파일 생성 (pytoshop). 원본은 절대 수정하지 않는다."""
 import os
+import re
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -72,3 +74,48 @@ def export_psd(session, entries, output_path, embed_preview=True,
     if progress:
         progress("done", total, total)
     return {"outputPath": output_path, "layerCount": len(entries)}
+
+
+#: 파일명에 쓸 수 없는 문자. 레이어 이름이 그대로 파일명이 되므로 정리한다.
+_UNSAFE_IN_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def split_output_path(output_path, layer_name):
+    """
+    레이어별 내보내기의 파일 경로. 사용자가 고른 경로가 `.../X_LINE.psd`면
+    `.../X_LINE_BG.psd`처럼 레이어 이름을 덧붙인다.
+    """
+    base = Path(output_path)
+    safe = _UNSAFE_IN_FILENAME.sub("_", str(layer_name)).strip() or "layer"
+    return str(base.with_name(f"{base.stem}_{safe}{base.suffix or '.psd'}"))
+
+
+def export_psd_split(session, entries, output_path, embed_preview=True,
+                     overwrite=False, progress=None, line_color=None):
+    """
+    엔트리마다 파일 하나로 내보낸다.
+
+    캔버스 크기는 매 파일 원본 그대로다 — 나중에 합성할 때 좌표가 그대로
+    맞아야 하기 때문에 레이어 bbox로 자르지 않는다.
+
+    충돌 검사는 한 장이라도 쓰기 전에 전부 끝낸다. 절반쯤 쓰다 FileExistsError로
+    멈추면 어디까지 나갔는지 알 수 없는 상태가 남는다.
+    """
+    if not entries:
+        raise ValueError("no entries to export")
+
+    targets = [(e, split_output_path(output_path, e["finalName"])) for e in entries]
+    if not overwrite:
+        existing = [p for _, p in targets if os.path.exists(p)]
+        if existing:
+            raise FileExistsError("output already exists: " + ", ".join(existing))
+
+    outputs = []
+    total = len(targets)
+    for i, (entry, path) in enumerate(targets):
+        result = export_psd(session, [entry], path, embed_preview=embed_preview,
+                            overwrite=True, progress=None, line_color=line_color)
+        outputs.append(result)
+        if progress:
+            progress("write", i + 1, total)
+    return {"outputs": outputs, "layerCount": len(entries)}

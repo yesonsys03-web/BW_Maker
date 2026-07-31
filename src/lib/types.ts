@@ -53,6 +53,11 @@ export interface Preset {
    * 라인의 안티에일리어싱을 보존한다.
    */
   lineColor: string | null;
+  /**
+   * 레이어마다 파일을 따로 쓸지. 캔버스 크기는 매 파일 원본 그대로라 나중에
+   * 다시 합칠 때 좌표가 맞는다.
+   */
+  splitLayers: boolean;
 }
 
 export interface EngineError {
@@ -78,6 +83,8 @@ export interface ExportResult {
   outputPath: string;
   layerCount: number;
   verification?: Verification;
+  /** 레이어별 분리 내보내기일 때만. 파일 하나당 한 항목. */
+  outputs?: { outputPath: string; layerCount: number; verification?: Verification }[];
 }
 
 export interface BatchItemResult {
