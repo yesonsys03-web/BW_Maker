@@ -13,10 +13,10 @@ import {
   type FlatRow,
   type LayerFilterMode,
 } from "../lib/layerFilter";
-import { autoMergeOperations } from "../lib/engine";
+import { autoMergeOperations, autoMergePreview } from "../lib/engine";
 import { buildEntries, exportLabelsBySourceId, type OpsState } from "../lib/opsReducer";
 import { toEngineError } from "../lib/preview";
-import type { EngineError, Operation, TreeNode } from "../lib/types";
+import type { EngineError, MergeRule, Operation, TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
 
 interface LayerTreeProps {
@@ -45,6 +45,12 @@ interface ContextMenuState {
 type ModalState =
   | { kind: "merge"; ids: number[]; defaultName: string }
   | { kind: "rename"; ids: number[]; defaultName: string };
+
+const AUTO_MERGE_RULES: { rule: MergeRule; label: string; hint: string }[] = [
+  { rule: "role", label: "역할 접미사 (UL/OL)", hint: "CHAIR1_UL과 CHAIR1_OL을 CHAIR1 한 장으로. 접미사가 없는 레이어는 BG." },
+  { rule: "group", label: "그룹 단위", hint: "최상위 그룹 바로 아래 그룹으로 묶습니다 (GROUND, MG L BUILDING …)." },
+  { rule: "plane", label: "깊이 평면 (BG/MG/FG)", hint: "그룹 이름 앞의 BG/MG/FG로 묶습니다. 없으면 BG." },
+];
 
 function isGroup(node: TreeNode): boolean {
   return node.kind === "group";
@@ -111,6 +117,11 @@ export function LayerTree({
   const [filterMode, setFilterMode] = useState<LayerFilterMode>("all");
   const [query, setQuery] = useState("");
   const [autoMerging, setAutoMerging] = useState(false);
+  // 규칙별 결과 장수. 어느 규칙이 맞는지는 컷마다 다르므로(같은 파일에서 2장/
+  // 8장/3장으로 갈린다) 누르기 전에 보여준다. 엔진이 실제 병합과 같은 함수로
+  // 계산해 주므로 표시된 숫자와 결과가 어긋나지 않는다.
+  const [rulePreview, setRulePreview] = useState<Record<MergeRule, { layerCount: number; names: string[] }> | null>(null);
+  const [ruleMenuOpen, setRuleMenuOpen] = useState(false);
   // 펼쳐둔 병합 행(entryId). 병합하고 나면 원본이 화면에서 사라져 무엇이
   // 들어갔는지 확인할 수 없으므로, 접힌 채로 두되 열어볼 수 있게 한다.
   const [expandedMerges, setExpandedMerges] = useState<Set<number>>(new Set());
@@ -204,6 +215,23 @@ export function LayerTree({
     setQuery("");
     setExpandedMerges(new Set());
   }, [path]);
+
+  useEffect(() => {
+    if (!ruleMenuOpen) return;
+    function close(e: MouseEvent) {
+      const el = e.target as HTMLElement;
+      if (!el.closest(".auto-merge-menu-anchor")) setRuleMenuOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setRuleMenuOpen(false);
+    }
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [ruleMenuOpen]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -318,17 +346,34 @@ export function LayerTree({
    * (프리셋의 요소별 병합과 같은 함수) 여기서는 그 결과 연산만 받아 쌓는다 —
    * 규칙을 프런트에도 따로 구현하면 배치 실행 결과와 갈라진다.
    */
-  async function handleAutoMerge() {
+  async function openRuleMenu() {
     const sid = sessionId;
     if (!sid) return;
     const targets = bulkTogglableIds(filteredLeaves);
     if (targets.length === 0) return;
+    setRuleMenuOpen(true);
+    setRulePreview(null);
+    try {
+      const { rules } = await autoMergePreview(sid, targets, roleTokens);
+      setRulePreview(rules);
+    } catch (e) {
+      setRuleMenuOpen(false);
+      onError("자동 병합 미리보기 실패", toEngineError(e));
+    }
+  }
+
+  async function handleAutoMerge(rule: MergeRule) {
+    const sid = sessionId;
+    if (!sid) return;
+    const targets = bulkTogglableIds(filteredLeaves);
+    if (targets.length === 0) return;
+    setRuleMenuOpen(false);
     setAutoMerging(true);
     try {
-      const { operations } = await autoMergeOperations(sid, targets, roleTokens);
+      const { operations } = await autoMergeOperations(sid, targets, roleTokens, rule);
       for (const op of operations) onPushOp(op);
     } catch (e) {
-      onError("요소별 병합 실패", toEngineError(e));
+      onError("자동 병합 실패", toEngineError(e));
     } finally {
       setAutoMerging(false);
     }
@@ -605,14 +650,38 @@ export function LayerTree({
             <button type="button" onClick={() => handleBulkInclude(false)}>
               표시 전체 해제
             </button>
-            <button
-              type="button"
-              disabled={!sessionId || autoMerging || bulkTogglableIds(filteredLeaves).length === 0}
-              title="같은 요소의 UL/OL을 한 장으로 묶고, 나머지는 BG 한 장으로 묶습니다."
-              onClick={() => void handleAutoMerge()}
-            >
-              {autoMerging ? "병합 중..." : "요소별 병합"}
-            </button>
+            <div className="auto-merge-menu-anchor">
+              <button
+                type="button"
+                disabled={!sessionId || autoMerging || bulkTogglableIds(filteredLeaves).length === 0}
+                title="표시 중인 라인을 규칙에 따라 묶습니다. 규칙별 결과 장수를 먼저 보여줍니다."
+                onClick={() => (ruleMenuOpen ? setRuleMenuOpen(false) : void openRuleMenu())}
+              >
+                {autoMerging ? "병합 중..." : "자동 병합 ▾"}
+              </button>
+              {ruleMenuOpen && (
+                <div className="auto-merge-menu" role="menu">
+                  {AUTO_MERGE_RULES.map(({ rule, label, hint }) => {
+                    const count = rulePreview?.[rule]?.layerCount;
+                    return (
+                      <button
+                        key={rule}
+                        type="button"
+                        role="menuitem"
+                        title={hint}
+                        disabled={rulePreview === null}
+                        onClick={() => void handleAutoMerge(rule)}
+                      >
+                        <span className="auto-merge-menu-label">{label}</span>
+                        <span className="auto-merge-menu-count">
+                          {count === undefined ? "…" : `${count}장`}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         )}
         {isLineFallbackActive(filterMode, matchedIds) && (

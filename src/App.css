@@ -1334,3 +1334,48 @@ input[type="text"] {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
+
+/* 자동 병합 규칙 드롭다운. 규칙이 파일마다 달라서, 어느 것이 맞는지 결과
+   장수를 보고 고르게 한다. */
+.auto-merge-menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.auto-merge-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 230px;
+  display: flex;
+  flex-direction: column;
+  padding: 0.25em;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 45%);
+}
+
+.auto-merge-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8em;
+  background: transparent;
+  border: 1px solid transparent;
+  text-align: left;
+  font-size: 0.85em;
+  padding: 0.4em 0.5em;
+}
+
+.auto-merge-menu button:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: var(--accent);
+}
+
+.auto-merge-menu-count {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}

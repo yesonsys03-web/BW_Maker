@@ -12,6 +12,7 @@ export const DEFAULT_PRESET: Preset = {
   includeHidden: true,
   merge: "none",
   roleTokens: ["UL", "OL_UL", "OL"],
+  mergeRule: "role",
   naming: "pathPrefix",
   outputSuffix: "_LINE",
   embedPreview: true,
@@ -36,6 +37,8 @@ async function presetsFilePath(): Promise<string> {
 
 const INCLUDE_TYPES = new Set(["contains", "regex"]);
 const MERGE_MODES = new Set(["none", "all", "perGroup", "byElement"]);
+
+const MERGE_RULES = new Set(["role", "group", "plane"]);
 
 /** byRole 병합의 기본 역할 토큰(아래→위 순서). 엔진 DEFAULT_ROLE_TOKENS와 같다. */
 export const DEFAULT_ROLE_TOKENS = ["UL", "OL_UL", "OL"];
@@ -90,6 +93,10 @@ function validatePreset(value: unknown, index: number): Preset {
   if (v.splitLayers !== undefined && typeof v.splitLayers !== "boolean") {
     throw new Error(`${prefix}.splitLayers: boolean이 아닙니다.`);
   }
+  // mergeRule도 나중에 추가된 항목 — 없으면 기존 동작(역할 접미사)으로 읽는다.
+  if (v.mergeRule !== undefined && (typeof v.mergeRule !== "string" || !MERGE_RULES.has(v.mergeRule))) {
+    throw new Error(`${prefix}.mergeRule: "role"/"group"/"plane" 중 하나가 아닙니다.`);
+  }
   if (v.roleTokens !== undefined) {
     if (!Array.isArray(v.roleTokens) || !v.roleTokens.every((t) => typeof t === "string")) {
       throw new Error(`${prefix}.roleTokens: 문자열 배열이 아닙니다.`);
@@ -118,6 +125,7 @@ function validatePreset(value: unknown, index: number): Preset {
     includeHidden: v.includeHidden,
     merge: v.merge as Preset["merge"],
     roleTokens: (v.roleTokens as string[] | undefined) ?? [...DEFAULT_ROLE_TOKENS],
+    mergeRule: (v.mergeRule as Preset["mergeRule"] | undefined) ?? "role",
     naming: v.naming as Preset["naming"],
     outputSuffix: v.outputSuffix,
     embedPreview: v.embedPreview,

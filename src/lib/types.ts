@@ -20,6 +20,15 @@ export interface OpenResult {
   tree: TreeNode[];
 }
 
+/**
+ * 자동 병합이 "무엇을 한 덩어리로 볼지" 고르는 기준. 실제 파일마다 명명 규칙이
+ * 달라 하나로 고정할 수 없다.
+ *   role  — 역할 접미사를 뗀 요소 (CHAIR1_UL + CHAIR1_OL → CHAIR1)
+ *   group — 최상위 그룹 바로 아래 그룹 (GROUND, MG L BUILDING …)
+ *   plane — 깊이 평면 접두사 (BG / MG / FG)
+ */
+export type MergeRule = "role" | "group" | "plane";
+
 export type Operation =
   | { op: "exclude"; layerIds: number[] }
   | { op: "rename"; layerId: number; name: string }
@@ -44,6 +53,8 @@ export interface Preset {
    * 알아낸다(CHAIR1_UL, CHAIR1_OL → CHAIR1). 어디에도 걸리지 않는 레이어는 BG.
    */
   roleTokens: string[];
+  /** 자동 병합 기준. 배치 실행이 이 값을 쓴다. */
+  mergeRule: MergeRule;
   naming: "pathPrefix" | "original";
   outputSuffix: string;
   embedPreview: boolean;

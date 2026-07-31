@@ -49,6 +49,7 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     embedPreview: true,
     lineColor: null,          // 기본은 원본 레이어 색 유지
     roleTokens: ["UL", "OL_UL", "OL"],
+    mergeRule: "role",
     splitLayers: false,       // 기본은 한 파일에 모두
   });
 });
@@ -111,6 +112,7 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
     includeHidden: false,
     merge: "perGroup",
     roleTokens: ["UL", "OL"],
+    mergeRule: "group",
     naming: "original",
     outputSuffix: "_FX",
     embedPreview: false,
@@ -266,4 +268,29 @@ test("loadPresets rejects a non-boolean splitLayers", async () => {
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, splitLayers: "yes" }]));
 
   await expect(loadPresets()).rejects.toThrow(/splitLayers/);
+});
+
+// mergeRule: 자동 병합 기준. 이 항목이 생기기 전 파일에는 없다.
+test("loadPresets defaults mergeRule to role for a preset saved before it existed", async () => {
+  const { mergeRule: _dropped, ...legacy } = DEFAULT_PRESET;
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([legacy]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.mergeRule).toBe("role");
+});
+
+test("loadPresets keeps a chosen mergeRule", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, mergeRule: "plane" }]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.mergeRule).toBe("plane");
+});
+
+test("loadPresets rejects an unknown mergeRule rather than falling back", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, mergeRule: "depth" }]));
+
+  await expect(loadPresets()).rejects.toThrow(/mergeRule/);
 });

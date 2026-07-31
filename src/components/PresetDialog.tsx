@@ -53,6 +53,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   const [matchGroups, setMatchGroups] = useState(preset.matchGroups);
   const [includeHidden, setIncludeHidden] = useState(preset.includeHidden);
   const [merge, setMerge] = useState<Preset["merge"]>(preset.merge);
+  const [mergeRule, setMergeRule] = useState<Preset["mergeRule"]>(preset.mergeRule ?? "role");
   const [roleTokensText, setRoleTokensText] = useState(
     (preset.roleTokens ?? DEFAULT_ROLE_TOKENS).join(", ")
   );
@@ -110,6 +111,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       includeHidden,
       merge,
       roleTokens: parseGroupPrefixes(roleTokensText),
+      mergeRule,
       naming,
       outputSuffix,
       embedPreview,
@@ -234,6 +236,19 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
         </div>
 
         {merge === "byElement" && (
+          <label className="preset-field">
+            <span>병합 기준</span>
+            <select
+              value={mergeRule}
+              onChange={(e) => setMergeRule(e.currentTarget.value as Preset["mergeRule"])}
+            >
+              <option value="role">역할 접미사 (UL/OL)</option>
+              <option value="group">그룹 단위 (최상위 바로 아래)</option>
+              <option value="plane">깊이 평면 (BG/MG/FG)</option>
+            </select>
+          </label>
+        )}
+        {merge === "byElement" && mergeRule === "role" && (
           <label className="preset-field">
             <span>역할 접미사 (쉼표로 구분)</span>
             <input

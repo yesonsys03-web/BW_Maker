@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  MergeRule,
   EngineError,
   OpenResult,
   Operation,
@@ -62,10 +63,26 @@ export async function applyPreset(
 export async function autoMergeOperations(
   sessionId: number,
   layerIds: number[],
-  roleTokens: string[] | null = null
+  roleTokens: string[] | null,
+  rule: MergeRule
 ): Promise<{ operations: Operation[] }> {
-  return callEngine("auto_merge_operations", { sessionId, layerIds, roleTokens }) as Promise<{
+  return callEngine("auto_merge_operations", { sessionId, layerIds, roleTokens, rule }) as Promise<{
     operations: Operation[];
+  }>;
+}
+
+/**
+ * 규칙별로 몇 장이 되는지. 어느 규칙이 맞는지는 컷마다 다르므로(같은 파일에서도
+ * 2장/8장/3장으로 갈린다) 누르기 전에 보여준다. 실제 병합과 같은 엔진 함수를
+ * 쓰기 때문에 표시된 숫자와 결과가 어긋나지 않는다.
+ */
+export async function autoMergePreview(
+  sessionId: number,
+  layerIds: number[],
+  roleTokens: string[] | null = null
+): Promise<{ rules: Record<MergeRule, { layerCount: number; names: string[] }> }> {
+  return callEngine("auto_merge_preview", { sessionId, layerIds, roleTokens }) as Promise<{
+    rules: Record<MergeRule, { layerCount: number; names: string[] }>;
   }>;
 }
 

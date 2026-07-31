@@ -1,7 +1,8 @@
 import pytest
 from psd_tools import PSDImage
 
-from psd_engine.matching import auto_merge_operations, match_preset, preset_operations
+from psd_engine.matching import (auto_merge_operations, auto_merge_preview,
+                                 match_preset, preset_operations)
 from psd_engine.tree import build_tree
 
 
@@ -212,3 +213,96 @@ def test_preset_by_element_mode_uses_the_same_rule():
     # 레이어 패널 버튼과 프리셋(배치 실행)이 갈라지면 화면과 결과가 달라진다.
     from_preset = preset_operations(ROLE_TREE, ROLE_MATCHED, _preset(merge="byElement"))
     assert from_preset == _ops()
+
+
+# ---- 규칙별 자동 병합: role / group / plane ----
+# 어느 규칙이 맞는지는 컷마다 다르다. 실제 파일 셋에서 같은 라인이
+# 규칙에 따라 1~11장으로 갈렸다.
+
+# *ART 아래 depth-2 그룹이 의미 단위인 구조 (실제 Alley 파일의 축소판).
+PLANE_TREE = [
+    _group(100, "*ART", [], [
+        _group(110, "GROUND", ["*ART"], [
+            _group(111, "ground", ["*ART", "GROUND"],
+                   [_leaf(1, "LINE", ["*ART", "GROUND", "ground"])]),
+        ]),
+        _group(120, "MG L BUILDING", ["*ART"], [
+            _group(121, "bldg", ["*ART", "MG L BUILDING"],
+                   [_leaf(2, "Line", ["*ART", "MG L BUILDING", "bldg"])]),
+            _group(122, "clothes", ["*ART", "MG L BUILDING"],
+                   [_leaf(3, "Line", ["*ART", "MG L BUILDING", "clothes"])]),
+        ]),
+        _group(130, "FG R", ["*ART"], [
+            _group(131, "balcony", ["*ART", "FG R"],
+                   [_leaf(4, "Line", ["*ART", "FG R", "balcony"])]),
+        ]),
+    ]),
+]
+PLANE_MATCHED = [1, 2, 3, 4]
+
+
+def _rule_merges(rule, matched=PLANE_MATCHED, tree=PLANE_TREE):
+    ops = auto_merge_operations(tree, matched, None, rule=rule)
+    return [(op["name"], op["layerIds"]) for op in ops if op["op"] == "merge"]
+
+
+def test_group_rule_buckets_by_the_group_under_the_top_level():
+    assert _rule_merges("group") == [
+        ("GROUND", [1]),
+        ("MG L BUILDING", [2, 3]),
+        ("FG R", [4]),
+    ]
+
+
+def test_plane_rule_buckets_by_the_bg_mg_fg_prefix():
+    # 평면 접두사가 없는 GROUND는 BG로 떨어진다.
+    assert _rule_merges("plane") == [
+        ("BG", [1]),
+        ("MG", [2, 3]),
+        ("FG", [4]),
+    ]
+
+
+def test_plane_rule_ignores_a_name_that_merely_starts_with_the_letters():
+    # "MGRAIN"은 MG가 아니다 — 토큰 뒤에 구분자가 와야 한다.
+    tree = [_group(200, "*ART", [], [
+        _group(210, "MGRAIN", ["*ART"], [_leaf(9, "Line", ["*ART", "MGRAIN"])]),
+    ])]
+    assert _rule_merges("plane", [9], tree) == [("BG", [9])]
+
+
+def test_role_rule_is_unchanged_by_the_new_rules():
+    assert _rule_merges("role", ROLE_MATCHED, ROLE_TREE) == [
+        ("BG", [1, 5]), ("CHAIR2", [2, 3]), ("SOFA", [4]),
+    ]
+
+
+def test_group_rule_falls_back_to_the_only_ancestor_it_has():
+    tree = [_group(200, "*ART", [], [_leaf(9, "Line", ["*ART"])])]
+    assert _rule_merges("group", [9], tree) == [("*ART", [9])]
+
+
+def test_unknown_rule_is_rejected_rather_than_silently_defaulted():
+    with pytest.raises(ValueError, match="unknown merge rule"):
+        auto_merge_operations(PLANE_TREE, PLANE_MATCHED, None, rule="bogus")
+
+
+def test_preview_reports_every_rule_with_the_counts_the_merge_would_produce():
+    pv = auto_merge_preview(PLANE_TREE, PLANE_MATCHED)
+    assert pv["group"]["layerCount"] == 3
+    assert pv["plane"]["layerCount"] == 3
+    assert pv["role"]["layerCount"] == 1          # 접미사가 없어 전부 BG
+    assert pv["plane"]["names"] == ["BG", "MG", "FG"]
+
+
+def test_preview_counts_match_what_the_merge_actually_produces():
+    # 표시된 숫자와 결과가 갈라지면 고르는 의미가 없다.
+    pv = auto_merge_preview(PLANE_TREE, PLANE_MATCHED)
+    for rule in ("role", "group", "plane"):
+        assert pv[rule]["layerCount"] == len(_rule_merges(rule))
+
+
+def test_preset_by_element_honours_the_merge_rule():
+    ops = preset_operations(PLANE_TREE, PLANE_MATCHED,
+                            _preset(merge="byElement", mergeRule="plane"))
+    assert [op["name"] for op in ops if op["op"] == "merge"] == ["BG", "MG", "FG"]
