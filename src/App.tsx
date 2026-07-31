@@ -215,6 +215,7 @@ function AppShell() {
           tree={activeFile?.tree}
           includedIds={ops.includedIds}
           previewHiddenIds={ops.previewHiddenIds}
+          lineColor={selectedPreset?.lineColor ?? null}
           onSessionRefreshed={refreshSession}
           onError={pushError}
         />

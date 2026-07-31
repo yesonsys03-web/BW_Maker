@@ -60,11 +60,15 @@ export async function applyPreset(
 export async function renderPreview(
   sessionId: number,
   visibleLayerIds: number[],
-  maxSize: number
+  maxSize: number,
+  lineColor: string | null = null
 ): Promise<{ pngPath: string }> {
-  return callEngine("render_preview", { sessionId, visibleLayerIds, maxSize }) as Promise<{
-    pngPath: string;
-  }>;
+  return callEngine("render_preview", {
+    sessionId,
+    visibleLayerIds,
+    maxSize,
+    lineColor,
+  }) as Promise<{ pngPath: string }>;
 }
 
 /**
@@ -106,7 +110,8 @@ export async function exportPsd(
   outputPath: string,
   embedPreview: boolean = true,
   overwrite: boolean = false,
-  verify: boolean = true
+  verify: boolean = true,
+  lineColor: string | null = null
 ): Promise<ExportResult> {
   return callEngine("export_psd", {
     sessionId,
@@ -117,6 +122,7 @@ export async function exportPsd(
     embedPreview,
     overwrite,
     verify,
+    lineColor,
   }) as Promise<ExportResult>;
 }
 

@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   writeTextFile: (...a: unknown[]) => writeTextFileMock(...a),
 }));
 
-import { DEFAULT_PRESET, loadPresets, savePresets } from "./presets";
+import { DEFAULT_PRESET, isValidLineColor, loadPresets, savePresets } from "./presets";
 import type { Preset } from "./types";
 
 const APP_DATA_DIR = "/mock/appdata";
@@ -47,6 +47,7 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     naming: "pathPrefix",
     outputSuffix: "_LINE",
     embedPreview: true,
+    lineColor: null,          // 기본은 원본 레이어 색 유지
   });
 });
 
@@ -110,6 +111,7 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
     naming: "original",
     outputSuffix: "_FX",
     embedPreview: false,
+    lineColor: "#1A2B3C",
   };
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([wellFormed]));
@@ -149,4 +151,47 @@ test("savePresets propagates write errors instead of absorbing them", async () =
   writeTextFileMock.mockRejectedValue(new Error("disk full"));
 
   await expect(savePresets([DEFAULT_PRESET])).rejects.toThrow("disk full");
+});
+
+
+// lineColor: 나중에 추가된 항목이라 구버전 presets.json에는 아예 없다.
+test("loadPresets reads a preset saved before lineColor existed as keep-original", async () => {
+  const { lineColor: _dropped, ...legacy } = DEFAULT_PRESET;
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([legacy]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.lineColor).toBeNull();
+});
+
+test("loadPresets keeps an explicit null lineColor", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, lineColor: null }]));
+
+  const [loaded] = await loadPresets();
+  expect(loaded.lineColor).toBeNull();
+});
+
+test("loadPresets rejects a malformed lineColor rather than dropping it", async () => {
+  // 조용히 null로 떨어뜨리면 색 통일이 빠진 채 배치가 돌아버린다.
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, lineColor: "black" }]));
+
+  await expect(loadPresets()).rejects.toThrow(/lineColor/);
+});
+
+test("loadPresets rejects a shorthand hex lineColor", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, lineColor: "#000" }]));
+
+  await expect(loadPresets()).rejects.toThrow(/lineColor/);
+});
+
+test("isValidLineColor matches the engine's #RRGGBB rule", () => {
+  expect(isValidLineColor("#000000")).toBe(true);
+  expect(isValidLineColor("#1a2B3c")).toBe(true);
+  expect(isValidLineColor("#FFF")).toBe(false);
+  expect(isValidLineColor("000000")).toBe(false);
+  expect(isValidLineColor("#GGGGGG")).toBe(false);
+  expect(isValidLineColor("")).toBe(false);
 });

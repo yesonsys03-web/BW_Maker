@@ -22,6 +22,12 @@ interface PreviewCanvasProps {
   tree: TreeNode[] | undefined;
   includedIds: number[];
   previewHiddenIds: number[];
+  /**
+   * 선택된 프리셋의 라인 색 통일 설정. 내보내기 미리보기는 실제 산출물과 같아야
+   * 하므로 여기에도 반영한다. 원본 보기(문서 미리보기)에는 적용하지 않는다 —
+   * 그건 파일 자체를 보여주는 화면이다.
+   */
+  lineColor: string | null;
   onSessionRefreshed: (path: string, result: OpenResult) => void;
   onError: (title: string, error: EngineError) => void;
 }
@@ -50,6 +56,7 @@ export function PreviewCanvas({
   tree,
   includedIds,
   previewHiddenIds,
+  lineColor,
   onSessionRefreshed,
   onError,
 }: PreviewCanvasProps) {
@@ -139,7 +146,7 @@ export function PreviewCanvas({
             (s) =>
               documentView
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
-                : renderPreview(s, visibleIds, PREVIEW_MAX_SIZE),
+                : renderPreview(s, visibleIds, PREVIEW_MAX_SIZE, lineColor),
             (result) => onSessionRefreshed(path, result)
           );
           const dataUrl = await loadPngDataUrl(pngPath);
@@ -155,7 +162,7 @@ export function PreviewCanvas({
     }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [path, visibleIds, documentView, onSessionRefreshed, onError]);
+  }, [path, visibleIds, documentView, lineColor, onSessionRefreshed, onError]);
 
   // Callback ref (not a plain ref + mount-only effect): the viewport div only
   // exists once sessionId/visibleIds make this component render past the

@@ -14,7 +14,18 @@ export const DEFAULT_PRESET: Preset = {
   naming: "pathPrefix",
   outputSuffix: "_LINE",
   embedPreview: true,
+  lineColor: null,
 };
+
+/** 색 통일을 켤 때 처음 제안하는 색. 라인 아트의 기본값. */
+export const DEFAULT_LINE_COLOR = "#000000";
+
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+/** 엔진의 parse_line_color와 같은 형식(#RRGGBB)만 통과시킨다. */
+export function isValidLineColor(value: string): boolean {
+  return HEX_COLOR.test(value);
+}
 
 async function presetsFilePath(): Promise<string> {
   const dir = await appDataDir();
@@ -66,6 +77,15 @@ function validatePreset(value: unknown, index: number): Preset {
   }
   if (typeof v.outputSuffix !== "string") throw new Error(`${prefix}.outputSuffix: 문자열이 아닙니다.`);
   if (typeof v.embedPreview !== "boolean") throw new Error(`${prefix}.embedPreview: boolean이 아닙니다.`);
+  // lineColor는 나중에 추가된 항목이라, 그 이전에 저장된 presets.json에는 아예
+  // 없다. 없는 것은 "원본 색 유지"(null)로 읽는다 — 형식이 깨진 값과 달리
+  // 구버전 파일은 잘못된 것이 아니기 때문이다. 반대로 들어있는데 형식이
+  // 어긋나면 통과시키지 않는다.
+  if (v.lineColor !== undefined && v.lineColor !== null) {
+    if (typeof v.lineColor !== "string" || !isValidLineColor(v.lineColor)) {
+      throw new Error(`${prefix}.lineColor: null 또는 "#RRGGBB" 형식이 아닙니다.`);
+    }
+  }
 
   return {
     name: v.name,
@@ -81,6 +101,7 @@ function validatePreset(value: unknown, index: number): Preset {
     naming: v.naming as Preset["naming"],
     outputSuffix: v.outputSuffix,
     embedPreview: v.embedPreview,
+    lineColor: (v.lineColor as string | null | undefined) ?? null,
   };
 }
 

@@ -37,6 +37,12 @@ export interface Preset {
   naming: "pathPrefix" | "original";
   outputSuffix: string;
   embedPreview: boolean;
+  /**
+   * 라인 색 통일. null이면 원본 레이어 색을 그대로 둔다(기본).
+   * "#RRGGBB"이면 내보낼 때 모든 레이어의 RGB를 그 색으로 덮되 알파는 유지해
+   * 라인의 안티에일리어싱을 보존한다.
+   */
+  lineColor: string | null;
 }
 
 export interface EngineError {

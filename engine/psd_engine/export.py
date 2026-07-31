@@ -5,21 +5,27 @@ import numpy as np
 from PIL import Image
 
 from .patches import apply_pytoshop_patches
-from .render import extract_rgba, merge_rgba
+from .render import apply_line_color, extract_rgba, merge_rgba, parse_line_color
 
 
-def _entry_pixels(session, entry):
+def _entry_pixels(session, entry, line_rgb=None):
     if len(entry["sourceIds"]) == 1:
         layer = session["layers_by_id"][entry["sourceIds"][0]]
-        return extract_rgba(layer), layer.left, layer.top
-    layers = [session["layers_by_id"][sid] for sid in entry["sourceIds"]]
-    return merge_rgba(session["psd"], layers)
+        rgba, left, top = extract_rgba(layer), layer.left, layer.top
+    else:
+        layers = [session["layers_by_id"][sid] for sid in entry["sourceIds"]]
+        rgba, left, top = merge_rgba(session["psd"], layers)
+    # 병합 뒤에 덮는다. 소스가 서로 다른 색이어도 결과 알파는 같으므로 레이어마다
+    # 먼저 덮고 병합한 것과 같은 그림이 되고, 병합 경로가 한 갈래로 유지된다.
+    return apply_line_color(rgba, line_rgb), left, top
 
 
 def export_psd(session, entries, output_path, embed_preview=True,
-               overwrite=False, progress=None):
+               overwrite=False, progress=None, line_color=None):
     if not entries:
         raise ValueError("no entries to export")
+    # 파일을 만들기 시작하기 전에 형식을 확인한다 — 절반 쓰다 실패하지 않도록.
+    line_rgb = parse_line_color(line_color)
     apply_pytoshop_patches()
     from pytoshop import enums
     from pytoshop.image_data import ImageData
@@ -36,7 +42,7 @@ def export_psd(session, entries, output_path, embed_preview=True,
     canvas = Image.new("RGBA", (W, H), (255, 255, 255, 255)) if embed_preview else None
 
     for i, entry in enumerate(entries):
-        rgba, left, top = _entry_pixels(session, entry)
+        rgba, left, top = _entry_pixels(session, entry, line_rgb)
         channels = {c: np.ascontiguousarray(rgba[..., c]) for c in range(3)}
         channels[-1] = np.ascontiguousarray(rgba[..., 3])
         images_bottom_to_top.append(nested_layers.Image(

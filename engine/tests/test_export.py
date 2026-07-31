@@ -85,3 +85,50 @@ def test_verify_detects_layer_count_mismatch(session, tmp_path):
     assert v["layerCountOk"] is False
     assert v["expectedLayers"] == 1
     assert v["actualLayers"] == 2
+
+
+def test_export_normalizes_line_color_across_layers(session, tmp_path):
+    # 소스 라인은 요소마다 다른 색으로 그려져 있다(픽스처는 50 / 200). 색 통일을
+    # 켜면 내보낸 PSD의 모든 레이어가 한 색이 되고, 알파는 손대지 않는다.
+    entries = _plan(session, [3, 4, 5], [])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path, line_color="#000000")
+
+    out = PSDImage.open(out_path)
+    for layer in out:
+        arr = np.array(layer.topil().convert("RGBA"))
+        painted = arr[..., 3] > 0
+        assert painted.any(), f"{layer.name}에 그려진 픽셀이 없다"
+        assert (arr[painted][:, :3] == 0).all(), f"{layer.name}의 RGB가 통일되지 않았다"
+
+
+def test_export_keeps_alpha_when_normalizing_color(session, tmp_path):
+    # 안티에일리어싱은 전부 알파에 들어있으므로, 색을 덮어도 알파는 그대로여야 한다.
+    plain = _plan(session, [4], [])
+    a_path, b_path = tmp_path / "plain.psd", tmp_path / "black.psd"
+    export_psd(session, plain, a_path)
+    export_psd(session, _plan(session, [4], []), b_path, line_color="#123456")
+
+    a = np.array(list(PSDImage.open(a_path))[0].topil().convert("RGBA"))
+    b = np.array(list(PSDImage.open(b_path))[0].topil().convert("RGBA"))
+    assert np.array_equal(a[..., 3], b[..., 3])
+    assert (b[..., :3] == [0x12, 0x34, 0x56]).all()
+
+
+def test_export_without_line_color_keeps_source_colors(session, tmp_path):
+    entries = _plan(session, [4, 5], [])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path)
+    values = {
+        layer.name: int(np.array(layer.topil().convert("RGBA"))[..., 0].max())
+        for layer in PSDImage.open(out_path)
+    }
+    assert set(values.values()) == {50, 200}
+
+
+def test_export_rejects_a_malformed_line_color_before_writing(session, tmp_path):
+    # 형식 오류는 파일을 절반 쓰다 터지는 게 아니라 시작 전에 드러나야 한다.
+    out_path = tmp_path / "out.psd"
+    with pytest.raises(ValueError, match="invalid line color"):
+        export_psd(session, _plan(session, [4], []), out_path, line_color="black")
+    assert not out_path.exists()

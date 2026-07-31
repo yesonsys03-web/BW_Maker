@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { defaultExportPath, reorderArgs, resolveEntryName } from "../lib/exportFlow";
 import { exportPsd, onEngineEvent } from "../lib/engine";
+import { DEFAULT_LINE_COLOR } from "../lib/presets";
 import { toEngineError } from "../lib/preview";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { OpsState } from "../lib/opsReducer";
@@ -59,6 +60,8 @@ export function ExportDialog({
   const [outputSuffix, setOutputSuffix] = useState(preset?.outputSuffix ?? "_LINE");
   const [naming, setNaming] = useState<"pathPrefix" | "original">(preset?.naming ?? "pathPrefix");
   const [embedPreview, setEmbedPreview] = useState(preset?.embedPreview ?? true);
+  const [normalizeColor, setNormalizeColor] = useState((preset?.lineColor ?? null) !== null);
+  const [lineColor, setLineColor] = useState(preset?.lineColor ?? DEFAULT_LINE_COLOR);
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [result, setResult] = useState<ExportResult | null>(null);
@@ -120,7 +123,9 @@ export function ExportDialog({
       const res = await withEvictedSessionRetry(
         srcPath,
         sessionId,
-        (sid) => exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true),
+        (sid) =>
+          exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true,
+                    normalizeColor ? lineColor : null),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);
@@ -218,6 +223,24 @@ export function ExportDialog({
         <label className="preset-checkbox">
           <input type="checkbox" checked={embedPreview} onChange={(e) => setEmbedPreview(e.currentTarget.checked)} />
           <span>미리보기 이미지 포함하여 내보내기</span>
+        </label>
+
+        <label className="preset-checkbox">
+          <input
+            type="checkbox"
+            checked={normalizeColor}
+            onChange={(e) => setNormalizeColor(e.currentTarget.checked)}
+          />
+          <span>라인 색 통일</span>
+          <input
+            type="color"
+            className="preset-color"
+            value={lineColor}
+            disabled={!normalizeColor}
+            onChange={(e) => setLineColor(e.currentTarget.value)}
+            aria-label="통일할 라인 색"
+          />
+          <code className="preset-color-value">{normalizeColor ? lineColor.toUpperCase() : "원본 유지"}</code>
         </label>
 
         {exporting && (

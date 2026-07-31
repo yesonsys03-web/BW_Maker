@@ -8,14 +8,47 @@ blend_mode=normal`로 기록하므로 **내보낸 PSD는 블렌드·클리핑·�
 평평한 스택**이고, 그 파일의 내장 미리보기도 alpha_composite 누적으로 만들어진다.
 따라서 미리보기가 재현해야 할 대상은 원본 합성이 아니라 그 평평한 알파 합성이다.
 """
+import re
 from collections import OrderedDict
 
 import numpy as np
 from PIL import Image
 
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
+
 #: 세션당 미리보기 타일 캐시 상한(바이트). 640MB급 PSD를 최대 2세션 열어두는
 #: 상황이라 무제한 캐싱은 곧 메모리 압박이 된다. 초과하면 LRU로 버린다.
 PREVIEW_TILE_BUDGET_BYTES = 192 * 1024 * 1024
+
+
+def parse_line_color(value):
+    """
+    프리셋의 lineColor("#RRGGBB")를 (r, g, b)로. None이면 원본 색을 그대로 둔다.
+
+    형식이 어긋나면 조용히 무시하지 않고 예외를 낸다 — 오타 하나로 색 통일이
+    적용되지 않은 채 수백 장이 배치 처리되는 편이 훨씬 나쁘다.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not _HEX_COLOR.match(s):
+        raise ValueError(f"invalid line color: {value!r} (expected #RRGGBB)")
+    return (int(s[1:3], 16), int(s[3:5], 16), int(s[5:7], 16))
+
+
+def apply_line_color(rgba, rgb):
+    """
+    RGB만 단색으로 덮고 알파는 건드리지 않는다. 라인의 안티에일리어싱은 전부
+    알파 채널에 들어있으므로 이렇게 해야 가장자리 부드러움이 보존된다.
+
+    투명한 픽셀까지 같은 RGB로 채우는 것은 의도적이다 — 알파 0인 자리에 남아
+    있던 원본 색이 나중에 리샘플링될 때 가장자리로 번지지 않는다.
+    """
+    if rgb is None:
+        return rgba
+    out = rgba.copy()
+    out[..., 0], out[..., 1], out[..., 2] = rgb
+    return out
 
 
 def extract_rgba(layer):
@@ -163,14 +196,19 @@ def _preview_tile(session, layer_id, scale):
     return entry
 
 
-def render_preview(session, visible_layer_ids, max_size, out_dir):
+def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=None):
     """
     내보내기 결과 미리보기: 선택된 레이어의 픽셀을 문서 순서(아래→위)대로
     알파 합성한다. export_psd가 모든 레이어를 normal/255로 기록하므로 이것이
     내보낸 PSD가 실제로 보이게 될 모습이다.
 
+    line_color가 주어지면 합성이 끝난 뒤 한 번만 덮는다. 레이어마다 덮고 합성한
+    것과 결과가 동일하기 때문이다 — 모든 원본 RGB가 같은 값 C면 알파 오버의
+    결과도 항상 C다. 타일 캐시를 색깔별로 나눌 필요도 없어진다.
+
     배경은 투명하게 둔다 — 흰색/체커/검정은 UI가 뒤에 깔아 고른다.
     """
+    rgb = parse_line_color(line_color)
     psd = session["psd"]
     scale = preview_scale(psd, max_size)
     pw = max(1, round(psd.width * scale))
@@ -192,6 +230,9 @@ def render_preview(session, visible_layer_ids, max_size, out_dir):
         if (sx0, sy0, sx1, sy1) != (0, 0, img.width, img.height):
             img = img.crop((sx0, sy0, sx1, sy1))
         canvas.alpha_composite(img, dest=(x0 + sx0, y0 + sy0))
+
+    if rgb is not None:
+        canvas = Image.fromarray(apply_line_color(np.asarray(canvas), rgb), "RGBA")
 
     return _save_png(canvas, out_dir, "preview")
 

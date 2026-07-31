@@ -213,3 +213,61 @@ def test_render_thumbnails_respects_child_visibility(fixture_psd, tmp_path):
     # At position (6,6) which is inside the line's bbox (0,0,32,24)
     # but since line is hidden, should show fill value (128) instead
     assert arr[6, 6, 0] == 128  # R channel should be fill value
+
+
+def test_parse_line_color_accepts_hex_and_none():
+    from psd_engine.render import parse_line_color
+    assert parse_line_color(None) is None
+    assert parse_line_color("#000000") == (0, 0, 0)
+    assert parse_line_color("#1A2b3C") == (26, 43, 60)
+    assert parse_line_color("  #FFFFFF  ") == (255, 255, 255)
+
+
+@pytest.mark.parametrize("bad", ["black", "#FFF", "#GGGGGG", "000000", "#1234567", ""])
+def test_parse_line_color_rejects_malformed_values(bad):
+    # 오타 하나 때문에 색 통일이 조용히 빠진 채 배치가 도는 것이 최악이다.
+    from psd_engine.render import parse_line_color
+    with pytest.raises(ValueError, match="invalid line color"):
+        parse_line_color(bad)
+
+
+def test_apply_line_color_replaces_rgb_and_keeps_alpha():
+    # 라인의 안티에일리어싱은 알파에 들어있으므로 알파는 그대로여야 한다.
+    from psd_engine.render import apply_line_color
+    src = np.zeros((2, 2, 4), np.uint8)
+    src[..., :3] = [200, 100, 50]
+    src[..., 3] = [[0, 77], [128, 255]]
+    out = apply_line_color(src, (0, 0, 0))
+    assert (out[..., :3] == 0).all()
+    assert out[..., 3].tolist() == [[0, 77], [128, 255]]
+    assert (src[..., 0] == 200).all(), "원본 배열을 제자리에서 바꾸면 안 된다"
+
+
+def test_apply_line_color_none_is_a_passthrough():
+    from psd_engine.render import apply_line_color
+    src = np.full((2, 2, 4), 123, np.uint8)
+    assert apply_line_color(src, None) is src
+
+
+def test_render_preview_normalizes_line_color(fixture_psd, tmp_path):
+    # 소스 레이어 색이 서로 달라도(50 / 200) 한 색으로 통일되고, 알파 경계는 유지된다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    im = Image.open(
+        render_preview(s, [4, 5], max_size=256, out_dir=tmp_path, line_color="#FF0000")
+    ).convert("RGBA")
+    arr = np.array(im)
+    painted = arr[..., 3] > 0
+    assert painted.any()
+    assert (arr[painted][:, 0] == 255).all()
+    assert (arr[painted][:, 1] == 0).all()
+    assert (arr[painted][:, 2] == 0).all()
+
+
+def test_render_preview_without_line_color_keeps_source_colors(fixture_psd, tmp_path):
+    from PIL import Image
+    s = _session(fixture_psd)
+    im = Image.open(render_preview(s, [2, 5], max_size=256, out_dir=tmp_path)).convert("RGBA")
+    arr = np.array(im)
+    assert arr[0, 0, 0] == 128
+    assert arr[15, 15, 0] == 200

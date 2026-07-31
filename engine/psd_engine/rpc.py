@@ -81,10 +81,11 @@ class Engine:
         out_dir = self._fresh_render_dir("thumbnails")
         return {"thumbs": render_thumbnails(s, layerIds, maxSize, out_dir)}
 
-    def render_preview(self, sessionId, visibleLayerIds, maxSize=1500):
+    def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None):
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
-        return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir)}
+        return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
+                                          line_color=lineColor)}
 
     def render_document_preview(self, sessionId, maxSize=1500):
         s = self.store.get(sessionId)
@@ -110,7 +111,7 @@ class Engine:
                          overwrite=overwrite, progress=progress)
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
-                   embedPreview=True, overwrite=False, verify=True):
+                   embedPreview=True, overwrite=False, verify=True, lineColor=None):
         s = self.store.get(sessionId)
         included = sorted(includedIds)
         for lid in included:
@@ -129,7 +130,7 @@ class Engine:
                    "current": current, "total": total}, self.out)
 
         result = _export(s, entries, outputPath, embed_preview=embedPreview,
-                         overwrite=overwrite, progress=progress)
+                         overwrite=overwrite, progress=progress, line_color=lineColor)
         if verify:
             result["verification"] = verify_export(s, entries, outputPath)
         return result

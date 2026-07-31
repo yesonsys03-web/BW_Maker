@@ -31,7 +31,8 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
 
         result = export_psd(s, entries, out_path,
                             embed_preview=preset.get("embedPreview", True),
-                            overwrite=overwrite, progress=cb)
+                            overwrite=overwrite, progress=cb,
+                            line_color=preset.get("lineColor"))
         verification = verify_export(s, entries, out_path)
         return {
             "path": str(path), "ok": verification["ok"],

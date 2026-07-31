@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { DEFAULT_LINE_COLOR } from "../lib/presets";
 import type { Preset } from "../lib/types";
 
 export type PresetDialogMode = "edit" | "saveAs";
@@ -48,6 +49,10 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   const [naming, setNaming] = useState<Preset["naming"]>(preset.naming);
   const [outputSuffix, setOutputSuffix] = useState(preset.outputSuffix);
   const [embedPreview, setEmbedPreview] = useState(preset.embedPreview);
+  // 색 통일은 "켜짐 여부"와 "어떤 색"을 따로 들고 있어야, 껐다 켜도 고르던 색이
+  // 그대로 남는다. 저장 시점에만 lineColor(문자열 | null)로 합친다.
+  const [normalizeColor, setNormalizeColor] = useState(preset.lineColor !== null);
+  const [lineColor, setLineColor] = useState(preset.lineColor ?? DEFAULT_LINE_COLOR);
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [valueError, setValueError] = useState<string | null>(null);
@@ -96,6 +101,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       naming,
       outputSuffix,
       embedPreview,
+      lineColor: normalizeColor ? lineColor : null,
     };
   }
 
@@ -232,6 +238,29 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           />
           <span>미리보기 이미지 포함하여 내보내기</span>
         </label>
+
+        <label className="preset-checkbox">
+          <input
+            type="checkbox"
+            checked={normalizeColor}
+            onChange={(e) => setNormalizeColor(e.currentTarget.checked)}
+          />
+          <span>라인 색 통일</span>
+          <input
+            type="color"
+            className="preset-color"
+            value={lineColor}
+            disabled={!normalizeColor}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setLineColor(e.currentTarget.value)}
+            aria-label="통일할 라인 색"
+          />
+          <code className="preset-color-value">{normalizeColor ? lineColor.toUpperCase() : "원본 유지"}</code>
+        </label>
+        <p className="preset-hint">
+          내보낼 때 모든 라인 레이어의 색을 한 색으로 덮습니다. 알파는 그대로 두므로 선 가장자리의
+          안티에일리어싱은 보존됩니다. 꺼두면 원본 레이어 색을 그대로 씁니다.
+        </p>
 
         <div className="modal-actions">
           <button type="button" onClick={onCancel}>
