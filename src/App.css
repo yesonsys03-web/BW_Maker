@@ -1329,32 +1329,6 @@ input[type="text"] {
   color: var(--danger);
 }
 
-/* 병합에서 빼내기 위한 드롭 영역. 끌고 있는 동안에만 나타난다 — 평면 목록에는
-   삽입 지점이 없어 자유 드롭은 어디에 놓은 것인지 읽히지 않는다. */
-.unmerge-dropzone {
-  position: sticky;
-  bottom: 0;
-  z-index: 15;
-  margin: 0;
-  height: 56px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  font-size: 0.82em;
-  color: var(--text-dim);
-  background: var(--bg-1);
-  border: 1px dashed var(--border);
-  border-radius: 6px;
-}
-
-.unmerge-dropzone.active {
-  color: var(--text);
-  border-color: var(--accent);
-  border-style: solid;
-  background: rgba(79, 140, 255, 0.12);
-}
-
 /* 순서 변경 중 놓일 자리 표시. 포인터 드래그라 브라우저 기본 드롭 표시가 없다. */
 .export-entry-row.drop-target {
   outline: 1px solid var(--accent);

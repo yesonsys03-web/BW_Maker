@@ -118,6 +118,10 @@ export function ExportDialog({
    */
   function beginRowDrag(e: React.PointerEvent<HTMLDivElement>, index: number) {
     if (e.button !== 0) return;
+    // 행 안의 조작 요소(이름변경 입력 등)에서 시작한 포인터는 건드리지 않는다.
+    // 여기서 포인터를 캡처해버리면 그 요소가 자기 이벤트를 못 받아 죽는다 —
+    // 레이어 패널에서 체크박스가 안 눌리던 것이 정확히 이 원인이었다.
+    if ((e.target as HTMLElement).closest("input, button, textarea, select")) return;
     rowDragRef.current = { index, x: e.clientX, y: e.clientY, active: false };
     e.currentTarget.setPointerCapture(e.pointerId);
   }

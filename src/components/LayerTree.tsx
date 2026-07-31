@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type MouseEvent as ReactMouseEvent,
-  type PointerEvent as ReactPointerEvent,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   LAYER_FILTER_LABELS,
   LAYER_FILTER_MODES,
@@ -118,20 +111,6 @@ export function LayerTree({
   const [filterMode, setFilterMode] = useState<LayerFilterMode>("all");
   const [query, setQuery] = useState("");
   const [autoMerging, setAutoMerging] = useState(false);
-  // 병합에서 빼내려고 끌고 있는 소스 레이어. 드롭 영역은 이때만 나타난다 —
-  // 평면 목록에는 삽입 지점이 없어서, 목적지를 분명한 영역 하나로 못박는다.
-  const [draggingSourceId, setDraggingSourceId] = useState<number | null>(null);
-  const [dropActive, setDropActive] = useState(false);
-  // 드롭 판정은 스크롤 컨테이너의 좌표로 한다. 드롭 영역 엘리먼트로 히트
-  // 테스트하면 "드래그 중에만 그려지는" 것에 판정이 묶여, 리액트가 그리기 전에
-  // 끝난 빠른 드래그가 그냥 무시된다.
-  const treeRef = useRef<HTMLDivElement | null>(null);
-  // HTML5 드래그가 아니라 포인터 이벤트로 구현한다. Tauri의 dragDropEnabled가
-  // 켜져 있어야 파인더에서 PSD를 끌어다 놓을 수 있는데(FilePanel), 그게 켜져
-  // 있으면 OS가 드래그를 가로채 웹뷰 안의 drop 이벤트가 오지 않는다.
-  const sourceDragRef = useRef<{ id: number; x: number; y: number; active: boolean } | null>(null);
-  // 끌고 난 뒤 이어서 발생하는 click이 선택을 바꾸지 않도록.
-  const suppressClickRef = useRef(false);
   // 펼쳐둔 병합 행(entryId). 병합하고 나면 원본이 화면에서 사라져 무엇이
   // 들어갔는지 확인할 수 없으므로, 접힌 채로 두되 열어볼 수 있게 한다.
   const [expandedMerges, setExpandedMerges] = useState<Set<number>>(new Set());
@@ -259,54 +238,7 @@ export function LayerTree({
     });
   }
 
-  const DRAG_THRESHOLD_PX = 5;
-  const DROP_ZONE_HEIGHT_PX = 56;
-
-  /** 레이어 목록 맨 아래 띠 안에 포인터가 있는지. 보이는 영역과 같은 높이다. */
-  function isOverDropZone(x: number, y: number): boolean {
-    const el = treeRef.current;
-    if (!el) return false;
-    const r = el.getBoundingClientRect();
-    return x >= r.left && x <= r.right && y <= r.bottom && y >= r.bottom - DROP_ZONE_HEIGHT_PX;
-  }
-
-  function beginSourceDrag(e: ReactPointerEvent<HTMLDivElement>, id: number) {
-    if (e.button !== 0) return;
-    sourceDragRef.current = { id, x: e.clientX, y: e.clientY, active: false };
-    e.currentTarget.setPointerCapture(e.pointerId);
-  }
-
-  function updateSourceDrag(e: ReactPointerEvent<HTMLDivElement>) {
-    const drag = sourceDragRef.current;
-    if (!drag) return;
-    if (!drag.active) {
-      // 클릭과 구분한다 — 문턱을 넘기 전에는 아무 일도 일어나지 않는다.
-      if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < DRAG_THRESHOLD_PX) return;
-      drag.active = true;
-      setDraggingSourceId(drag.id);
-    }
-    setDropActive(isOverDropZone(e.clientX, e.clientY));
-  }
-
-  function endSourceDrag(e: ReactPointerEvent<HTMLDivElement>) {
-    const drag = sourceDragRef.current;
-    sourceDragRef.current = null;
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    }
-    if (!drag?.active) return;
-    const dropped = isOverDropZone(e.clientX, e.clientY);
-    suppressClickRef.current = true;
-    setDraggingSourceId(null);
-    setDropActive(false);
-    if (dropped) handleUnmerge([drag.id]);
-  }
-
   function handleRowClick(id: number, e: ReactMouseEvent) {
-    if (suppressClickRef.current) {
-      suppressClickRef.current = false;
-      return;
-    }
     if (e.shiftKey && lastClickedId !== null) {
       const from = visibleOrder.indexOf(lastClickedId);
       const to = visibleOrder.indexOf(id);
@@ -493,11 +425,6 @@ export function LayerTree({
         style={{ paddingLeft: `${opts.indentPx}px` }}
         role={flat ? "listitem" : "treeitem"}
         aria-selected={selected}
-        // 병합된 소스만 끌 수 있다 — 끌어낼 병합이 있어야 의미가 있다.
-        onPointerDown={opts.nested ? (e) => beginSourceDrag(e, node.id) : undefined}
-        onPointerMove={opts.nested ? updateSourceDrag : undefined}
-        onPointerUp={opts.nested ? endSourceDrag : undefined}
-        onPointerCancel={opts.nested ? endSourceDrag : undefined}
         onClick={(e) => handleRowClick(node.id, e)}
         onContextMenu={(e) => handleContextMenu(node.id, e)}
       >
@@ -636,7 +563,7 @@ export function LayerTree({
   }
 
   return (
-    <div className="layer-tree" ref={treeRef}>
+    <div className="layer-tree">
       <div className="layer-filter-bar">
         <div className="layer-filter-row">
           <input
@@ -698,13 +625,6 @@ export function LayerTree({
 
       {filtering ? (
         <div className="tree-body tree-body-flat" role="list">
-          {draggingSourceId !== null && (
-            <div
-              className={`unmerge-dropzone${dropActive ? " active" : ""}`}
-            >
-              여기에 놓으면 병합에서 빠집니다
-            </div>
-          )}
           {flatRows.length === 0 ? (
             <p className="layer-filter-empty">조건에 맞는 레이어가 없습니다.</p>
           ) : (
