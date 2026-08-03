@@ -29,6 +29,7 @@ interface PreviewCanvasProps {
   tree: TreeNode[] | undefined;
   includedIds: number[];
   previewHiddenIds: number[];
+  soloIds: number[];
   /**
    * 선택된 프리셋의 라인 색 통일 설정. 내보내기 미리보기는 실제 산출물과 같아야
    * 하므로 여기에도 반영한다. 원본 보기(문서 미리보기)에는 적용하지 않는다 —
@@ -85,6 +86,7 @@ export function PreviewCanvas({
   tree,
   includedIds,
   previewHiddenIds,
+  soloIds,
   lineColor,
   paused,
   cache,
@@ -119,8 +121,8 @@ export function PreviewCanvas({
   }, [sessionId]);
 
   const visibleIds = useMemo(
-    () => (tree ? visibleIdsForPreview(tree, includedIds, previewHiddenIds) : []),
-    [tree, includedIds, previewHiddenIds]
+    () => (tree ? visibleIdsForPreview(tree, includedIds, previewHiddenIds, soloIds) : []),
+    [tree, includedIds, previewHiddenIds, soloIds]
   );
 
   const documentView = useMemo(() => isDocumentView(tree, visibleIds), [tree, visibleIds]);

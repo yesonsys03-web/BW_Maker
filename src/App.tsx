@@ -240,6 +240,7 @@ function AppShell() {
       file.tree,
       ops.includedIds,
       ops.previewHiddenIds,
+      ops.soloIds,
       presetRef.current?.lineColor ?? null
     );
   }, []);
@@ -499,6 +500,7 @@ function AppShell() {
           tree={activeFile?.tree}
           includedIds={ops.includedIds}
           previewHiddenIds={ops.previewHiddenIds}
+          soloIds={ops.soloIds}
           lineColor={selectedPreset?.lineColor ?? null}
           paused={loading}
           cache={previewCacheRef.current}

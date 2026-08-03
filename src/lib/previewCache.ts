@@ -19,9 +19,10 @@ export function previewRenderSpec(
   tree: TreeNode[],
   includedIds: number[],
   previewHiddenIds: number[],
+  soloIds: number[],
   lineColor: string | null
 ): { visibleIds: number[]; documentView: boolean; key: string | null } {
-  const visibleIds = visibleIdsForPreview(tree, includedIds, previewHiddenIds);
+  const visibleIds = visibleIdsForPreview(tree, includedIds, previewHiddenIds, soloIds);
   const documentView = isDocumentView(tree, visibleIds);
   return {
     visibleIds,

@@ -25,7 +25,7 @@ const pixel = (id: number, visible = true): TreeNode => ({
 test("the spec's key is the key for the visible set it computed", () => {
   const tree = [pixel(1), pixel(2), pixel(3)];
 
-  const spec = previewRenderSpec(F7, tree, [1, 3], [3], "#000000");
+  const spec = previewRenderSpec(F7, tree, [1, 3], [3], [], "#000000");
 
   expect(spec.visibleIds).toEqual([1]);
   expect(spec.key).toBe(previewCacheKey(F7, spec.documentView, [1], "#000000"));
@@ -33,18 +33,18 @@ test("the spec's key is the key for the visible set it computed", () => {
 
 test("a partial line selection is a composite, not the stored document image", () => {
   const tree = [pixel(1), pixel(2)];
-  expect(previewRenderSpec(F1, tree, [1], [], null).documentView).toBe(false);
+  expect(previewRenderSpec(F1, tree, [1], [], [], null).documentView).toBe(false);
 });
 
 test("every originally-visible layer showing means the stored document image", () => {
   const tree = [pixel(1), pixel(2)];
-  expect(previewRenderSpec(F1, tree, [1, 2], [], null).documentView).toBe(true);
+  expect(previewRenderSpec(F1, tree, [1, 2], [], [], null).documentView).toBe(true);
 });
 
 test("the same file state always plans the same key", () => {
   const tree = [pixel(1), pixel(2)];
-  const a = previewRenderSpec(F4, tree, [1, 2], [2], null);
-  const b = previewRenderSpec(F4, [pixel(1), pixel(2)], [1, 2], [2], null);
+  const a = previewRenderSpec(F4, tree, [1, 2], [2], [], null);
+  const b = previewRenderSpec(F4, [pixel(1), pixel(2)], [1, 2], [2], [], null);
   expect(a.key).toBe(b.key);
 });
 
@@ -70,7 +70,7 @@ test("a file saved since the render gets a different key", () => {
 
 test("without a known mtime there is no key, so nothing is reused unverified", () => {
   expect(previewCacheKey({ path: "/a.psd" }, false, [1], null)).toBeNull();
-  expect(previewRenderSpec({ path: "/a.psd" }, [pixel(1)], [1], [], null).key).toBeNull();
+  expect(previewRenderSpec({ path: "/a.psd" }, [pixel(1)], [1], [], [], null).key).toBeNull();
 });
 
 test("every other input that changes the rendered image changes the key", () => {
