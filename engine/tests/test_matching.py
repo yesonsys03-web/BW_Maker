@@ -124,6 +124,27 @@ def test_a_tree_from_before_hasPixels_still_matches_pixel_layers_only():
     assert [s["reason"] for s in skipped] == ["noPixels"]
 
 
+# --- 규칙 ④: 합성 모드 (설계 문서 3절) ---
+
+def test_a_line_named_layer_on_overlay_is_not_line_art():
+    """
+    'LINE WIN'은 창문에 흰 빛을 얹는 overlay 패스다 — 렌더해서 확인했다
+    (순백색 단색). 같은 그룹의 'LINE BLD'가 진짜 라인이다.
+    """
+    tree = [
+        _node(0, "LINE WIN", "pixel", True, blendMode="overlay"),
+        _node(1, "LINE BLD", "pixel", True, blendMode="normal"),
+    ]
+    matched, skipped = match_preset(tree, _preset())
+    assert matched == [1]
+    assert [(s["id"], s["reason"]) for s in skipped] == [(0, "blendMode")]
+
+
+def test_a_tree_built_before_blend_mode_existed_is_treated_as_normal():
+    tree = [_node(0, "LINE", "pixel", True)]  # blendMode 필드 없음
+    assert match_preset(tree, _preset()) == ([0], [])
+
+
 def test_unknown_include_type_raises_valueerror():
     # 알 수 없는 include type → ValueError
     tree = [

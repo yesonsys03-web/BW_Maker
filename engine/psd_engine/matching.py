@@ -53,6 +53,10 @@ SKIP_GROUP_HAS_OWN_LINE = "groupHasOwnLine"
 #: 이름에 제외 토큰이 들어있다.
 SKIP_EXCLUDED_TOKEN = "excludedToken"
 
+#: 합성 모드가 normal이 아니다. 라인 아트는 normal로 그린다 — 실파일 25개의
+#: 진짜 라인 645장이 전부 normal이었고, normal이 아닌 11장은 전부 오탐이었다.
+SKIP_BLEND_MODE = "blendMode"
+
 #: 이름에 line이 있어도 라인 아트가 아닌 것을 걸러내는 토큰. 실제 파일에서
 #: `line col`, `LINE_COL`, `Line Colour`, `Wall_Line_Col`이 18장 나왔다.
 #: 프리셋이 덮어쓸 수 있다 — 네 규칙 중 이것만 어휘에 의존하기 때문이다.
@@ -139,6 +143,10 @@ def match_preset(tree, preset):
                 reason = SKIP_NO_PIXELS
             elif has_any_token(node["name"], exclude_tokens):
                 reason = SKIP_EXCLUDED_TOKEN
+            # blendMode가 없는 트리는 이 필드가 생기기 전의 것이다. 그때는 모두
+            # 통과했으므로 normal로 본다.
+            elif node.get("blendMode", "normal") != "normal":
+                reason = SKIP_BLEND_MODE
             if reason:
                 _skip(node, reason)
                 continue
