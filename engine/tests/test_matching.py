@@ -351,3 +351,34 @@ def test_preset_by_element_honours_the_merge_rule():
     ops = preset_operations(PLANE_TREE, PLANE_MATCHED,
                             _preset(merge="byElement", mergeRule="plane"))
     assert [op["name"] for op in ops if op["op"] == "merge"] == ["BG", "MG", "FG"]
+
+
+# --- 규칙 ①: 이름을 토큰으로 본다 (설계 문서 3절) ---
+
+def test_linear_dodge_is_not_a_line_and_says_why_it_was_dropped():
+    tree = [_node(0, "Layer 866 (LINEAR DODGE)", "pixel", True)]
+    matched, skipped = match_preset(tree, _preset())
+    assert matched == []
+    assert skipped == [{
+        "id": 0, "path": "Layer 866 (LINEAR DODGE)",
+        "kind": "pixel", "reason": "notLineWord",
+    }]
+
+
+def test_underscore_and_camel_case_names_are_still_lines():
+    # 정규식 \blines?\b 였다면 이것들이 전부 날아간다 — \b는 _에서 끊기지 않는다.
+    tree = [
+        _node(0, "Wall_Line", "pixel", True),
+        _node(1, "CurtainsLine", "pixel", True),
+        _node(2, "Ring_Line", "pixel", True),
+        _node(3, "line2", "pixel", True),
+    ]
+    assert match_preset(tree, _preset()) == ([0, 1, 2, 3], [])
+
+
+def test_a_value_with_no_tokens_falls_back_to_substring():
+    # "-"는 토큰을 만들지 못한다. 그럴 때까지 규칙을 못 쓰게 만들 이유는 없다.
+    tree = [_node(0, "-guides", "pixel", True)]
+    p = _preset(include={"type": "contains", "value": "-", "caseSensitive": False},
+                excludeGroupPrefixes=[])
+    assert match_preset(tree, p) == ([0], [])

@@ -1,17 +1,38 @@
 """프리셋 규칙 → 매치 레이어 id 목록 / operation list 변환."""
 import re
 
+from .names import token_match, tokenize
+
 
 def _name_matches(name, include):
     kind = include["type"]
     if kind == "contains":
-        if include.get("caseSensitive"):
-            return include["value"] in name
-        return include["value"].lower() in name.lower()
+        value = include["value"]
+        case_sensitive = bool(include.get("caseSensitive"))
+        # 부분 문자열이 아니라 토큰으로 본다 — "LINEAR DODGE"의 앞 네 글자가
+        # 걸리면 안 된다(psd_engine/names.py). 검색값이 토큰을 만들지 못하면
+        # (예: "-") 예전 규칙으로 되돌아간다.
+        if tokenize(value):
+            return token_match(name, value, case_sensitive)
+        return _legacy_contains(name, include)
     if kind == "regex":
         flags = 0 if include.get("caseSensitive") else re.IGNORECASE
         return re.search(include["value"], name, flags) is not None
     raise ValueError(f"unknown include type: {kind!r}")
+
+
+def _legacy_contains(name, include):
+    """
+    토큰 매칭 이전의 부분 문자열 규칙.
+
+    두 곳에서 쓴다. 검색값이 토큰을 못 만들 때의 대체 동작, 그리고 "예전에는
+    걸렸는데 이제는 안 걸린다"를 사람에게 알려주는 보고다.
+    """
+    if include["type"] != "contains":
+        return False
+    if include.get("caseSensitive"):
+        return include["value"] in name
+    return include["value"].lower() in name.lower()
 
 
 #: 픽셀을 들고 있어도 결과물에 넣지 않는 종류. 라인 PSD 안의 텍스트는 사실상
@@ -23,6 +44,8 @@ NON_ART_KINDS = frozenset({"type"})
 #: 매칭에서 빠진 이유.
 SKIP_TEXT = "text"
 SKIP_NO_PIXELS = "noPixels"
+#: 이름에 검색어가 부분 문자열로는 들어있지만 토큰으로는 아니다("LINEAR DODGE").
+SKIP_NOT_LINE_WORD = "notLineWord"
 
 
 def match_preset(tree, preset):
@@ -41,6 +64,14 @@ def match_preset(tree, preset):
     skipped = []
     prefixes = tuple(preset.get("excludeGroupPrefixes", []))
 
+    def _skip(node, reason):
+        skipped.append({
+            "id": node["id"],
+            "path": "/".join(node["path"]),
+            "kind": node["kind"],
+            "reason": reason,
+        })
+
     def walk(nodes, inside_matched_group):
         for node in nodes:
             if node["kind"] == "group":
@@ -51,7 +82,12 @@ def match_preset(tree, preset):
                 )
                 walk(node["children"], inside_matched_group or hit)
                 continue
-            if not (_name_matches(node["name"], preset["include"]) or inside_matched_group):
+            self_hit = _name_matches(node["name"], preset["include"])
+            if not (self_hit or inside_matched_group):
+                # 예전 규칙으로는 걸렸을 이름이라면 왜 빠졌는지 남긴다. 이름이
+                # LINE인데 결과에 없으면 사람이 이유를 알 방법이 없다.
+                if _legacy_contains(node["name"], preset["include"]):
+                    _skip(node, SKIP_NOT_LINE_WORD)
                 continue
             if not node["visible"] and not preset.get("includeHidden", True):
                 continue
@@ -63,12 +99,7 @@ def match_preset(tree, preset):
             elif not node.get("hasPixels", node["kind"] == "pixel"):
                 reason = SKIP_NO_PIXELS
             if reason:
-                skipped.append({
-                    "id": node["id"],
-                    "path": "/".join(node["path"]),
-                    "kind": node["kind"],
-                    "reason": reason,
-                })
+                _skip(node, reason)
                 continue
             matched.append(node["id"])
 
