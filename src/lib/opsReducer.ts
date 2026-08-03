@@ -292,7 +292,7 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
   switch (action.type) {
     case "reset": {
       const includedIds = action.includedIds;
-      return { includedIds, previewHiddenIds: [], ops: [], entries: buildEntries(includedIds, []) };
+      return { includedIds, previewHiddenIds: [], soloIds: [], ops: [], entries: buildEntries(includedIds, []) };
     }
     case "setIncluded": {
       const includedIds = action.includedIds;

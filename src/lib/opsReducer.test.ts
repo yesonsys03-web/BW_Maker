@@ -216,12 +216,14 @@ const PLANE_OPS: Operation[] = [
 const fresh = (includedIds: number[]): OpsState => ({
   includedIds,
   previewHiddenIds: [],
+  soloIds: [],
   ops: [],
   entries: buildEntries(includedIds, []),
 });
 const withOps = (includedIds: number[], ops: Operation[]): OpsState => ({
   includedIds,
   previewHiddenIds: [],
+  soloIds: [],
   ops,
   entries: buildEntries(includedIds, ops),
 });
@@ -396,4 +398,10 @@ test("solo never disturbs the eye toggles or the export state", () => {
   expect(off.includedIds).toEqual([1, 2, 3]);
   expect(off.ops).toEqual([]);
   expect(off.entries).toEqual([]);
+});
+
+test("setSolo removes only the ids it names, leaving other solos alone", () => {
+  const all = opsReducer(soloBase, { type: "setSolo", layerIds: [1, 2, 3], solo: true });
+  const some = opsReducer(all, { type: "setSolo", layerIds: [1, 2], solo: false });
+  expect(some.soloIds).toEqual([3]);
 });
