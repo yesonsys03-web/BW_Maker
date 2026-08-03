@@ -20,6 +20,10 @@ src-tauri/target/
 src-tauri/binaries/
 target/engine-*
 
+# 에이전트 도구(oh-my-claudecode)가 만드는 상태·로그. 저장소 루트뿐 아니라
+# 명령을 실행한 하위 폴더에도 생기므로 이름으로 잡는다.
+.omc/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
