@@ -53,7 +53,7 @@ def token_match(name, value, case_sensitive=False):
 
 
 def has_any_token(name, wanted, case_sensitive=False):
-    """이름의 토큰 중 하나라도 wanted에 있는가."""
+    """이름의 토큰 중 하나라도 wanted에 있는가. 복수형 허용은 _token_eq에서 물려받는다."""
     have = tokenize(name)
     return any(
         _token_eq(token, w, case_sensitive)

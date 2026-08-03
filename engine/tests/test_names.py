@@ -1,3 +1,8 @@
+"""src/lib/layerNames.test.ts가 이 파일과 글자 그대로 짝을 이루는 거울이다.
+
+두 언어의 정규식 엔진이 갈라지는 지점을 잡아내는 것이 이 테스트 쌍의 유일한
+역할이다 — 표본을 한쪽에 추가하면 반드시 다른 쪽에도 추가한다.
+"""
 from psd_engine.names import has_any_token, token_match, tokenize
 
 
@@ -42,7 +47,8 @@ def test_a_multi_token_value_must_appear_consecutively():
 
 def test_has_any_token_finds_the_colour_vocabulary():
     colour = ["col", "colour", "color"]
-    for name in ["line col", "LINE_COL", "Line Colour", "line colour", "Wall_Line_Col"]:
+    for name in ["line col", "LINE_COL", "Line Colour", "line colour", "Wall_Line_Col",
+                 "Wall_Cols"]:  # 복수형 허용이 has_any_token에도 걸리는지 확인한다
         assert has_any_token(name, colour), name
     for name in ["COUCH LINE", "line", "Bookcase_Line"]:
         assert not has_any_token(name, colour), name
