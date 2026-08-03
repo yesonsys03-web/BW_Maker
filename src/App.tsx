@@ -61,6 +61,8 @@ function AppShell() {
     removeFile,
     togglePreview,
     setPreviewHidden,
+    toggleSolo,
+    setSolo,
     pushOp,
     setIncluded,
     applyPresetResult,
@@ -539,6 +541,8 @@ function AppShell() {
           onSetIncluded={setIncluded}
           onTogglePreview={togglePreview}
           onSetPreviewHidden={setPreviewHidden}
+          onToggleSolo={toggleSolo}
+          onSetSolo={setSolo}
           onPushOp={pushOp}
           onError={pushError}
         />

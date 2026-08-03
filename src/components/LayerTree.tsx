@@ -41,6 +41,8 @@ interface LayerTreeProps {
   onSetIncluded: (includedIds: number[]) => void;
   onTogglePreview: (layerId: number) => void;
   onSetPreviewHidden: (layerIds: number[], hidden: boolean) => void;
+  onToggleSolo: (layerId: number) => void;
+  onSetSolo: (layerIds: number[], solo: boolean) => void;
   onPushOp: (op: Operation) => void;
   onError: (title: string, error: EngineError) => void;
 }
@@ -114,6 +116,8 @@ export function LayerTree({
   onSetIncluded,
   onTogglePreview,
   onSetPreviewHidden,
+  onToggleSolo,
+  onSetSolo,
   onPushOp,
   onError,
 }: LayerTreeProps) {
@@ -141,6 +145,7 @@ export function LayerTree({
 
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
   const previewHiddenSet = useMemo(() => new Set(ops.previewHiddenIds), [ops.previewHiddenIds]);
+  const soloSet = useMemo(() => new Set(ops.soloIds), [ops.soloIds]);
   const matchedSet = useMemo(() => new Set(matchedIds), [matchedIds]);
 
   const allLeaves = useMemo(() => (tree ? flattenLeaves(tree) : []), [tree]);
@@ -312,6 +317,13 @@ export function LayerTree({
     onSetPreviewHidden(leafIds, anyVisible);
   }
 
+  // 하위가 전부 solo면 누를 때 전부 풀고, 아니면 전부 건다. 그룹 눈과 같은 규약이다.
+  function handleGroupSolo(node: TreeNode) {
+    const leafIds = collectLeafIds(node);
+    const allSoloed = leafIds.length > 0 && leafIds.every((id) => soloSet.has(id));
+    onSetSolo(leafIds, !allSoloed);
+  }
+
   function handleContextMenu(id: number, e: ReactMouseEvent) {
     e.preventDefault();
     const ids = selectedIds.has(id) && selectedIds.size > 0 ? Array.from(selectedIds) : [id];
@@ -438,6 +450,7 @@ export function LayerTree({
       const collapsed = collapsedIds.has(node.id);
       const leafIds = collectLeafIds(node);
       const allHidden = leafIds.length > 0 && leafIds.every((id) => previewHiddenSet.has(id));
+      const allSoloed = leafIds.length > 0 && leafIds.every((id) => soloSet.has(id));
       return (
         <div key={node.id}>
           <div
@@ -450,6 +463,15 @@ export function LayerTree({
               {collapsed ? "▶" : "▼"}
             </button>
             <span className="checkbox-slot" />
+            <button
+              type="button"
+              className={`solo-toggle${allSoloed ? " solo-on" : ""}`}
+              onClick={() => handleGroupSolo(node)}
+              aria-label="그룹 solo 토글"
+              title="이 그룹만 보기"
+            >
+              ◉
+            </button>
             <button
               type="button"
               className={`eye-toggle${allHidden ? " eye-hidden" : ""}`}
@@ -480,6 +502,7 @@ export function LayerTree({
     const isMatched = matchedSet.has(node.id);
     const included = includedSet.has(node.id);
     const hidden = previewHiddenSet.has(node.id);
+    const soloed = soloSet.has(node.id);
     const selected = selectedIds.has(node.id);
     const disabledCheckbox = node.kind !== "pixel";
     const flat = opts.breadcrumb !== undefined;
@@ -505,6 +528,19 @@ export function LayerTree({
           onClick={(e) => e.stopPropagation()}
           onChange={() => handleLeafCheckbox(node)}
         />
+        <button
+          type="button"
+          className={`solo-toggle${soloed ? " solo-on" : ""}`}
+          disabled={disabledCheckbox}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSolo(node.id);
+          }}
+          aria-label="solo 토글"
+          title={disabledCheckbox ? "pixel 레이어만 미리보기에 그릴 수 있습니다" : "이 레이어만 보기"}
+        >
+          ◉
+        </button>
         <button
           type="button"
           className={`eye-toggle${hidden ? " eye-hidden" : ""}`}
@@ -560,6 +596,7 @@ export function LayerTree({
     const allIncluded = sourceIds.length > 0 && sourceIds.every((id) => includedSet.has(id));
     const someIncluded = sourceIds.some((id) => includedSet.has(id));
     const hidden = sourceIds.length > 0 && sourceIds.every((id) => previewHiddenSet.has(id));
+    const allSoloed = sourceIds.length > 0 && sourceIds.every((id) => soloSet.has(id));
     const expanded = expandedMerges.has(row.entryId);
     const sourceNames = row.leaves.map((l) => l.node.name).join(" + ");
     const fullPaths = row.leaves.map((l) => (l.breadcrumb ? `${l.breadcrumb} / ${l.node.name}` : l.node.name));
@@ -603,6 +640,18 @@ export function LayerTree({
           onClick={(e) => e.stopPropagation()}
           onChange={() => onSetIncluded(applyBulkInclude(ops.includedIds, sourceIds, !allIncluded))}
         />
+        <button
+          type="button"
+          className={`solo-toggle${allSoloed ? " solo-on" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSetSolo(sourceIds, !allSoloed);
+          }}
+          aria-label="solo 토글"
+          title="이 병합의 소스만 보기"
+        >
+          ◉
+        </button>
         <button
           type="button"
           className={`eye-toggle${hidden ? " eye-hidden" : ""}`}
@@ -663,6 +712,16 @@ export function LayerTree({
           <span className="layer-filter-count">
             {filtering ? `${filteredLeaves.length} / ${allLeaves.length}` : `${allLeaves.length}개`}
           </span>
+          {ops.soloIds.length > 0 && (
+            <button
+              type="button"
+              className="solo-clear"
+              onClick={() => onSetSolo(ops.soloIds, false)}
+              title="solo를 모두 풀고 원래 화면으로 돌아갑니다"
+            >
+              solo 해제 ({ops.soloIds.length})
+            </button>
+          )}
         </div>
         {filtering && (
           <div className="layer-filter-row layer-filter-bulk">

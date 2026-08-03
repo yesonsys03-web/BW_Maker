@@ -691,6 +691,32 @@ input[type="text"] {
   line-height: 1;
 }
 
+.solo-toggle {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  padding: 0 0.2em;
+  color: var(--text-dim);
+  line-height: 1;
+  opacity: 0.45;
+}
+
+/* solo가 걸린 행은 한눈에 띄어야 한다 — 지금 화면이 왜 이 레이어만 보이는지의
+   유일한 단서다. */
+.solo-toggle.solo-on {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.solo-toggle:disabled {
+  opacity: 0.15;
+  cursor: default;
+}
+
+.solo-clear {
+  margin-left: auto;
+}
+
 .eye-toggle.eye-hidden {
   color: var(--text-dim);
   opacity: 0.5;
