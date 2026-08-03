@@ -144,12 +144,18 @@ leaf **자기 이름**의 토큰에 제외 토큰이 있으면 뺀다. 기본값
 이 표는 `-` 접두사 그룹을 빼지 않은 후보 740건 기준이다(2절의 정정 참조). 기본 프리셋을
 그대로 적용한 엔진의 실측은 **587건**이고, 규칙별 제거는 55 / 18 / 5 / 5 + `noPixels` 4다.
 
-남는 오탐 3건은 이름으로는 단서가 없다 — 그 그룹에 자기 이름 매치가 아예 없어서 규칙 ②가
-개입할 수 없다.
+**오탐으로 적었던 3건은 오탐이 아니었다** — 앱에서 확인하면서 셋 다 진짜 라인으로 밝혀졌다.
+앞의 둘은 작업자가 직접 확인해 주었고, `glow`는 렌더해서 봤다(병·잔 외곽선, 붉게 물든 라인
+패스, blend normal).
 
-- `TABLE / FLAT DESIGN / lines / CLUB PAW PRINT`
-- `TABLE / FLAT DESIGN / lines / CRAPS DESING`
-- `Artwork / Front View / Bar / AppleShelfBar / bottles / line / glow`
+- `TABLE / FLAT DESIGN / lines / CLUB PAW PRINT` — 라인
+- `TABLE / FLAT DESIGN / lines / CRAPS DESING` — 라인
+- `Artwork / Front View / Bar / AppleShelfBar / bottles / line / glow` — 라인
+
+셋 다 자기 이름에는 line이 없고 그룹 이름에만 있다. 즉 규칙 ②의 **대체 분기**(그룹 안에 자기
+이름으로 걸리는 leaf가 하나도 없으면 하위 전체를 끌어온다)가 정확히 제 일을 한 사례다 —
+`matchGroups`가 존재하는 이유 그 자체이며, 이 셋을 "이름으로는 단서가 없다"고 문제 삼았던
+것이 오히려 잘못된 판단이었다.
 
 ## 5. 빠진 이유의 보고
 
