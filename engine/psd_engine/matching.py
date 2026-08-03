@@ -64,9 +64,53 @@ SKIP_BLEND_MODE = "blendMode"
 DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"]
 
 
-def _has_own_match(nodes, include, prefixes):
+def _leaf_skip_reason(node, exclude_tokens):
     """
-    하위 트리에 자기 이름으로 걸리는 leaf가 있는가.
+    후보로 잡힌 leaf를 그래도 빼야 하는 이유. 뺄 이유가 없으면 None.
+
+    빠지는 게이트가 여기 한 곳에만 있어야 한다 — 규칙 ②가 "이 leaf는 알아서
+    걸린다"고 판단하는 근거와 실제로 걸러내는 자리가 갈라지면, 판단은 살아남는다고
+    보는데 실제로는 빠지는 leaf가 생긴다(_exports_itself).
+    """
+    if node["kind"] in NON_ART_KINDS:
+        return SKIP_TEXT
+    # hasPixels가 없는 트리는 이 필드가 생기기 전의 것이다. 그때의 유일한
+    # 통과 조건이 kind == "pixel"이었으므로 그대로 유지한다.
+    if not node.get("hasPixels", node["kind"] == "pixel"):
+        return SKIP_NO_PIXELS
+    if has_any_token(node["name"], exclude_tokens):
+        return SKIP_EXCLUDED_TOKEN
+    # blendMode가 없는 트리는 이 필드가 생기기 전의 것이다. 그때는 모두
+    # 통과했으므로 normal로 본다.
+    if node.get("blendMode", "normal") != "normal":
+        return SKIP_BLEND_MODE
+    return None
+
+
+def _hidden(node, preset):
+    """
+    숨겨서 뺄 레이어인가. 위의 사유들과 달리 이것은 skip 기록을 남기지 않는다 —
+    사용자가 프리셋에서 직접 끈 것이라 알려줄 이유가 없다. 그래서 따로 둔다.
+    """
+    return not node["visible"] and not preset.get("includeHidden", True)
+
+
+def _exports_itself(node, preset, exclude_tokens):
+    """
+    이 leaf가 그룹 이름의 도움 없이 혼자서 결과물에 들어가는가.
+
+    이름이 걸리는지만 봐서는 안 된다. 뒤의 게이트에서 빠질 leaf를 근거로 그룹의
+    일괄 포함을 끄면, 단서 없는 형제들까지 함께 사라져 그 그룹에서 아무것도
+    안 나온다. walk의 leaf 판정과 같은 게이트를 같은 순서로 묻는다.
+    """
+    return (_name_matches(node["name"], preset["include"])
+            and not _hidden(node, preset)
+            and _leaf_skip_reason(node, exclude_tokens) is None)
+
+
+def _has_own_match(nodes, preset, prefixes, exclude_tokens):
+    """
+    하위 트리에 혼자 힘으로 결과물에 들어가는 leaf가 있는가.
 
     이것이 있으면 그룹의 일괄 포함은 더할 것이 없다 — 그 leaf들이 알아서
     걸린다. 없을 때만 그룹 이름이 유일한 단서다.
@@ -75,9 +119,9 @@ def _has_own_match(nodes, include, prefixes):
         if node["kind"] == "group":
             if prefixes and node["name"].startswith(prefixes):
                 continue
-            if _has_own_match(node["children"], include, prefixes):
+            if _has_own_match(node["children"], preset, prefixes, exclude_tokens):
                 return True
-        elif _name_matches(node["name"], include):
+        elif _exports_itself(node, preset, exclude_tokens):
             return True
     return False
 
@@ -117,7 +161,7 @@ def match_preset(tree, preset):
                 )
                 # 걸린 그룹이라도 안에 진짜 라인이 있으면 일괄 포함을 끈다.
                 blanket = hit and not _has_own_match(
-                    node["children"], preset["include"], prefixes
+                    node["children"], preset, prefixes, exclude_tokens
                 )
                 walk(node["children"],
                      inside_matched_group or blanket,
@@ -132,21 +176,9 @@ def match_preset(tree, preset):
                 elif _legacy_contains(node["name"], preset["include"]):
                     _skip(node, SKIP_NOT_LINE_WORD)
                 continue
-            if not node["visible"] and not preset.get("includeHidden", True):
+            if _hidden(node, preset):
                 continue
-            reason = None
-            if node["kind"] in NON_ART_KINDS:
-                reason = SKIP_TEXT
-            # hasPixels가 없는 트리는 이 필드가 생기기 전의 것이다. 그때의 유일한
-            # 통과 조건이 kind == "pixel"이었으므로 그대로 유지한다.
-            elif not node.get("hasPixels", node["kind"] == "pixel"):
-                reason = SKIP_NO_PIXELS
-            elif has_any_token(node["name"], exclude_tokens):
-                reason = SKIP_EXCLUDED_TOKEN
-            # blendMode가 없는 트리는 이 필드가 생기기 전의 것이다. 그때는 모두
-            # 통과했으므로 normal로 본다.
-            elif node.get("blendMode", "normal") != "normal":
-                reason = SKIP_BLEND_MODE
+            reason = _leaf_skip_reason(node, exclude_tokens)
             if reason:
                 _skip(node, reason)
                 continue

@@ -448,6 +448,64 @@ def test_match_groups_off_ignores_the_group_name_entirely():
     assert match_preset(tree, _preset(matchGroups=False)) == ([2], [])
 
 
+# 규칙 ②가 일괄 포함을 끄는 근거는 "그 leaf들이 알아서 걸린다"이다. 그러니 뒤의
+# 게이트에서 빠질 leaf는 근거가 될 수 없다 — 그것 하나 때문에 일괄 포함이 꺼지면
+# 단서 없는 형제들까지 같이 사라져 그룹에서 아무것도 안 나온다. 게이트마다 하나씩.
+
+def _clueless_group_plus(offender):
+    """단서 없는 자식 `1`, `2` 곁에 문제의 leaf 하나를 둔 `CHAIR1_LINE` 그룹."""
+    return [_group(0, "CHAIR1_LINE", [], [
+        _node(1, "1", "pixel", True, path=["CHAIR1_LINE", "1"]),
+        _node(2, "2", "pixel", True, path=["CHAIR1_LINE", "2"]),
+        offender,
+    ])]
+
+
+def test_a_colour_layer_does_not_switch_off_the_group_blanket():
+    tree = _clueless_group_plus(
+        _node(3, "line col", "pixel", True, path=["CHAIR1_LINE", "line col"]))
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == [1, 2]
+    assert [(s["id"], s["reason"]) for s in skipped] == [(3, "excludedToken")]
+
+
+def test_an_overlay_pass_does_not_switch_off_the_group_blanket():
+    tree = _clueless_group_plus(
+        _node(3, "LINE WIN", "pixel", True, blendMode="overlay",
+              path=["CHAIR1_LINE", "LINE WIN"]))
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == [1, 2]
+    assert [(s["id"], s["reason"]) for s in skipped] == [(3, "blendMode")]
+
+
+def test_a_work_note_does_not_switch_off_the_group_blanket():
+    # 현실적으로 가장 흔한 경우다 — *_LINE 그룹 안에 단서 없는 자식들과 나란히
+    # 작업 메모를 남기는 것은 작업자에게 평범한 일이다(NON_ART_KINDS 주석 참조).
+    tree = _clueless_group_plus(
+        _node(3, "NOTE FOR LINE: repaint", "type", True,
+              path=["CHAIR1_LINE", "NOTE FOR LINE: repaint"]))
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == [1, 2]
+    assert [(s["id"], s["reason"]) for s in skipped] == [(3, "text")]
+
+
+def test_a_hidden_line_does_not_switch_off_the_group_blanket():
+    tree = _clueless_group_plus(
+        _node(3, "line", "pixel", True, visible=False, path=["CHAIR1_LINE", "line"]))
+
+    matched, skipped = match_preset(tree, _preset(includeHidden=False))
+
+    assert matched == [1, 2]
+    # 숨겨서 뺀 것은 예나 지금이나 skip 기록을 남기지 않는다.
+    assert skipped == []
+
+
 # --- 규칙 ③: 색 지정 레이어 제외 (설계 문서 3절) ---
 
 def test_colour_layers_named_line_are_not_line_art():

@@ -79,8 +79,8 @@ psd-tools로 열어 현재 규칙에 걸리는 leaf 전부(740건)를 덤프하�
 
 ### 규칙 ② 그룹 규칙 — `matchGroups`의 의미 변경
 
-그룹이 이름으로 걸렸을 때, **그 하위 트리에 자기 이름으로 걸리는 leaf가 하나라도 있으면
-일괄 포함을 하지 않는다.** 하나도 없을 때만 지금처럼 하위 전체를 끌어온다.
+그룹이 이름으로 걸렸을 때, **그 하위 트리에 자기 이름으로 걸려 실제로 결과물에 들어가는 leaf가
+하나라도 있으면 일괄 포함을 하지 않는다.** 하나도 없을 때만 지금처럼 하위 전체를 끌어온다.
 
 `matchGroups`의 원래 목적은 그대로 살아있다 — `CHAIR1_LINE` 그룹의 자식이 `1`, `2`, `3`처럼
 아무 단서가 없을 때 끌어오는 것. 안쪽에 이미 `lines` leaf가 있으면 그룹 규칙이 더할 것이 없다.
@@ -89,20 +89,22 @@ psd-tools로 열어 현재 규칙에 걸리는 leaf 전부(740건)를 덤프하�
 바깥 그룹이 걸렸는데 깊은 곳에만 자기 이름 매치가 있으면 그 사이의 단서 없는 leaf들이 빠질 수
 있다 — 알려진 한계이며, 실제 25개 파일에서는 발생하지 않았다.
 
-또 하나의 한계는 `_has_own_match`(`matching.py`)가 `_name_matches`만 물어서 자기 이름이
-걸리는지만 본다는 점이다 — 그 leaf가 실제로 최종 결과에 살아남을지, 즉 `NON_ART_KINDS`·
-`hasPixels`·`excludeTokens`·`blendMode`·가시성(`includeHidden`) 중 하나에 나중에 걸러질지는
-확인하지 않는다. "그 leaf들이 알아서 걸린다"는 위 전제가 이 경우 깨진다 — 자기 이름 매치가
-있다는 이유로 그룹의 일괄 포함이 꺼진 채, 정작 그 leaf는 뒤의 게이트에서 빠지면 단서 없는
-형제 leaf들과 함께 아무것도 남지 않는다.
+일괄 포함을 끄는 근거는 "그 leaf들이 알아서 걸린다"이다. 그러므로 근거가 되는 leaf는 이름이
+걸리는 것만으로는 부족하고 **실제로 결과물에 들어가야** 한다. `_exports_itself`
+(`matching.py`)가 그것을 판정한다 — 이름 매치와 가시성(`includeHidden`), 그리고 나머지 네
+게이트(`NON_ART_KINDS`·`hasPixels`·`excludeTokens`·`blendMode`)를 `walk`의 leaf 판정과 같은
+게이트로 같은 순서로 묻는다. 판정하는 자리가 한 곳뿐이어야 "살아남는다고 보고 꺼버린 일괄
+포함"과 "실제로 걸러내는 자리"가 갈라지지 않는다.
 
-네 게이트 각각에 대응하는 경우를 실제로 재현했다: `line col`(`excludedToken`), `overlay`
-합성의 `LINE WIN`(`blendMode`), `kind: "type"`인 `NOTE FOR LINE: repaint`(`text`),
-`includeHidden: false`에서 숨겨진 `line`. 이 중 현실적인 경우는 세 번째다 — `NON_ART_KINDS`의
-주석이 실제로 만난 예로 드는 `"NOTE FOR LINE: apply penthouse wallpaper to this wall"`처럼,
-`*_LINE` 그룹 안에 단서 없는 자식들과 나란히 작업 메모 텍스트를 남기는 것은 작업자에게 흔한
-일이다. 실제 25개 파일에서는 발생하지 않았다. 고치려면 leaf가 살아남는지 판정하는 로직을
-`walk`와 `_has_own_match`가 공유해야 한다 — 지금은 두 곳에 따로 있다.
+처음 구현은 `_name_matches`만 물었다. 그러면 뒤의 게이트에서 빠질 leaf가 그룹의 일괄 포함을
+끄고 정작 자기도 빠져서, 그 그룹에서 아무것도 안 나온다. 네 게이트 각각으로 재현했다:
+`line col`(`excludedToken`), `overlay` 합성의 `LINE WIN`(`blendMode`), `kind: "type"`인
+`NOTE FOR LINE: repaint`(`text`), `includeHidden: false`에서 숨겨진 `line`. 이 중 현실적인
+경우는 세 번째다 — `NON_ART_KINDS`의 주석이 실제로 만난 예로 드는 `"NOTE FOR LINE: apply
+penthouse wallpaper to this wall"`처럼, `*_LINE` 그룹 안에 단서 없는 자식들과 나란히 작업
+메모 텍스트를 남기는 것은 작업자에게 흔한 일이다. **실제 25개 파일에서는 한 번도 발생하지
+않았다 — 납품 데이터가 아니라 코드 리뷰가 찾아냈고, 그래서 감사 수치가 수정 전후로 한 장도
+달라지지 않는다.** 게이트마다 회귀 테스트를 하나씩 둔다(`test_matching.py`).
 
 효과: **-67건** (그룹 때문에만 걸린 70건 중). 스크린샷의 `fill`/`white`/`heart`/
 `GRAD_MULTIPLY`/`GRAIN_OVERLAY`/`B`/`h`가 전부 여기서 빠진다.
