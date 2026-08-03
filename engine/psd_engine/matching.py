@@ -46,6 +46,27 @@ SKIP_TEXT = "text"
 SKIP_NO_PIXELS = "noPixels"
 #: 이름에 검색어가 부분 문자열로는 들어있지만 토큰으로는 아니다("LINEAR DODGE").
 SKIP_NOT_LINE_WORD = "notLineWord"
+#: 그룹 이름이 걸려 딸려올 뻔했지만, 그 그룹 안에 자기 이름으로 걸리는 leaf가
+#: 이미 있어서 뺐다.
+SKIP_GROUP_HAS_OWN_LINE = "groupHasOwnLine"
+
+
+def _has_own_match(nodes, include, prefixes):
+    """
+    하위 트리에 자기 이름으로 걸리는 leaf가 있는가.
+
+    이것이 있으면 그룹의 일괄 포함은 더할 것이 없다 — 그 leaf들이 알아서
+    걸린다. 없을 때만 그룹 이름이 유일한 단서다.
+    """
+    for node in nodes:
+        if node["kind"] == "group":
+            if prefixes and node["name"].startswith(prefixes):
+                continue
+            if _has_own_match(node["children"], include, prefixes):
+                return True
+        elif _name_matches(node["name"], include):
+            return True
+    return False
 
 
 def match_preset(tree, preset):
@@ -72,7 +93,7 @@ def match_preset(tree, preset):
             "reason": reason,
         })
 
-    def walk(nodes, inside_matched_group):
+    def walk(nodes, inside_matched_group, inside_suppressed):
         for node in nodes:
             if node["kind"] == "group":
                 if prefixes and node["name"].startswith(prefixes):
@@ -80,13 +101,21 @@ def match_preset(tree, preset):
                 hit = preset.get("matchGroups", True) and _name_matches(
                     node["name"], preset["include"]
                 )
-                walk(node["children"], inside_matched_group or hit)
+                # 걸린 그룹이라도 안에 진짜 라인이 있으면 일괄 포함을 끈다.
+                blanket = hit and not _has_own_match(
+                    node["children"], preset["include"], prefixes
+                )
+                walk(node["children"],
+                     inside_matched_group or blanket,
+                     inside_suppressed or (hit and not blanket))
                 continue
             self_hit = _name_matches(node["name"], preset["include"])
             if not (self_hit or inside_matched_group):
+                if inside_suppressed:
+                    _skip(node, SKIP_GROUP_HAS_OWN_LINE)
                 # 예전 규칙으로는 걸렸을 이름이라면 왜 빠졌는지 남긴다. 이름이
                 # LINE인데 결과에 없으면 사람이 이유를 알 방법이 없다.
-                if _legacy_contains(node["name"], preset["include"]):
+                elif _legacy_contains(node["name"], preset["include"]):
                     _skip(node, SKIP_NOT_LINE_WORD)
                 continue
             if not node["visible"] and not preset.get("includeHidden", True):
@@ -103,7 +132,7 @@ def match_preset(tree, preset):
                 continue
             matched.append(node["id"])
 
-    walk(tree, False)
+    walk(tree, False, False)
     return matched, skipped
 
 

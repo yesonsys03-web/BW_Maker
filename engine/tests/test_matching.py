@@ -45,7 +45,8 @@ def test_regex(tree):
 
 
 def test_matched_group_pulls_descendants(tree):
-    # 'BG'가 매치되는 규칙 → BG 하위 픽셀 전부 포함
+    # 'BG'가 매치되는 규칙 → BG 하위 픽셀 전부 포함. BG 안에는 이름이 'bg'인
+    # leaf가 없으므로 그룹 이름이 유일한 단서고, 일괄 포함이 유지된다.
     p = _preset(include={"type": "contains", "value": "bg", "caseSensitive": False})
     assert match_preset(tree, p) == ([2, 3, 4], [])
 
@@ -382,3 +383,45 @@ def test_a_value_with_no_tokens_falls_back_to_substring():
     p = _preset(include={"type": "contains", "value": "-", "caseSensitive": False},
                 excludeGroupPrefixes=[])
     assert match_preset(tree, p) == ([0], [])
+
+
+# --- 규칙 ②: 걸린 그룹 안에 진짜 라인이 있으면 그것만 (설계 문서 3절) ---
+# 그룹 생성에는 위쪽 byElement 절의 _group(i, name, path, children)을 그대로
+# 쓴다 — path=[]를 주면 최상위 그룹(path == [name])이 된다.
+
+def test_a_matched_group_takes_only_the_lines_it_actually_contains():
+    """
+    실제 파일의 'lines' 그룹이다. 이름이 규칙에 걸리는 바람에 안의 합성
+    레이어까지 전부 딸려왔지만, 진짜 라인은 'lines' leaf 하나뿐이다.
+    """
+    tree = [_group(0, "lines", [], [
+        _node(1, "fill", "pixel", True, path=["lines", "fill"]),
+        _node(2, "GRAIN_OVERLAY", "pixel", True, path=["lines", "GRAIN_OVERLAY"]),
+        _node(3, "lines", "pixel", True, path=["lines", "lines"]),
+        _node(4, "h", "pixel", True, path=["lines", "h"]),
+    ])]
+    matched, skipped = match_preset(tree, _preset())
+    assert matched == [3]
+    assert [(s["id"], s["reason"]) for s in skipped] == [
+        (1, "groupHasOwnLine"), (2, "groupHasOwnLine"), (4, "groupHasOwnLine"),
+    ]
+
+
+def test_a_matched_group_still_pulls_everything_when_nothing_inside_is_named():
+    """
+    matchGroups가 존재하는 이유다 — 자식 이름에 아무 단서가 없으면 그룹
+    이름만이 유일한 단서다.
+    """
+    tree = [_group(0, "CHAIR1_LINE", [], [
+        _node(1, "1", "pixel", True, path=["CHAIR1_LINE", "1"]),
+        _node(2, "2", "pixel", True, path=["CHAIR1_LINE", "2"]),
+    ])]
+    assert match_preset(tree, _preset()) == ([1, 2], [])
+
+
+def test_match_groups_off_ignores_the_group_name_entirely():
+    tree = [_group(0, "lines", [], [
+        _node(1, "fill", "pixel", True, path=["lines", "fill"]),
+        _node(2, "lines", "pixel", True, path=["lines", "lines"]),
+    ])]
+    assert match_preset(tree, _preset(matchGroups=False)) == ([2], [])
