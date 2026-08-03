@@ -1324,19 +1324,28 @@ engine/.venv/bin/python scripts/audit-line-matching.py \
   "/Volumes/bgfinal/colordata/Hazbin_Hotel/HH03_시즌_자료/HH0306/Design/COLOR/BG/02_Color"
 ```
 
-Expected — 설계 문서 4절의 수치가 재현되어야 한다:
+Expected:
 
 ```
 파일 25개
-포함: 645장
+포함: 587장
 빠진 이유:
-  groupHasOwnLine    67
+  groupHasOwnLine    55
   excludedToken      18
   notLineWord         5
   blendMode           5
+  noPixels            4
 ```
 
-숫자가 다르면 구현이 설계와 갈라진 것이다. 어느 규칙의 수가 어긋났는지가 곧 어느 태스크를 다시 볼지를 알려준다. (`text`/`noPixels`는 이 폴더에 있으면 함께 나온다 — 위 넷만 맞으면 된다.)
+숫자가 다르면 구현이 설계와 갈라진 것이다. 어느 규칙의 수가 어긋났는지가 곧 어느 태스크를 다시 볼지를 알려준다.
+
+**설계 문서 2·4절의 645 / 67과 왜 다른지** — 그 수치는 규칙의 효과를 재던 오프라인 분석 스크립트에서 나왔고, 그 스크립트가 기본 프리셋의 `excludeGroupPrefixes: ["-"]`를 적용하지 않았다. 그래서 엔진이 애초에 들어가지도 않는 `-BGCU`(47장)와 `-LayOut`(19장) 아래 leaf 66장까지 후보로 셌다. 대사는 정확히 맞는다:
+
+- 오프라인 "최종 645" 중 54장이 `-` 그룹 아래 → `645 − 54 = 591` = 실측 587 + `noPixels` 4
+- `groupHasOwnLine` 67 중 12장이 `-` 그룹 아래 → `67 − 12 = 55` = 실측 55
+- `excludedToken` 18 / `notLineWord` 5 / `blendMode` 5 — 오프라인 분석과 정확히 일치
+
+즉 네 규칙의 동작은 설계 그대로이고, 틀린 것은 절대 수치뿐이다. 위 표가 기본 프리셋 전체를 적용한 참값이다.
 
 볼륨이 마운트돼 있지 않으면 이 단계는 건너뛰고, 사용자에게 폴더 경로를 물어 다시 돌린다. **건너뛴 경우 그 사실을 보고한다** — 이 태스크의 산출물은 스크립트가 아니라 숫자다.
 
