@@ -72,6 +72,8 @@ export type AppAction =
   | { type: "setMatched"; matchedIds: number[] }
   | { type: "togglePreview"; path: string; layerId: number }
   | { type: "setPreviewHidden"; path: string; layerIds: number[]; hidden: boolean }
+  | { type: "toggleSolo"; path: string; layerId: number }
+  | { type: "setSolo"; path: string; layerIds: number[]; solo: boolean }
   | { type: "pushOp"; path: string; op: Operation }
   | { type: "setIncluded"; path: string; includedIds: number[] }
   | { type: "applyPresetResult"; path: string; matchedLayerIds: number[]; operations: Operation[] }
@@ -83,7 +85,13 @@ export type AppAction =
   | { type: "sessionRefreshed"; path: string; result: OpenResult }
   | { type: "engineRestarted" };
 
-export const EMPTY_OPS: OpsState = { includedIds: [], previewHiddenIds: [], ops: [], entries: [] };
+export const EMPTY_OPS: OpsState = {
+  includedIds: [],
+  previewHiddenIds: [],
+  soloIds: [],
+  ops: [],
+  entries: [],
+};
 
 export const initialAppState: AppState = {
   files: [],
@@ -111,7 +119,8 @@ function collectLeaves(nodes: TreeNode[], out: TreeNode[] = []): TreeNode[] {
 /**
  * Initial OpsState for a freshly-opened tree, per the Task 5 contract:
  * includedIds = every pixel leaf id ascending; previewHiddenIds = leaves that
- * were visible=false in the original tree.
+ * were visible=false in the original tree; soloIds = empty — a freshly
+ * opened file starts with nothing soloed.
  */
 export function buildInitialOpsState(tree: TreeNode[]): OpsState {
   const leaves = collectLeaves(tree);
@@ -120,7 +129,7 @@ export function buildInitialOpsState(tree: TreeNode[]): OpsState {
     .map((n) => n.id)
     .sort((a, b) => a - b);
   const previewHiddenIds = leaves.filter((n) => !n.visible).map((n) => n.id);
-  return { includedIds, previewHiddenIds, ops: [], entries: buildEntries(includedIds, []) };
+  return { includedIds, previewHiddenIds, soloIds: [], ops: [], entries: buildEntries(includedIds, []) };
 }
 
 function updateFile(files: FileEntry[], path: string, patch: Partial<FileEntry>): FileEntry[] {
@@ -211,6 +220,22 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
 
+    case "toggleSolo": {
+      const current = state.opsByPath[action.path];
+      if (!current) return state;
+      const next = opsReducer(current, { type: "toggleSolo", layerId: action.layerId });
+      return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
+    }
+
+    case "setSolo": {
+      const current = state.opsByPath[action.path];
+      if (!current) return state;
+      const next = opsReducer(current, {
+        type: "setSolo", layerIds: action.layerIds, solo: action.solo,
+      });
+      return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
+    }
+
     case "pushOp": {
       const current = state.opsByPath[action.path];
       if (!current) return state;
@@ -260,6 +285,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         const next: OpsState = {
           includedIds,
           previewHiddenIds: current.previewHiddenIds,
+          soloIds: current.soloIds,
           ops: action.operations,
           entries,
         };
@@ -469,6 +495,8 @@ export interface AppContextValue {
   removeFile: (path: string) => void;
   togglePreview: (layerId: number) => void;
   setPreviewHidden: (layerIds: number[], hidden: boolean) => void;
+  toggleSolo: (layerId: number) => void;
+  setSolo: (layerIds: number[], solo: boolean) => void;
   pushOp: (op: Operation) => void;
   setIncluded: (includedIds: number[]) => void;
   applyPresetResult: (matchedLayerIds: number[], operations: Operation[]) => void;
@@ -513,6 +541,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (layerIds: number[], hidden: boolean) => {
       if (!state.activePath) return;
       dispatch({ type: "setPreviewHidden", path: state.activePath, layerIds, hidden });
+    },
+    [state.activePath]
+  );
+
+  const toggleSolo = useCallback(
+    (layerId: number) => {
+      if (!state.activePath) return;
+      dispatch({ type: "toggleSolo", path: state.activePath, layerId });
+    },
+    [state.activePath]
+  );
+
+  const setSolo = useCallback(
+    (layerIds: number[], solo: boolean) => {
+      if (!state.activePath) return;
+      dispatch({ type: "setSolo", path: state.activePath, layerIds, solo });
     },
     [state.activePath]
   );
@@ -583,6 +627,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       removeFile,
       togglePreview,
       setPreviewHidden,
+      toggleSolo,
+      setSolo,
       pushOp,
       setIncluded,
       applyPresetResult,
@@ -601,6 +647,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       removeFile,
       togglePreview,
       setPreviewHidden,
+      toggleSolo,
+      setSolo,
       pushOp,
       setIncluded,
       applyPresetResult,

@@ -19,6 +19,8 @@ import type { Preset, TreeNode } from "../lib/types";
 import {
   appReducer,
   applyPresetEffect,
+  buildInitialOpsState,
+  EMPTY_OPS,
   openFileEffect,
   removeFileEffect,
   type AppAction,
@@ -269,6 +271,50 @@ describe("ops actions delegate to the active file's OpsState", () => {
     // 매칭 결과는 반영되고, 대상이 없는 작업만 아무 일도 하지 않는다.
     expect(s!.matchedIds).toEqual([1]);
     expect(s!.opsByPath["/a.psd"].entries).toEqual([{ entryId: 1, sourceIds: [1], name: null }]);
+  });
+
+  // --- solo (설계 문서 5절) ---
+
+  test("EMPTY_OPS carries an empty solo set", () => {
+    expect(EMPTY_OPS.soloIds).toEqual([]);
+  });
+
+  test("a freshly opened tree starts with nothing soloed", () => {
+    const state = buildInitialOpsState([
+      { id: 1, name: "a", kind: "pixel", visible: true, blendMode: "normal", opacity: 100,
+        bbox: [0, 0, 1, 1], hasMask: false, path: ["a"] },
+    ]);
+    expect(state.soloIds).toEqual([]);
+  });
+
+  test("toggleSolo flips a layer id in soloIds", () => {
+    const s0 = opened();
+    expect(s0.opsByPath["/a.psd"].soloIds).toEqual([]);
+    const on = appReducer(s0, { type: "toggleSolo", path: "/a.psd", layerId: 1 });
+    expect(on.opsByPath["/a.psd"].soloIds).toEqual([1]);
+    const off = appReducer(on, { type: "toggleSolo", path: "/a.psd", layerId: 1 });
+    expect(off.opsByPath["/a.psd"].soloIds).toEqual([]);
+  });
+
+  test("setSolo turns a batch on and off (used by the group solo toggle)", () => {
+    const s0 = opened();
+    const on = appReducer(s0, { type: "setSolo", path: "/a.psd", layerIds: [1, 5], solo: true });
+    expect(on.opsByPath["/a.psd"].soloIds).toEqual([1, 5]);
+    const off = appReducer(on, { type: "setSolo", path: "/a.psd", layerIds: [1, 5], solo: false });
+    expect(off.opsByPath["/a.psd"].soloIds).toEqual([]);
+  });
+
+  // solo를 걸고 푸는 동안 눈과 체크박스는 그대로여야 한다. 이것이 깨지면 solo를
+  // 풀었을 때 원래 화면이 돌아오지 않는다.
+  test("solo leaves the eye toggles and the export selection alone", () => {
+    const s0 = opened();
+    const before = s0.opsByPath["/a.psd"];
+    const on = appReducer(s0, { type: "setSolo", path: "/a.psd", layerIds: [1, 5], solo: true });
+    const after = appReducer(on, { type: "setSolo", path: "/a.psd", layerIds: [1, 5], solo: false })
+      .opsByPath["/a.psd"];
+    expect(after.previewHiddenIds).toEqual(before.previewHiddenIds);
+    expect(after.includedIds).toEqual(before.includedIds);
+    expect(after.entries).toEqual(before.entries);
   });
 });
 
