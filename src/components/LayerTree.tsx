@@ -24,7 +24,7 @@ import {
   type MergeDestination,
   type OpsState,
 } from "../lib/opsReducer";
-import { toEngineError } from "../lib/preview";
+import { groupSoloIds, toEngineError } from "../lib/preview";
 import { PLANE_TOKENS, type EngineError, type MergeRule, type Operation, type TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
 
@@ -318,10 +318,13 @@ export function LayerTree({
   }
 
   // 하위가 전부 solo면 누를 때 전부 풀고, 아니면 전부 건다. 그룹 눈과 같은 규약이다.
+  // 단, 눈과 달리 soloIds에는 pixel leaf id만 넣는다(groupSoloIds 참고) — 그리지
+  // 못하는 id로 soloIds가 채워지면 "solo 중"인데 어느 행도 solo로 안 보이는
+  // 막다른 상태에 갇힌다.
   function handleGroupSolo(node: TreeNode) {
-    const leafIds = collectLeafIds(node);
-    const allSoloed = leafIds.length > 0 && leafIds.every((id) => soloSet.has(id));
-    onSetSolo(leafIds, !allSoloed);
+    const soloIds = groupSoloIds([node]);
+    const allSoloed = soloIds.length > 0 && soloIds.every((id) => soloSet.has(id));
+    onSetSolo(soloIds, !allSoloed);
   }
 
   function handleContextMenu(id: number, e: ReactMouseEvent) {
@@ -450,7 +453,10 @@ export function LayerTree({
       const collapsed = collapsedIds.has(node.id);
       const leafIds = collectLeafIds(node);
       const allHidden = leafIds.length > 0 && leafIds.every((id) => previewHiddenSet.has(id));
-      const allSoloed = leafIds.length > 0 && leafIds.every((id) => soloSet.has(id));
+      // allSoloed는 leafIds가 아니라 groupSoloIds를 본다 — handleGroupSolo가 누를 때
+      // 실제로 켜는 목록과 같아야, 이 표시가 버튼을 눌렀을 때 벌어질 일과 어긋나지 않는다.
+      const soloIds = groupSoloIds([node]);
+      const allSoloed = soloIds.length > 0 && soloIds.every((id) => soloSet.has(id));
       return (
         <div key={node.id}>
           <div
@@ -596,7 +602,10 @@ export function LayerTree({
     const allIncluded = sourceIds.length > 0 && sourceIds.every((id) => includedSet.has(id));
     const someIncluded = sourceIds.some((id) => includedSet.has(id));
     const hidden = sourceIds.length > 0 && sourceIds.every((id) => previewHiddenSet.has(id));
-    const allSoloed = sourceIds.length > 0 && sourceIds.every((id) => soloSet.has(id));
+    // 병합 소스가 전부 non-pixel인 경우는 드물지만(선택 병합은 대상 종류를 안
+    // 가린다) 그룹 solo와 같은 함정이라 여기도 groupSoloIds로 좁힌다.
+    const soloSourceIds = groupSoloIds(row.leaves.map((l) => l.node));
+    const allSoloed = soloSourceIds.length > 0 && soloSourceIds.every((id) => soloSet.has(id));
     const expanded = expandedMerges.has(row.entryId);
     const sourceNames = row.leaves.map((l) => l.node.name).join(" + ");
     const fullPaths = row.leaves.map((l) => (l.breadcrumb ? `${l.breadcrumb} / ${l.node.name}` : l.node.name));
@@ -645,7 +654,7 @@ export function LayerTree({
           className={`solo-toggle${allSoloed ? " solo-on" : ""}`}
           onClick={(e) => {
             e.stopPropagation();
-            onSetSolo(sourceIds, !allSoloed);
+            onSetSolo(soloSourceIds, !allSoloed);
           }}
           aria-label="solo 토글"
           title="이 병합의 소스만 보기"

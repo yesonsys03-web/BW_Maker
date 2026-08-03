@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   DEFAULT_PREVIEW_BACKGROUND,
+  groupSoloIds,
   isDocumentView,
   MAX_PREVIEW_SCALE,
   MIN_PREVIEW_SCALE,
@@ -108,6 +109,30 @@ test("pixelLeafIds returns every pixel leaf id in document order, ignoring inclu
 
 test("pixelLeafIds on an empty tree returns an empty array", () => {
   expect(pixelLeafIds([])).toEqual([]);
+});
+
+// --- groupSoloIds (그룹 solo가 soloIds에 넣는 id) ---
+//
+// LayerTree의 handleGroupSolo/allSoloed/병합 행이 전부 이 함수 하나로 solo
+// 대상을 정한다. 그리지 못하는 id(type/adjustment/shape)가 섞여 들어가면 solo
+// 모드에 갇힌 채 어느 행도 solo로 안 보이는 막다른 상태가 되므로, pixel leaf만
+// 남기는지가 이 함수의 핵심 계약이다.
+
+test("groupSoloIds on a mixed group (pixel + text) keeps only the pixel leaf", () => {
+  // group 3 = [type 4, pixel 5, group 6 = [pixel 7]]
+  const mixedGroup = tree.find((n) => n.id === 3)!;
+  expect(groupSoloIds([mixedGroup])).toEqual([5, 7]);
+});
+
+test("groupSoloIds on a group with no pixel descendants returns an empty array", () => {
+  const textOnlyGroup = group(100, [leaf(101, "type"), leaf(102, "shape")]);
+  expect(groupSoloIds([textOnlyGroup])).toEqual([]);
+});
+
+test("groupSoloIds recurses into nested groups", () => {
+  // group 6 = [pixel 7], nested one level inside group 3.
+  const nestedGroup = group(200, [leaf(201, "type"), group(202, [leaf(203, "pixel"), leaf(204, "adjustment")])]);
+  expect(groupSoloIds([nestedGroup])).toEqual([203]);
 });
 
 test("nextScale with deltaY 0 leaves scale unchanged", () => {

@@ -72,6 +72,26 @@ export function pixelLeafIds(tree: TreeNode[]): number[] {
 }
 
 /**
+ * 그룹(또는 병합 행)의 solo 대상 id. pixel leaf만 남긴다.
+ *
+ * solo는 필터가 아니라 모드다(visibleIdsForPreview 참고) — soloIds가 하나라도
+ * 있으면 화면은 그 목록만 그린다. type/adjustment/shape leaf는 애초에 그릴 수
+ * 없으므로 이런 id가 soloIds에 섞이면 "solo 중인데 아무 행도 solo로 안 보이는"
+ * 막다른 상태에 빠질 수 있다 — 그 id를 낼 수 있는 유일한 버튼(그 행 자신)이
+ * 애초에 비활성이기 때문이다. 그래서 solo에 넣을 id는 pixelLeafIds로 한 번 더
+ * 좁힌다. 같은 이유로 solo를 켜는 쪽(핸들러)과 "지금 전부 solo인가"를 보는
+ * 쪽(행 표시)이 반드시 이 함수 하나를 같이 써야 한다 — 둘이 다른 목록을 보면
+ * 버튼의 켜짐 표시가 실제로 눌렀을 때 벌어질 일과 어긋난다.
+ *
+ * 눈(hide)은 필터라서 이 좁힘이 필요 없다 — 그릴 수 없는 id가 previewHiddenIds에
+ * 있어도 애초에 안 그려지니 무해하다. 그래서 handleGroupEye/allHidden은
+ * collectLeafIds(모든 leaf)를 그대로 쓴다.
+ */
+export function groupSoloIds(nodes: TreeNode[]): number[] {
+  return pixelLeafIds(nodes);
+}
+
+/**
  * True when the visible set is still exactly what opening the file produced —
  * every pixel leaf the PSD had switched on (see buildInitialOpsState).
  *

@@ -698,7 +698,7 @@ input[type="text"] {
   padding: 0 0.2em;
   color: var(--text-dim);
   line-height: 1;
-  opacity: 0.45;
+  opacity: 0.6;
 }
 
 /* solo가 걸린 행은 한눈에 띄어야 한다 — 지금 화면이 왜 이 레이어만 보이는지의
@@ -713,9 +713,10 @@ input[type="text"] {
   cursor: default;
 }
 
-.solo-clear {
-  margin-left: auto;
-}
+/* .solo-clear에는 margin-left: auto를 주지 않는다. .layer-filter-count가 이미
+   그 값으로 오른쪽 끝에 붙어 있어, 같은 flex 행에 auto margin이 두 개면 남는
+   공간을 반씩 나눠 가져 solo가 켜질 때마다 레이어 수 표시가 오른쪽 끝에서
+   중간으로 밀렸다 돌아온다. 이 버튼은 count 뒤에 그대로 이어 붙는다. */
 
 .eye-toggle.eye-hidden {
   color: var(--text-dim);
