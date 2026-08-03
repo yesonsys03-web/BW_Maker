@@ -81,8 +81,20 @@ test("lineLeafIds falls back to a name-contains-line rule before any preset is a
 });
 
 test("the name fallback is case-insensitive", () => {
-  const mixed = flattenLeaves([leaf(7, "Outline sketch", ["G"])]);
+  const mixed = flattenLeaves([leaf(7, "LINE sketch", ["G"])]);
   expect(lineLeafIds(mixed, [])).toEqual([7]);
+});
+
+// 부분 문자열이 아니라 토큰으로 본다 — 엔진과 같은 규칙이어야 프리셋을 적용하기
+// 전과 후의 목록이 갈라지지 않는다(engine/psd_engine/names.py).
+test("the name fallback does not match line inside another word", () => {
+  const linear = flattenLeaves([leaf(8, "Layer 866 (LINEAR DODGE)", ["G"])]);
+  expect(lineLeafIds(linear, [])).toEqual([]);
+});
+
+test("the name fallback keeps underscore and camel case names", () => {
+  const joined = flattenLeaves([leaf(9, "Wall_Line", ["G"]), leaf(10, "CurtainsLine", ["G"])]);
+  expect(lineLeafIds(joined, [])).toEqual([9, 10]);
 });
 
 test("isLineFallbackActive only reports the fallback in line mode without matches", () => {
