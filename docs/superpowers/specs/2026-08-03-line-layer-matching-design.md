@@ -89,6 +89,21 @@ psd-tools로 열어 현재 규칙에 걸리는 leaf 전부(740건)를 덤프하�
 바깥 그룹이 걸렸는데 깊은 곳에만 자기 이름 매치가 있으면 그 사이의 단서 없는 leaf들이 빠질 수
 있다 — 알려진 한계이며, 실제 25개 파일에서는 발생하지 않았다.
 
+또 하나의 한계는 `_has_own_match`(`matching.py`)가 `_name_matches`만 물어서 자기 이름이
+걸리는지만 본다는 점이다 — 그 leaf가 실제로 최종 결과에 살아남을지, 즉 `NON_ART_KINDS`·
+`hasPixels`·`excludeTokens`·`blendMode`·가시성(`includeHidden`) 중 하나에 나중에 걸러질지는
+확인하지 않는다. "그 leaf들이 알아서 걸린다"는 위 전제가 이 경우 깨진다 — 자기 이름 매치가
+있다는 이유로 그룹의 일괄 포함이 꺼진 채, 정작 그 leaf는 뒤의 게이트에서 빠지면 단서 없는
+형제 leaf들과 함께 아무것도 남지 않는다.
+
+네 게이트 각각에 대응하는 경우를 실제로 재현했다: `line col`(`excludedToken`), `overlay`
+합성의 `LINE WIN`(`blendMode`), `kind: "type"`인 `NOTE FOR LINE: repaint`(`text`),
+`includeHidden: false`에서 숨겨진 `line`. 이 중 현실적인 경우는 세 번째다 — `NON_ART_KINDS`의
+주석이 실제로 만난 예로 드는 `"NOTE FOR LINE: apply penthouse wallpaper to this wall"`처럼,
+`*_LINE` 그룹 안에 단서 없는 자식들과 나란히 작업 메모 텍스트를 남기는 것은 작업자에게 흔한
+일이다. 실제 25개 파일에서는 발생하지 않았다. 고치려면 leaf가 살아남는지 판정하는 로직을
+`walk`와 `_has_own_match`가 공유해야 한다 — 지금은 두 곳에 따로 있다.
+
 효과: **-67건** (그룹 때문에만 걸린 70건 중). 스크린샷의 `fill`/`white`/`heart`/
 `GRAD_MULTIPLY`/`GRAIN_OVERLAY`/`B`/`h`가 전부 여기서 빠진다.
 
@@ -162,8 +177,11 @@ leaf **자기 이름**의 토큰에 제외 토큰이 있으면 뺀다. 기본값
 - `src/components/PresetDialog.tsx` — 제외 토큰 입력 UI
 - `src/lib/engine.ts` — `SkippedLayer.reason` 유니온 확장
 - `src/state/appStore.tsx` — skipped 필터를 허용 목록으로
-- `src/lib/layerFilter.ts` — `LINE_NAME_FALLBACK`의 `.includes("line")`도 같은 토큰 매칭으로
-  (프리셋 적용 전 "라인만" 패널이 화면과 다른 규칙을 쓰면 안 된다)
+- `src/lib/layerFilter.ts` — `LINE_NAME_FALLBACK`의 `.includes("line")`도 같은 토큰 매칭으로.
+  다만 이 폴백은 규칙 ①(토큰 매칭)만 반영한다 — `excludeTokens`·`blendMode`·그룹 규칙(②)은
+  프리셋을 적용해 `matchedIds`가 채워져야 반영된다. 완전히 같아진 것이 아니라 이전보다
+  가까워진 것이다: 25개 파일 표본 기준 약 78건의 leaf가 적용 전 패널에는 보이다가 적용 후
+  사라진다.
 
 토크나이저는 엔진과 프론트엔드 양쪽에 존재한다. `DEFAULT_ROLE_TOKENS`가 이미 그런 것처럼
 서로를 가리키는 주석을 단다.
