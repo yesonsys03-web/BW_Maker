@@ -4,6 +4,9 @@ import type { Preset } from "./types";
 
 const PRESETS_FILENAME = "presets.json";
 
+/** 색 지정 레이어를 걸러내는 기본 어휘. 엔진 DEFAULT_EXCLUDE_TOKENS와 같다. */
+export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"];
+
 export const DEFAULT_PRESET: Preset = {
   name: "line 추출",
   include: { type: "contains", value: "line", caseSensitive: false },
@@ -18,6 +21,7 @@ export const DEFAULT_PRESET: Preset = {
   embedPreview: true,
   lineColor: null,
   splitLayers: false,
+  excludeTokens: [...DEFAULT_EXCLUDE_TOKENS],
 };
 
 /** 색 통일을 켤 때 처음 제안하는 색. 라인 아트의 기본값. */
@@ -102,6 +106,13 @@ function validatePreset(value: unknown, index: number): Preset {
       throw new Error(`${prefix}.roleTokens: 문자열 배열이 아닙니다.`);
     }
   }
+  // excludeTokens도 나중에 추가된 항목 — 없으면 기본 어휘로 읽는다. 빈 배열은
+  // "제외하지 않겠다"는 뜻이므로 기본값으로 되돌리지 않는다.
+  if (v.excludeTokens !== undefined) {
+    if (!Array.isArray(v.excludeTokens) || !v.excludeTokens.every((t) => typeof t === "string")) {
+      throw new Error(`${prefix}.excludeTokens: 문자열 배열이 아닙니다.`);
+    }
+  }
   if (typeof v.embedPreview !== "boolean") throw new Error(`${prefix}.embedPreview: boolean이 아닙니다.`);
   // lineColor는 나중에 추가된 항목이라, 그 이전에 저장된 presets.json에는 아예
   // 없다. 없는 것은 "원본 색 유지"(null)로 읽는다 — 형식이 깨진 값과 달리
@@ -131,6 +142,7 @@ function validatePreset(value: unknown, index: number): Preset {
     embedPreview: v.embedPreview,
     lineColor: (v.lineColor as string | null | undefined) ?? null,
     splitLayers: (v.splitLayers as boolean | undefined) ?? false,
+    excludeTokens: (v.excludeTokens as string[] | undefined) ?? [...DEFAULT_EXCLUDE_TOKENS],
   };
 }
 

@@ -51,6 +51,7 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     roleTokens: ["UL", "OL_UL", "OL"],
     mergeRule: "role",
     splitLayers: false,       // 기본은 한 파일에 모두
+    excludeTokens: ["col", "colour", "color"],  // line col 류는 색 지정이다
   });
 });
 
@@ -118,6 +119,7 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
     embedPreview: false,
     lineColor: "#1A2B3C",
     splitLayers: true,
+    excludeTokens: ["fx", "temp"],
   };
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([wellFormed]));
@@ -293,4 +295,32 @@ test("loadPresets rejects an unknown mergeRule rather than falling back", async 
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, mergeRule: "depth" }]));
 
   await expect(loadPresets()).rejects.toThrow(/mergeRule/);
+});
+
+test("presets saved before excludeTokens existed load with the default vocabulary", async () => {
+  // tsconfig에 noUnusedLocals가 켜져 있어 구조분해로 필드를 빼면 tsc가 잡는다.
+  const withoutField: Record<string, unknown> = { ...DEFAULT_PRESET };
+  delete withoutField.excludeTokens;
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([withoutField]));
+
+  const [loaded] = await loadPresets();
+
+  expect(loaded.excludeTokens).toEqual(["col", "colour", "color"]);
+});
+
+test("an empty excludeTokens list is kept, not replaced by the default", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, excludeTokens: [] }]));
+
+  const [loaded] = await loadPresets();
+
+  expect(loaded.excludeTokens).toEqual([]);
+});
+
+test("a malformed excludeTokens is rejected rather than silently defaulted", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, excludeTokens: "col" }]));
+
+  await expect(loadPresets()).rejects.toThrow("excludeTokens");
 });

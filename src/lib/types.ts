@@ -82,6 +82,13 @@ export interface Preset {
    * 다시 합칠 때 좌표가 맞는다.
    */
   splitLayers: boolean;
+  /**
+   * 이름에 검색어가 들어있어도 라인 아트가 아닌 것을 걸러내는 토큰.
+   * `line col`, `LINE_COL`, `Line Colour`는 색 지정 레이어지 라인이 아니다.
+   * 네 판별 규칙 중 이것만 어휘에 의존해서 편집 가능하게 둔다.
+   * engine/psd_engine/matching.py의 DEFAULT_EXCLUDE_TOKENS와 기본값이 같아야 한다.
+   */
+  excludeTokens: string[];
 }
 
 export interface EngineError {

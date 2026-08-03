@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS } from "../lib/presets";
+import { DEFAULT_EXCLUDE_TOKENS, DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS } from "../lib/presets";
 import type { Preset } from "../lib/types";
 
 export type PresetDialogMode = "edit" | "saveAs";
@@ -57,6 +57,9 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   const [roleTokensText, setRoleTokensText] = useState(
     (preset.roleTokens ?? DEFAULT_ROLE_TOKENS).join(", ")
   );
+  const [excludeTokensText, setExcludeTokensText] = useState(
+    (preset.excludeTokens ?? DEFAULT_EXCLUDE_TOKENS).join(", ")
+  );
   const [naming, setNaming] = useState<Preset["naming"]>(preset.naming);
   const [outputSuffix, setOutputSuffix] = useState(preset.outputSuffix);
   const [embedPreview, setEmbedPreview] = useState(preset.embedPreview);
@@ -107,6 +110,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       name: name.trim(),
       include: { type: includeType, value: includeValue, caseSensitive },
       excludeGroupPrefixes: parseGroupPrefixes(excludeGroupPrefixesText),
+      excludeTokens: parseGroupPrefixes(excludeTokensText),
       matchGroups,
       includeHidden,
       merge,
@@ -194,6 +198,16 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
             value={excludeGroupPrefixesText}
             onChange={(e) => setExcludeGroupPrefixesText(e.currentTarget.value)}
             placeholder="예: -, #"
+          />
+        </label>
+
+        <label className="preset-field">
+          <span>제외 토큰 (쉼표로 구분)</span>
+          <input
+            type="text"
+            value={excludeTokensText}
+            onChange={(e) => setExcludeTokensText(e.currentTarget.value)}
+            placeholder="예: col, colour, color"
           />
         </label>
 
