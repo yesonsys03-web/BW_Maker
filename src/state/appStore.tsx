@@ -422,13 +422,17 @@ export async function applyPresetEffect(
       operations: result.operations,
     });
     // 규칙에 걸렸는데 그릴 것이 없어 빠진 레이어. 이름은 LINE인데 결과에 없으면
-    // 사람이 그 이유를 알 방법이 없으므로 돌려준다. 텍스트는 빼는 것이 규칙
-    // 자체이므로(라인 PSD의 텍스트는 작업 메모다) 여기 담지 않는다.
+    // 사람이 그 이유를 알 방법이 없으므로 돌려준다.
+    //
+    // 거부 목록이 아니라 허용 목록인 것이 중요하다. 판별 규칙이 "라인이 아니다"라고
+    // 뺀 것들(notLineWord/groupHasOwnLine/excludedToken/blendMode)은 의도한
+    // 결과이고 수가 많다 — 실파일 25개에서 95장이다. 그것들이 카드에 얹히면
+    // 이 카드가 경고하려던 진짜 오류가 묻힌다.
     //
     // 여기서 바로 알리지 않고 돌려주는 이유: 파일을 한꺼번에 불러올 때 파일마다
     // 카드를 띄우면 화면이 카드로 덮여 진짜 오류가 묻힌다. 언제 어떻게 알릴지는
     // 부르는 쪽이 정한다(App.tsx의 로드 큐는 끝에 한 장으로 모아 띄운다).
-    return (result.skippedLayers ?? []).filter((s) => s.reason !== "text");
+    return (result.skippedLayers ?? []).filter((s) => s.reason === "noPixels");
   } catch (e) {
     const error: EngineError = e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
     dispatch({ type: "pushError", title: `프리셋 자동 적용 실패: ${path}`, error });

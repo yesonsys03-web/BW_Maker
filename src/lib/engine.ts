@@ -47,8 +47,25 @@ export interface SkippedLayer {
   /** 그룹 경로까지 포함한 이름. `*ART/120_BG/BOTTOM_FLOOR_WALL/NOTE FOR LINE: ...` */
   path: string;
   kind: string;
-  /** "text" = 라인 PSD 안의 텍스트는 작업 메모로 본다. "noPixels" = 그릴 채널이 없다. */
-  reason: "text" | "noPixels";
+  /**
+   * 규칙에 걸렸는데도 결과에 없는 이유.
+   *
+   * "그릴 수 없어서" — "text"는 라인 PSD 안의 텍스트를 작업 메모로 본 것,
+   * "noPixels"는 그릴 채널이 없는 것.
+   *
+   * "라인이 아니라서" — "notLineWord"는 이름에 검색어가 부분 문자열로만
+   * 들어있는 것("LINEAR DODGE"), "groupHasOwnLine"은 그룹 이름 때문에 딸려올
+   * 뻔했지만 그 그룹에 진짜 라인이 따로 있는 것, "excludedToken"은 제외
+   * 토큰이 붙은 것("line col"), "blendMode"는 normal이 아닌 합성으로 얹힌 것.
+   * 이쪽은 규칙이 의도한 결과라 오류가 아니다.
+   */
+  reason:
+    | "text"
+    | "noPixels"
+    | "notLineWord"
+    | "groupHasOwnLine"
+    | "excludedToken"
+    | "blendMode";
 }
 
 /**

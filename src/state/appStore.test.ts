@@ -611,6 +611,30 @@ describe("applyPresetEffect (자동 적용의 실제 동작)", () => {
     expect(actions.some((a) => a.type === "applyPresetResult")).toBe(true);
   });
 
+  // 규칙으로 뺀 것은 이상 징후가 아니다. 실파일 25개 기준 95장이 여기 얹히면
+  // 이 카드가 경고하려던 진짜 오류(그릴 픽셀이 없는 레이어)가 묻힌다.
+  test("layers dropped on purpose by a rule do not raise the card", async () => {
+    mockApplyPreset.mockResolvedValue({
+      matchedLayerIds: [1],
+      operations: [],
+      skippedLayers: [
+        { id: 2, path: "*ART/Layer 866 (LINEAR DODGE)", kind: "pixel", reason: "notLineWord" },
+        { id: 3, path: "*ART/lines/fill", kind: "pixel", reason: "groupHasOwnLine" },
+        { id: 4, path: "*ART/line col", kind: "pixel", reason: "excludedToken" },
+        { id: 5, path: "*ART/LINE WIN", kind: "pixel", reason: "blendMode" },
+        { id: 9, path: "LayOut/BG/line curves", kind: "curves", reason: "noPixels" },
+      ],
+    });
+    const actions: AppAction[] = [];
+
+    const undrawable = await applyPresetEffect((a) => actions.push(a), "/a.psd", 3, preset);
+
+    expect(undrawable).toEqual([
+      { id: 9, path: "LayOut/BG/line curves", kind: "curves", reason: "noPixels" },
+    ]);
+    expect(actions.some((a) => a.type === "pushError")).toBe(false);
+  });
+
   test("a failed apply hands back nothing rather than a stale list", async () => {
     mockApplyPreset.mockRejectedValue(new EngineRpcError({ message: "boom", traceback: "" }));
     await expect(applyPresetEffect(() => {}, "/a.psd", 3, preset)).resolves.toEqual([]);
