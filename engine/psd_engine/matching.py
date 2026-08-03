@@ -1,7 +1,7 @@
 """프리셋 규칙 → 매치 레이어 id 목록 / operation list 변환."""
 import re
 
-from .names import token_match, tokenize
+from .names import has_any_token, token_match, tokenize
 
 
 def _name_matches(name, include):
@@ -50,6 +50,15 @@ SKIP_NOT_LINE_WORD = "notLineWord"
 #: 이미 있어서 뺐다.
 SKIP_GROUP_HAS_OWN_LINE = "groupHasOwnLine"
 
+#: 이름에 제외 토큰이 들어있다.
+SKIP_EXCLUDED_TOKEN = "excludedToken"
+
+#: 이름에 line이 있어도 라인 아트가 아닌 것을 걸러내는 토큰. 실제 파일에서
+#: `line col`, `LINE_COL`, `Line Colour`, `Wall_Line_Col`이 18장 나왔다.
+#: 프리셋이 덮어쓸 수 있다 — 네 규칙 중 이것만 어휘에 의존하기 때문이다.
+#: src/lib/presets.ts의 DEFAULT_EXCLUDE_TOKENS와 같은 값이어야 한다.
+DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"]
+
 
 def _has_own_match(nodes, include, prefixes):
     """
@@ -84,6 +93,7 @@ def match_preset(tree, preset):
     matched = []
     skipped = []
     prefixes = tuple(preset.get("excludeGroupPrefixes", []))
+    exclude_tokens = preset.get("excludeTokens", DEFAULT_EXCLUDE_TOKENS)
 
     def _skip(node, reason):
         skipped.append({
@@ -127,6 +137,8 @@ def match_preset(tree, preset):
             # 통과 조건이 kind == "pixel"이었으므로 그대로 유지한다.
             elif not node.get("hasPixels", node["kind"] == "pixel"):
                 reason = SKIP_NO_PIXELS
+            elif has_any_token(node["name"], exclude_tokens):
+                reason = SKIP_EXCLUDED_TOKEN
             if reason:
                 _skip(node, reason)
                 continue

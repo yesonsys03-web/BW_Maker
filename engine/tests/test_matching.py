@@ -425,3 +425,31 @@ def test_match_groups_off_ignores_the_group_name_entirely():
         _node(2, "lines", "pixel", True, path=["lines", "lines"]),
     ])]
     assert match_preset(tree, _preset(matchGroups=False)) == ([2], [])
+
+
+# --- 규칙 ③: 색 지정 레이어 제외 (설계 문서 3절) ---
+
+def test_colour_layers_named_line_are_not_line_art():
+    tree = [
+        _node(0, "line col", "pixel", True),
+        _node(1, "Line Colour", "pixel", True),
+        _node(2, "Wall_Line_Col", "pixel", True),
+        _node(3, "LINE", "pixel", True),
+    ]
+    matched, skipped = match_preset(tree, _preset())
+    assert matched == [3]
+    assert [(s["id"], s["reason"]) for s in skipped] == [
+        (0, "excludedToken"), (1, "excludedToken"), (2, "excludedToken"),
+    ]
+
+
+def test_exclude_tokens_can_be_emptied_by_the_preset():
+    tree = [_node(0, "line col", "pixel", True)]
+    assert match_preset(tree, _preset(excludeTokens=[])) == ([0], [])
+
+
+def test_exclude_tokens_can_be_replaced_by_the_preset():
+    tree = [_node(0, "line col", "pixel", True), _node(1, "NEON LINE", "pixel", True)]
+    assert match_preset(tree, _preset(excludeTokens=["neon"])) == ([0], [
+        {"id": 1, "path": "NEON LINE", "kind": "pixel", "reason": "excludedToken"},
+    ])
