@@ -42,16 +42,29 @@ export async function openPsd(path: string): Promise<OpenResult> {
   return callEngine("open_psd", { path }) as Promise<OpenResult>;
 }
 
+export interface SkippedLayer {
+  id: number;
+  /** 그룹 경로까지 포함한 이름. `*ART/120_BG/BOTTOM_FLOOR_WALL/NOTE FOR LINE: ...` */
+  path: string;
+  kind: string;
+  /** "text" = 라인 PSD 안의 텍스트는 작업 메모로 본다. "noPixels" = 그릴 채널이 없다. */
+  reason: "text" | "noPixels";
+}
+
 /**
  * Applies a preset to a PSD session.
+ *
+ * skippedLayers는 규칙에 걸렸지만 그릴 수 없어 뺀 레이어들이다. 예전에는 그런
+ * 레이어 하나가 파일 전체의 적용을 실패시켰다(engine/psd_engine/matching.py).
  */
 export async function applyPreset(
   sessionId: number,
   preset: Preset
-): Promise<{ matchedLayerIds: number[]; operations: Operation[] }> {
+): Promise<{ matchedLayerIds: number[]; operations: Operation[]; skippedLayers?: SkippedLayer[] }> {
   return callEngine("apply_preset", { sessionId, preset }) as Promise<{
     matchedLayerIds: number[];
     operations: Operation[];
+    skippedLayers?: SkippedLayer[];
   }>;
 }
 
@@ -175,6 +188,21 @@ export async function batchRun(
 }
 
 /**
+ * 화면이 지금 보고 있는 파일을 엔진에 알린다. 그 파일의 세션은 LRU 축출에서
+ * 제외되므로, 배경에서 파일을 차례로 여는 동안에도 밀려나지 않는다. 세션
+ * 총량(2개)은 그대로라 메모리는 늘지 않는다 — engine/psd_engine/session.py 참고.
+ *
+ * 세션 id가 아니라 경로를 보내는 이유가 중요하다: 축출 복구는 새 세션을 만드는데,
+ * id로 고정하면 그 새 id를 다시 고정하기 전까지 무방비다. 경로는 재오픈에도
+ * 그대로이므로 그 틈이 없다.
+ *
+ * null은 "지금 보고 있는 파일 없음"이다.
+ */
+export async function pinFile(path: string | null): Promise<void> {
+  return (await callEngine("pin_file", { path })) as void;
+}
+
+/**
  * Closes a PSD session.
  */
 export async function closeSession(sessionId: number): Promise<void> {
@@ -198,6 +226,28 @@ export async function loadPngDataUrl(path: string): Promise<string> {
  */
 export async function pathsExist(paths: string[]): Promise<boolean[]> {
   return invoke("paths_exist", { paths });
+}
+
+export interface PsdScan {
+  /** Sorted, de-duplicated absolute paths of the .psd files that were found. */
+  files: string[];
+  /** True when the walk gave up early on a file-count or depth cap. */
+  truncated: boolean;
+  /** Sub-folders that could not be opened (permissions) and were skipped. */
+  skippedDirs: number;
+}
+
+/**
+ * Expands a mixed list of paths into .psd files: folders are walked
+ * recursively, .psd files pass straight through, everything else is dropped.
+ * The folder button and drag & drop share it, so dropping a folder, a pile of
+ * files, or both at once all follow one rule.
+ *
+ * Rust-side for the same reason as pathsExist: source folders live outside
+ * AppData, which is all plugin-fs's capability scope allows it to read.
+ */
+export async function collectPsdFiles(paths: string[]): Promise<PsdScan> {
+  return invoke("collect_psd_files", { paths });
 }
 
 /**

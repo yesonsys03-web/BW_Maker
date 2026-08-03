@@ -113,6 +113,13 @@ export function isEvictedSessionError(e: unknown): boolean {
  * "white"이고, 대신 체커보드(투명 여부 확인용)와 검정(밝은 선 확인용)을
  * 언제든 고를 수 있게 남겨둔다.
  */
+/**
+ * 미리보기 렌더의 긴 변 상한(px). 화면에 띄우는 쪽(PreviewCanvas)과 미리 만들어
+ * 두는 쪽(App.tsx의 미리보기 준비 큐)이 같은 값을 써야 한다 — 다르면 준비해둔
+ * 그림의 캐시 키가 어긋나 클릭할 때마다 다시 합성한다.
+ */
+export const PREVIEW_MAX_SIZE = 1500;
+
 export type PreviewBackground = "white" | "checker" | "black";
 
 export const PREVIEW_BACKGROUNDS: readonly PreviewBackground[] = ["white", "checker", "black"];

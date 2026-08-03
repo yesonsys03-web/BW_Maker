@@ -39,7 +39,7 @@ def _emit(obj, out):
 
 class Engine:
     _ALLOWED_METHODS = {
-        "open_psd", "close_session", "render_thumbnails",
+        "open_psd", "close_session", "pin_file", "render_thumbnails",
         "render_preview", "render_document_preview",
         "apply_preset", "auto_merge_operations", "auto_merge_preview",
         "export_psd", "batch_run",
@@ -74,10 +74,23 @@ class Engine:
         return {
             "sessionId": sid, "width": psd.width, "height": psd.height,
             "colorMode": psd.color_mode.name, "depth": psd.depth, "tree": s["tree"],
+            # 파일이 마지막으로 바뀐 시각. UI가 만들어둔 미리보기를 언제까지
+            # 재사용해도 되는지 판단하는 근거다 — 세션 id로는 판단할 수 없다.
+            # 세션은 LRU에 밀려 수시로 새로 열리지만 그때 파일 내용은 그대로이고,
+            # 반대로 아티스트가 포토샵에서 저장하면 내용이 달라진다.
+            "mtime": os.path.getmtime(path),
         }
 
     def close_session(self, sessionId):
         self.store.close(sessionId)
+        return {}
+
+    def pin_file(self, path=None):
+        """
+        화면이 지금 보고 있는 파일을 알린다 — 그 파일의 세션은 축출하지 않는다.
+        세션 총량은 그대로이므로 메모리는 늘지 않는다(SessionStore.pin 참고).
+        """
+        self.store.pin(path)
         return {}
 
     def render_thumbnails(self, sessionId, layerIds, maxSize=128):
@@ -108,9 +121,12 @@ class Engine:
 
     def apply_preset(self, sessionId, preset):
         s = self.store.get(sessionId)
-        matched = match_preset(s["tree"], preset)
+        matched, skipped = match_preset(s["tree"], preset)
         return {
             "matchedLayerIds": matched,
+            # 규칙에 걸렸지만 그릴 수 없어 뺀 레이어들. 조용히 버리면 화면에서는
+            # "원래 안 걸린 것"과 구별되지 않는다.
+            "skippedLayers": skipped,
             "operations": preset_operations(s["tree"], matched, preset,
                                             source_stem=Path(s["path"]).stem),
         }

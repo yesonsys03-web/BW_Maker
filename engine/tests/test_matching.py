@@ -28,54 +28,99 @@ def tree(fixture_psd):
 
 def test_contains_with_exclude_prefix(tree):
     # 'hidden line'(3), 'line'(4), 'lines'(5). -REF의 line(7)은 제외
-    assert match_preset(tree, _preset()) == [3, 4, 5]
+    assert match_preset(tree, _preset()) == ([3, 4, 5], [])
 
 
 def test_include_hidden_false(tree):
-    assert match_preset(tree, _preset(includeHidden=False)) == [4, 5]
+    assert match_preset(tree, _preset(includeHidden=False)) == ([4, 5], [])
 
 
 def test_no_exclude_prefix_includes_ref(tree):
-    assert match_preset(tree, _preset(excludeGroupPrefixes=[])) == [3, 4, 5, 7]
+    assert match_preset(tree, _preset(excludeGroupPrefixes=[])) == ([3, 4, 5, 7], [])
 
 
 def test_regex(tree):
     p = _preset(include={"type": "regex", "value": r"^line$", "caseSensitive": False})
-    assert match_preset(tree, p) == [4]
+    assert match_preset(tree, p) == ([4], [])
 
 
 def test_matched_group_pulls_descendants(tree):
     # 'BG'가 매치되는 규칙 → BG 하위 픽셀 전부 포함
     p = _preset(include={"type": "contains", "value": "bg", "caseSensitive": False})
-    assert match_preset(tree, p) == [2, 3, 4]
+    assert match_preset(tree, p) == ([2, 3, 4], [])
 
 
 def test_preset_operations_merge_all(tree):
-    ids = match_preset(tree, _preset())
+    ids, _ = match_preset(tree, _preset())
     ops = preset_operations(tree, ids, _preset(merge="all"))
     assert ops == [{"op": "merge", "layerIds": [3, 4, 5], "name": "merged"}]
 
 
 def test_preset_operations_per_group(tree):
-    ids = match_preset(tree, _preset())
+    ids, _ = match_preset(tree, _preset())
     ops = preset_operations(tree, ids, _preset(merge="perGroup"))
     # BG 그룹 안의 3,4만 2개 이상 → 병합. 'lines'(5)는 단독이라 그대로.
     assert ops == [{"op": "merge", "layerIds": [3, 4], "name": "BG"}]
 
 
-def test_matched_non_pixel_layer_raises_valueerror():
-    # non-pixel 레이어 매치 → ValueError
-    tree = [
-        {
-            "id": 0,
-            "name": "line",
-            "kind": "type",  # not "pixel"
-            "visible": True,
-            "path": ["line"],
-        }
-    ]
-    with pytest.raises(ValueError, match="non-pixel layer"):
-        match_preset(tree, _preset())
+def _node(node_id, name, kind, has_pixels, **over):
+    node = {
+        "id": node_id, "name": name, "kind": kind, "visible": True,
+        "path": [name], "hasPixels": has_pixels,
+    }
+    node.update(over)
+    return node
+
+
+# 실제 작업 파일에서 온 이름들이다. 예전에는 이런 레이어 하나가 파일 전체의
+# 프리셋 적용을 실패시켜 아무것도 못 뽑았다.
+def test_text_note_is_skipped_even_though_photoshop_rasterized_it():
+    tree = [_node(0, "NOTE FOR LINE: apply penthouse wallpaper", "type", True)]
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == []
+    assert skipped == [{
+        "id": 0,
+        "path": "NOTE FOR LINE: apply penthouse wallpaper",
+        "kind": "type",
+        "reason": "text",
+    }]
+
+
+def test_a_smart_object_with_pixels_is_line_art_and_comes_through():
+    tree = [_node(0, "LINES", "smartobject", True, path=["LayOut", "BG", "trims", "LINES"])]
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == [0]
+    assert skipped == []
+
+
+def test_a_shape_layer_with_pixels_comes_through_too():
+    assert match_preset([_node(0, "line", "shape", True)], _preset()) == ([0], [])
+
+
+def test_a_layer_with_nothing_to_draw_is_skipped_and_named():
+    # 조정 레이어처럼 그릴 채널이 없는 것. 종류가 아니라 픽셀 유무로 가른다.
+    tree = [_node(0, "line curves", "curves", False)]
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == []
+    assert skipped[0]["reason"] == "noPixels"
+    assert skipped[0]["path"] == "line curves"
+
+
+def test_a_tree_from_before_hasPixels_still_matches_pixel_layers_only():
+    # 이 필드가 생기기 전의 트리(예: 옛 세션)에서도 동작이 달라지면 안 된다.
+    old_pixel = {"id": 0, "name": "line", "kind": "pixel", "visible": True, "path": ["line"]}
+    old_smart = {"id": 1, "name": "line2", "kind": "smartobject", "visible": True, "path": ["line2"]}
+
+    matched, skipped = match_preset([old_pixel, old_smart], _preset())
+
+    assert matched == [0]
+    assert [s["reason"] for s in skipped] == ["noPixels"]
 
 
 def test_unknown_include_type_raises_valueerror():

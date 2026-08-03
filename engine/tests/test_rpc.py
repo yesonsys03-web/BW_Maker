@@ -216,3 +216,24 @@ def test_engine_survives_non_ascii_requests_under_a_legacy_locale(tmp_path):
     # 파일이 없다는 정상 에러 응답이어야 하고, 경로의 한글이 그대로 살아 있어야 한다.
     assert msg["id"] == 1
     assert "한글 경로.psd" in msg["error"]["message"]
+
+
+# 메서드를 만들고 허용 목록에 넣는 것을 잊으면, 앱은 그 기능을 부르는 순간
+# "unknown method"로 실패한다 — 코드에는 멀쩡히 있으니 눈으로는 안 보인다.
+# 실제로 pin_session이 그렇게 빠졌다. 두 목록을 맞물려 둔다.
+def test_every_engine_method_is_dispatchable():
+    from psd_engine.rpc import Engine
+
+    public = {
+        name for name in vars(Engine)
+        if not name.startswith("_") and callable(getattr(Engine, name))
+    }
+    # handle은 디스패처 자신이라 RPC로 부를 수 없다.
+    assert public - {"handle"} == Engine._ALLOWED_METHODS
+
+
+def test_allowed_methods_all_exist():
+    from psd_engine.rpc import Engine
+
+    missing = [n for n in Engine._ALLOWED_METHODS if not hasattr(Engine, n)]
+    assert missing == []

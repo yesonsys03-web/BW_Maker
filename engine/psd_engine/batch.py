@@ -13,7 +13,7 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
     sid = store.open(path)
     try:
         s = store.get(sid)
-        matched = match_preset(s["tree"], preset)
+        matched, skipped = match_preset(s["tree"], preset)
         if not matched:
             raise ValueError(f"no layers matched in {path}")
         operations = preset_operations(s["tree"], matched, preset,
@@ -50,6 +50,9 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
             "outputPath": result["outputPath"],
             "layerCount": result["layerCount"],
             "verification": verification,
+            # 규칙에 걸렸지만 그릴 수 없어 뺀 레이어들. 실패가 아니므로 배치를
+            # 멈추지 않지만, 결과에 남겨야 나중에 "왜 이건 안 들어갔지"를 답할 수 있다.
+            "skippedLayers": skipped,
         }
     finally:
         store.close(sid)

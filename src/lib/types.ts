@@ -18,6 +18,12 @@ export interface OpenResult {
   colorMode: string;
   depth: number;
   tree: TreeNode[];
+  /**
+   * 파일이 마지막으로 바뀐 시각(엔진의 os.path.getmtime). 만들어둔 미리보기를
+   * 언제까지 재사용해도 되는지의 기준이다 — previewCache 참고. 이 필드가 생기기
+   * 전 세션과 섞일 수 있어 optional로 둔다.
+   */
+  mtime?: number;
 }
 
 /**

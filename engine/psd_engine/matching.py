@@ -14,8 +14,31 @@ def _name_matches(name, include):
     raise ValueError(f"unknown include type: {kind!r}")
 
 
+#: 픽셀을 들고 있어도 결과물에 넣지 않는 종류. 라인 PSD 안의 텍스트는 사실상
+#: 언제나 작업 메모다 — 실제로 만난 예가 "NOTE FOR LINE: apply penthouse
+#: wallpaper to this wall"이다. 포토샵이 텍스트도 래스터화해서 저장하기 때문에
+#: 픽셀 유무로는 걸러지지 않으므로 종류로 못박는다.
+NON_ART_KINDS = frozenset({"type"})
+
+#: 매칭에서 빠진 이유.
+SKIP_TEXT = "text"
+SKIP_NO_PIXELS = "noPixels"
+
+
 def match_preset(tree, preset):
+    """
+    규칙에 걸린 레이어 id와, 걸렸지만 그릴 수 없어 뺀 레이어들을 돌려준다.
+
+    예전에는 픽셀 레이어가 아니면 예외를 던졌다. 그런데 실제 작업 파일에는 이름에
+    line이 들어간 메모 텍스트와, 진짜 라인인 스마트오브젝트가 흔히 섞여 있다.
+    그것 하나 때문에 파일 전체가 실패하면 아무것도 못 뽑는다.
+
+    그래서 종류가 아니라 "그릴 픽셀이 있는가"로 가른다 — 스마트오브젝트와 셰이프는
+    래스터화된 채널을 함께 저장하므로 픽셀 레이어와 똑같이 렌더된다. 다만 텍스트는
+    픽셀이 있어도 뺀다(NON_ART_KINDS). 뺀 것은 조용히 버리지 않고 함께 돌려준다.
+    """
     matched = []
+    skipped = []
     prefixes = tuple(preset.get("excludeGroupPrefixes", []))
 
     def walk(nodes, inside_matched_group):
@@ -32,15 +55,25 @@ def match_preset(tree, preset):
                 continue
             if not node["visible"] and not preset.get("includeHidden", True):
                 continue
-            if node["kind"] != "pixel":
-                raise ValueError(
-                    f"matched non-pixel layer {'/'.join(node['path'])!r} "
-                    f"(kind={node['kind']}) — not supported in v1"
-                )
+            reason = None
+            if node["kind"] in NON_ART_KINDS:
+                reason = SKIP_TEXT
+            # hasPixels가 없는 트리는 이 필드가 생기기 전의 것이다. 그때의 유일한
+            # 통과 조건이 kind == "pixel"이었으므로 그대로 유지한다.
+            elif not node.get("hasPixels", node["kind"] == "pixel"):
+                reason = SKIP_NO_PIXELS
+            if reason:
+                skipped.append({
+                    "id": node["id"],
+                    "path": "/".join(node["path"]),
+                    "kind": node["kind"],
+                    "reason": reason,
+                })
+                continue
             matched.append(node["id"])
 
     walk(tree, False)
-    return matched
+    return matched, skipped
 
 
 #: 역할 접미사의 기본값. 요소 이름에서 이 접미사를 떼어내 "같은 요소"를 알아낸다

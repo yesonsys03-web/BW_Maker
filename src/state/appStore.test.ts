@@ -3,23 +3,45 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 // vi.mock factories are hoisted; only "mock"-prefixed outer vars are reachable inside them.
 const mockOpenPsd = vi.fn();
 const mockCloseSession = vi.fn();
+const mockApplyPreset = vi.fn();
 vi.mock("../lib/engine", async () => {
   const actual = await vi.importActual<typeof import("../lib/engine")>("../lib/engine");
   return {
     ...actual,
     openPsd: (...a: unknown[]) => mockOpenPsd(...a),
     closeSession: (...a: unknown[]) => mockCloseSession(...a),
+    applyPreset: (...a: unknown[]) => mockApplyPreset(...a),
   };
 });
 
 import { EngineRpcError } from "../lib/engine";
-import type { TreeNode } from "../lib/types";
-import { appReducer, openFileEffect, removeFileEffect, type AppAction, type AppState } from "./appStore";
+import type { Preset, TreeNode } from "../lib/types";
+import {
+  appReducer,
+  applyPresetEffect,
+  openFileEffect,
+  removeFileEffect,
+  type AppAction,
+  type AppState,
+} from "./appStore";
 
 beforeEach(() => {
   mockOpenPsd.mockReset();
   mockCloseSession.mockReset();
+  mockApplyPreset.mockReset();
 });
+
+const preset: Preset = {
+  name: "line",
+  includeRules: [],
+  excludeRules: [],
+  mergeRule: "none",
+  roleTokens: [],
+  naming: "original",
+  outputSuffix: "_line",
+  embedPreview: true,
+  lineColor: null,
+} as unknown as Preset;
 
 const initial: AppState = { files: [], activePath: null, opsByPath: {}, matchedIds: [], errors: [] };
 
@@ -68,14 +90,14 @@ describe("addFiles", () => {
 describe("open success/failure transitions", () => {
   test("openStart marks the file processing and sets it active", () => {
     let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
-    s = appReducer(s, { type: "openStart", path: "/a.psd" });
+    s = appReducer(s, { type: "openStart", path: "/a.psd", activate: true });
     expect(s.files[0].status).toBe("processing");
     expect(s.activePath).toBe("/a.psd");
   });
 
   test("openSuccess sets open status, tree/session fields, and derives initial ops", () => {
     let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
-    s = appReducer(s, { type: "openStart", path: "/a.psd" });
+    s = appReducer(s, { type: "openStart", path: "/a.psd", activate: true });
     s = appReducer(s, {
       type: "openSuccess",
       path: "/a.psd",
@@ -101,7 +123,7 @@ describe("open success/failure transitions", () => {
 
   test("openError marks the file error and pushes onto the error stack", () => {
     let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
-    s = appReducer(s, { type: "openStart", path: "/a.psd" });
+    s = appReducer(s, { type: "openStart", path: "/a.psd", activate: true });
     s = appReducer(s, {
       type: "openError",
       path: "/a.psd",
@@ -120,7 +142,7 @@ describe("open success/failure transitions", () => {
 describe("selectFile", () => {
   test("switches the active file without touching status/ops", () => {
     let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd", "/b.psd"] });
-    s = appReducer(s, { type: "openStart", path: "/a.psd" });
+    s = appReducer(s, { type: "openStart", path: "/a.psd", activate: true });
     s = appReducer(s, {
       type: "openSuccess",
       path: "/a.psd",
@@ -135,7 +157,7 @@ describe("selectFile", () => {
 describe("ops actions delegate to the active file's OpsState", () => {
   function opened(): AppState {
     let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
-    s = appReducer(s, { type: "openStart", path: "/a.psd" });
+    s = appReducer(s, { type: "openStart", path: "/a.psd", activate: true });
     return appReducer(s, {
       type: "openSuccess",
       path: "/a.psd",
@@ -250,6 +272,151 @@ describe("ops actions delegate to the active file's OpsState", () => {
   });
 });
 
+// 파일을 열면 App.tsx가 선택된 프리셋을 자동으로 적용한다. 그 효과는 오직
+// presetApplied === false 일 때만 도므로, 이 플래그가 언제 서고 언제 풀리는지가
+// "자동 적용이 사람이 해둔 편집을 덮지 않는다"는 보장 그 자체다.
+describe("presetApplied (자동 적용 래치)", () => {
+  function opened(sessionId = 1): AppState {
+    const s = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
+    return appReducer(s, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+  }
+
+  test("openSuccess arms it — a freshly opened file gets the preset applied", () => {
+    expect(opened().files[0].presetApplied).toBe(false);
+  });
+
+  test("presetApplyStarted latches before the engine answers, so a failure cannot loop", () => {
+    const s = appReducer(opened(), { type: "presetApplyStarted", path: "/a.psd" });
+    expect(s.files[0].presetApplied).toBe(true);
+  });
+
+  test("applyPresetResult latches too — a manual 적용 pre-empts the auto one", () => {
+    const s = appReducer(opened(), {
+      type: "applyPresetResult",
+      path: "/a.psd",
+      matchedLayerIds: [1],
+      operations: [],
+    });
+    expect(s.files[0].presetApplied).toBe(true);
+  });
+
+  test("sessionRefreshed leaves it latched — an evicted-session reopen must not re-apply over edits", () => {
+    const applied = appReducer(opened(1), { type: "presetApplyStarted", path: "/a.psd" });
+    const s = appReducer(applied, {
+      type: "sessionRefreshed",
+      path: "/a.psd",
+      result: { sessionId: 99, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+    expect(s.files[0]).toMatchObject({ sessionId: 99, presetApplied: true });
+  });
+
+  test("engineRestarted clears it — every file reopens from scratch, so it re-applies", () => {
+    const applied = appReducer(opened(), { type: "presetApplyStarted", path: "/a.psd" });
+    const s = appReducer(applied, { type: "engineRestarted" });
+    expect(s.files[0].presetApplied).toBeUndefined();
+  });
+
+  test("it is per file, so opening a second file does not disarm the first", () => {
+    let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd", "/b.psd"] });
+    s = appReducer(s, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+    s = appReducer(s, { type: "presetApplyStarted", path: "/a.psd" });
+    s = appReducer(s, {
+      type: "openSuccess",
+      path: "/b.psd",
+      result: { sessionId: 2, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+    expect(s.files.map((f) => f.presetApplied)).toEqual([true, false]);
+  });
+});
+
+// "적용"의 "기존 편집 내용을 대체합니다" 확인창이 이 플래그로 뜬다. ops가 비어
+// 있는지로 보지 않는 이유가 핵심이다: 프리셋 적용 자체가 ops를 만들기 때문에,
+// 자동 적용이 들어간 뒤로는 파일을 열기만 해도 ops가 차 있다.
+describe("edited (수동 편집 표시)", () => {
+  function opened(): AppState {
+    const s = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
+    return appReducer(s, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+  }
+
+  test("a freshly opened file counts as untouched", () => {
+    expect(opened().files[0].edited).toBe(false);
+  });
+
+  test("an auto-applied preset leaves the file untouched even though it filled ops", () => {
+    const s = appReducer(opened(), {
+      type: "applyPresetResult",
+      path: "/a.psd",
+      matchedLayerIds: [1, 5],
+      operations: [{ op: "merge", layerIds: [1, 5], name: "M" }],
+    });
+    // 이것이 회귀 방지의 요점: ops는 찼지만 지울 사람의 편집은 없다.
+    expect(s.opsByPath["/a.psd"].ops).toHaveLength(1);
+    expect(s.files[0].edited).toBe(false);
+  });
+
+  test("pushOp marks it", () => {
+    const s = appReducer(opened(), { type: "pushOp", path: "/a.psd", op: { op: "merge", layerIds: [1, 2], name: "M" } });
+    expect(s.files[0].edited).toBe(true);
+  });
+
+  test("setIncluded marks it", () => {
+    const s = appReducer(opened(), { type: "setIncluded", path: "/a.psd", includedIds: [1] });
+    expect(s.files[0].edited).toBe(true);
+  });
+
+  test("undoOp marks it — undoing a preset's merge is a human decision too", () => {
+    const applied = appReducer(opened(), {
+      type: "applyPresetResult",
+      path: "/a.psd",
+      matchedLayerIds: [1, 5],
+      operations: [{ op: "merge", layerIds: [1, 5], name: "M" }],
+    });
+    const s = appReducer(applied, { type: "undoOp", path: "/a.psd" });
+    expect(s.files[0].edited).toBe(true);
+  });
+
+  test("an edit that failed does not mark it — nothing changed, so nothing needs protecting", () => {
+    // exclude는 buildEntries가 받지 않는 op라 여기서 예외가 난다(opsReducer).
+    const s = appReducer(opened(), { type: "pushOp", path: "/a.psd", op: { op: "exclude", layerIds: [1] } });
+    expect(s.errors).toHaveLength(1);
+    expect(s.files[0].edited).toBe(false);
+    expect(s.opsByPath["/a.psd"].ops).toEqual([]);
+  });
+
+  test("an op that matches nothing still marks it — it is in the history and a re-apply would drop it", () => {
+    const s = appReducer(opened(), { type: "pushOp", path: "/a.psd", op: { op: "rename", layerId: 999, name: "x" } });
+    expect(s.opsByPath["/a.psd"].ops).toHaveLength(1);
+    expect(s.files[0].edited).toBe(true);
+  });
+
+  test("re-applying a preset clears it — the edits are gone, so nothing is left to protect", () => {
+    const edited = appReducer(opened(), {
+      type: "pushOp",
+      path: "/a.psd",
+      op: { op: "merge", layerIds: [1, 2], name: "M" },
+    });
+    const s = appReducer(edited, {
+      type: "applyPresetResult",
+      path: "/a.psd",
+      matchedLayerIds: [1],
+      operations: [],
+    });
+    expect(s.files[0].edited).toBe(false);
+  });
+});
+
 describe("error stack management", () => {
   test("dismissError removes by index", () => {
     let s = appReducer(initial, { type: "pushError", title: "t1", error: { message: "e1", traceback: "" } });
@@ -262,13 +429,13 @@ describe("error stack management", () => {
 describe("removeFile", () => {
   function twoFilesOpened(): AppState {
     let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd", "/b.psd"] });
-    s = appReducer(s, { type: "openStart", path: "/a.psd" });
+    s = appReducer(s, { type: "openStart", path: "/a.psd", activate: true });
     s = appReducer(s, {
       type: "openSuccess",
       path: "/a.psd",
       result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
     });
-    s = appReducer(s, { type: "openStart", path: "/b.psd" });
+    s = appReducer(s, { type: "openStart", path: "/b.psd", activate: true });
     return appReducer(s, {
       type: "openSuccess",
       path: "/b.psd",
@@ -353,7 +520,7 @@ describe("openFileEffect (async orchestration against the mocked engine)", () =>
     mockOpenPsd.mockResolvedValue({ sessionId: 9, width: 1, height: 1, colorMode: "RGB", depth: 8, tree: [] });
     const actions: AppAction[] = [];
     await openFileEffect((a) => actions.push(a), "/a.psd");
-    expect(actions[0]).toEqual({ type: "openStart", path: "/a.psd" });
+    expect(actions[0]).toEqual({ type: "openStart", path: "/a.psd", activate: true });
     expect(actions[1].type).toBe("openSuccess");
   });
 
@@ -361,12 +528,123 @@ describe("openFileEffect (async orchestration against the mocked engine)", () =>
     mockOpenPsd.mockRejectedValue(new EngineRpcError({ message: "boom", traceback: "Traceback ..." }));
     const actions: AppAction[] = [];
     await openFileEffect((a) => actions.push(a), "/a.psd");
-    expect(actions[0]).toEqual({ type: "openStart", path: "/a.psd" });
+    expect(actions[0]).toEqual({ type: "openStart", path: "/a.psd", activate: true });
     expect(actions[1]).toEqual({
       type: "openError",
       path: "/a.psd",
       error: { message: "boom", traceback: "Traceback ..." },
     });
+  });
+});
+
+describe("openFileEffect background mode (로드 큐가 쓰는 경로)", () => {
+  test("does not steal the active file, and hands back the session so the preset can follow", async () => {
+    const result = { sessionId: 7, width: 1, height: 1, colorMode: "RGB", depth: 8, tree: [] };
+    mockOpenPsd.mockResolvedValue(result);
+    const actions: AppAction[] = [];
+
+    const returned = await openFileEffect((a) => actions.push(a), "/a.psd", { activate: false });
+
+    expect(actions[0]).toEqual({ type: "openStart", path: "/a.psd", activate: false });
+    // 세션 id 없이는 큐가 프리셋을 이어 붙일 수 없다.
+    expect(returned).toEqual(result);
+  });
+
+  test("returns null when the open failed, so the caller skips the preset step", async () => {
+    mockOpenPsd.mockRejectedValue(new EngineRpcError({ message: "boom", traceback: "" }));
+    const actions: AppAction[] = [];
+    await expect(openFileEffect((a) => actions.push(a), "/a.psd", { activate: false })).resolves.toBeNull();
+    expect(actions[1].type).toBe("openError");
+  });
+});
+
+describe("applyPresetEffect (자동 적용의 실제 동작)", () => {
+  test("latches before calling the engine, then lands the match on that path", async () => {
+    mockApplyPreset.mockResolvedValue({ matchedLayerIds: [1, 5], operations: [] });
+    const actions: AppAction[] = [];
+
+    await applyPresetEffect((a) => actions.push(a), "/a.psd", 3, preset);
+
+    // 순서가 핵심이다: 래치가 엔진 호출보다 먼저 서야 재진입이 막힌다.
+    expect(actions[0]).toEqual({ type: "presetApplyStarted", path: "/a.psd" });
+    expect(mockApplyPreset).toHaveBeenCalledWith(3, preset);
+    expect(actions[1]).toEqual({
+      type: "applyPresetResult",
+      path: "/a.psd",
+      matchedLayerIds: [1, 5],
+      operations: [],
+    });
+  });
+
+  test("a text note that matched is dropped without a word — that exclusion is the rule itself", async () => {
+    mockApplyPreset.mockResolvedValue({
+      matchedLayerIds: [1],
+      operations: [],
+      skippedLayers: [{ id: 9, path: "*ART/BG/NOTE FOR LINE: repaint", kind: "type", reason: "text" }],
+    });
+    const actions: AppAction[] = [];
+
+    const undrawable = await applyPresetEffect((a) => actions.push(a), "/a.psd", 3, preset);
+
+    expect(undrawable).toEqual([]);
+    expect(actions.some((a) => a.type === "pushError")).toBe(false);
+  });
+
+  // 알림을 여기서 띄우지 않고 돌려주는 이유: 한꺼번에 불러올 때 파일마다 카드를
+  // 내면 화면이 카드로 덮여 진짜 오류가 묻힌다. 부르는 쪽이 모아서 낸다.
+  test("art that matched but had no pixels is handed back, so the caller decides when to say it", async () => {
+    mockApplyPreset.mockResolvedValue({
+      matchedLayerIds: [1],
+      operations: [],
+      skippedLayers: [
+        { id: 9, path: "LayOut/BG/line curves", kind: "curves", reason: "noPixels" },
+        { id: 8, path: "*ART/NOTE FOR LINE: x", kind: "type", reason: "text" },
+      ],
+    });
+    const actions: AppAction[] = [];
+
+    const undrawable = await applyPresetEffect((a) => actions.push(a), "/a.psd", 3, preset);
+
+    expect(undrawable).toEqual([{ id: 9, path: "LayOut/BG/line curves", kind: "curves", reason: "noPixels" }]);
+    expect(actions.some((a) => a.type === "pushError")).toBe(false);
+    // 매칭 결과 자체는 그대로 반영된다 — 빠진 레이어가 적용을 막지 않는다.
+    expect(actions.some((a) => a.type === "applyPresetResult")).toBe(true);
+  });
+
+  test("a failed apply hands back nothing rather than a stale list", async () => {
+    mockApplyPreset.mockRejectedValue(new EngineRpcError({ message: "boom", traceback: "" }));
+    await expect(applyPresetEffect(() => {}, "/a.psd", 3, preset)).resolves.toEqual([]);
+  });
+
+  test("a failure is reported with the file name and leaves the latch standing", async () => {
+    mockApplyPreset.mockRejectedValue(new EngineRpcError({ message: "boom", traceback: "Traceback ..." }));
+    const actions: AppAction[] = [];
+
+    await applyPresetEffect((a) => actions.push(a), "/a.psd", 3, preset);
+
+    expect(actions[0]).toEqual({ type: "presetApplyStarted", path: "/a.psd" });
+    expect(actions[1]).toEqual({
+      type: "pushError",
+      title: "프리셋 자동 적용 실패: /a.psd",
+      error: { message: "boom", traceback: "Traceback ..." },
+    });
+    // applyPresetResult가 없으므로 래치를 푸는 것도 없다 — 재시도는 사람이 "적용"으로.
+    expect(actions.some((a) => a.type === "applyPresetResult")).toBe(false);
+  });
+
+  test("an evicted session is reopened transparently and the match still lands", async () => {
+    mockApplyPreset
+      .mockRejectedValueOnce(new EngineRpcError({ message: "'unknown or evicted session: 3'", traceback: "" }))
+      .mockResolvedValueOnce({ matchedLayerIds: [2], operations: [] });
+    const reopened = { sessionId: 9, width: 1, height: 1, colorMode: "RGB", depth: 8, tree: [] };
+    mockOpenPsd.mockResolvedValue(reopened);
+    const actions: AppAction[] = [];
+
+    await applyPresetEffect((a) => actions.push(a), "/a.psd", 3, preset);
+
+    expect(actions[1]).toEqual({ type: "sessionRefreshed", path: "/a.psd", result: reopened });
+    expect(mockApplyPreset).toHaveBeenLastCalledWith(9, preset);
+    expect(actions[2]).toMatchObject({ type: "applyPresetResult", matchedLayerIds: [2] });
   });
 });
 

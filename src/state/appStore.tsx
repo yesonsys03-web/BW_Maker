@@ -7,9 +7,10 @@ import {
   type Dispatch,
   type ReactNode,
 } from "react";
-import { EngineRpcError, closeSession, openPsd } from "../lib/engine";
+import { EngineRpcError, applyPreset, closeSession, openPsd, type SkippedLayer } from "../lib/engine";
 import { buildEntries, opsReducer, type OpsState } from "../lib/opsReducer";
-import type { EngineError, OpenResult, Operation, TreeNode } from "../lib/types";
+import { withEvictedSessionRetry } from "../lib/sessionRetry";
+import type { EngineError, OpenResult, Operation, Preset, TreeNode } from "../lib/types";
 
 export type FileStatus = "idle" | "open" | "processing" | "done" | "error";
 
@@ -20,6 +21,33 @@ export interface FileEntry {
   tree?: TreeNode[];
   width?: number;
   height?: number;
+  /**
+   * 지금 열려 있는 이 세션에 프리셋 적용이 이미 걸렸는지. 파일을 열면 선택된
+   * 프리셋이 자동으로 적용되는데(App.tsx), 그것이 세션당 한 번만 걸리게 하는
+   * 래치다. 적용을 시작하는 시점에 세우므로 적용이 실패해도 무한 재시도로
+   * 번지지 않는다 — 실패는 ErrorPanel에 남고, 재시도는 사람이 "적용"으로 한다.
+   *
+   * `openSuccess`는 false로 되돌린다(새로 연 파일이니 다시 걸어야 한다).
+   * `sessionRefreshed`는 건드리지 않는다: 축출 후 재오픈은 같은 파일의 편집을
+   * 그대로 이어가는 것이므로, 자동 적용이 그 위를 덮으면 안 된다.
+   */
+  /**
+   * 파일이 마지막으로 바뀐 시각(엔진이 열면서 읽어온 값). 만들어둔 미리보기를
+   * 재사용해도 되는지의 기준이다 — lib/previewCache 참고.
+   */
+  mtime?: number;
+  presetApplied?: boolean;
+  /**
+   * 사람이 이 파일을 직접 손댔는지 — 병합/이름변경(pushOp), 포함 체크 변경
+   * (setIncluded), 되돌리기(undoOp). "적용"이 띄우는 "기존 편집 내용을
+   * 대체합니다" 확인창의 근거다.
+   *
+   * ops가 비어 있는지로 판단하지 않는 이유: 프리셋 적용은 그 자체로 ops를
+   * 만들기 때문에, 자동 적용이 들어간 뒤로는 파일을 열기만 해도 ops가 차 있다.
+   * 그걸 근거로 삼으면 아무것도 손대지 않은 파일에서 프리셋만 바꿔 눌러도
+   * "편집 내용이 사라진다"는 경고가 뜬다 — 지울 편집이 없는데도.
+   */
+  edited?: boolean;
 }
 
 export interface ErrorEntry {
@@ -37,7 +65,7 @@ export interface AppState {
 
 export type AppAction =
   | { type: "addFiles"; paths: string[] }
-  | { type: "openStart"; path: string }
+  | { type: "openStart"; path: string; activate: boolean }
   | { type: "openSuccess"; path: string; result: OpenResult }
   | { type: "openError"; path: string; error: EngineError }
   | { type: "selectFile"; path: string }
@@ -47,6 +75,7 @@ export type AppAction =
   | { type: "pushOp"; path: string; op: Operation }
   | { type: "setIncluded"; path: string; includedIds: number[] }
   | { type: "applyPresetResult"; path: string; matchedLayerIds: number[]; operations: Operation[] }
+  | { type: "presetApplyStarted"; path: string }
   | { type: "undoOp"; path: string }
   | { type: "dismissError"; index: number }
   | { type: "pushError"; title: string; error: EngineError }
@@ -122,7 +151,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "openStart":
       return {
         ...state,
-        activePath: action.path,
+        // 목록에 추가되자마자 배경에서 미리 여는 중이라면(App.tsx의 로드 큐)
+        // 보고 있던 파일을 뺏지 않는다. 클릭으로 여는 경우만 화면을 옮긴다.
+        activePath: action.activate ? action.path : state.activePath,
         files: updateFile(state.files, action.path, { status: "processing" }),
       };
 
@@ -137,6 +168,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           tree: result.tree,
           width: result.width,
           height: result.height,
+          mtime: result.mtime,
+          // 새로 연 파일이므로 자동 적용을 다시 걸어야 하고, 이전 세션에서의
+          // 편집 표시도 함께 사라진다(ops 자체가 아래에서 초기화된다).
+          presetApplied: false,
+          edited: false,
         }),
         opsByPath: { ...state.opsByPath, [path]: buildInitialOpsState(result.tree) },
       };
@@ -180,7 +216,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       if (!current) return state;
       try {
         const next = opsReducer(current, { type: "pushOp", op: action.op });
-        return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
+        return {
+          ...state,
+          files: updateFile(state.files, action.path, { edited: true }),
+          opsByPath: { ...state.opsByPath, [action.path]: next },
+        };
       } catch (e) {
         return {
           ...state,
@@ -194,7 +234,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       if (!current) return state;
       try {
         const next = opsReducer(current, { type: "setIncluded", includedIds: action.includedIds });
-        return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
+        return {
+          ...state,
+          files: updateFile(state.files, action.path, { edited: true }),
+          opsByPath: { ...state.opsByPath, [action.path]: next },
+        };
       } catch (e) {
         // 원래는 여기서 "이 레이어를 참조하는 편집이 있으니 먼저 되돌리라"는
         // 안내로 실제 메시지를 덮어썼다. 그 상황(병합에 쓰인 레이어의 체크 해제)
@@ -222,6 +266,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         return {
           ...state,
           matchedIds: action.matchedLayerIds,
+          // presetApplied: 사람이 "적용"을 먼저 눌렀다면 자동 적용이 그 위에 또
+          // 걸릴 이유가 없다. edited: 여기서 만들어진 ops는 프리셋의 산물이지
+          // 사람의 편집이 아니므로, 지금 상태에는 지킬 편집이 없다.
+          files: updateFile(state.files, action.path, { presetApplied: true, edited: false }),
           opsByPath: { ...state.opsByPath, [action.path]: next },
         };
       } catch (e) {
@@ -232,12 +280,23 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       }
     }
 
+    // 자동 적용이 시작됐다는 표시. 결과가 돌아오기 전에 세우는 것이 요점이다 —
+    // 실패해도 래치가 남아 같은 세션에 자동 적용이 다시 걸리지 않는다.
+    case "presetApplyStarted":
+      return { ...state, files: updateFile(state.files, action.path, { presetApplied: true }) };
+
     case "undoOp": {
       const current = state.opsByPath[action.path];
       if (!current || current.ops.length === 0) return state;
       try {
         const next = opsReducer(current, { type: "undo" });
-        return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
+        // 되돌리기도 사람의 편집이다. 프리셋이 만든 병합을 하나 되돌린 상태를
+        // 다시 적용으로 덮으려 할 때 확인을 받아야 한다.
+        return {
+          ...state,
+          files: updateFile(state.files, action.path, { edited: true }),
+          opsByPath: { ...state.opsByPath, [action.path]: next },
+        };
       } catch (e) {
         return {
           ...state,
@@ -280,6 +339,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           tree: result.tree,
           width: result.width,
           height: result.height,
+          // 다시 읽어온 파일이므로 수정 시각도 갱신한다. 그 사이 아티스트가
+          // 저장했다면 여기서 값이 달라지고, 만들어둔 미리보기는 자연히 버려진다.
+          mtime: result.mtime,
         }),
       };
     }
@@ -308,15 +370,69 @@ export function appReducer(state: AppState, action: AppAction): AppState {
  * engine, then dispatches openSuccess/openError. Kept as a standalone
  * function (not inlined in a component) so it can be unit-tested with a
  * mocked engine module and a plain dispatch collector.
+ *
+ * `activate: false`는 목록에 추가되자마자 배경에서 미리 여는 경우다 — 그때는
+ * 보고 있던 파일을 뺏지 않는다. 열린 결과를 돌려주는 것은 호출자가 곧바로
+ * 프리셋을 적용할 수 있게 하기 위해서다(세션이 아직 엔진의 LRU 안에 있을 때).
+ * 실패는 openError로 이미 보고했으므로 null을 돌려준다.
  */
-export async function openFileEffect(dispatch: Dispatch<AppAction>, path: string): Promise<void> {
-  dispatch({ type: "openStart", path });
+export async function openFileEffect(
+  dispatch: Dispatch<AppAction>,
+  path: string,
+  options: { activate?: boolean } = {}
+): Promise<OpenResult | null> {
+  dispatch({ type: "openStart", path, activate: options.activate !== false });
   try {
     const result = await openPsd(path);
     dispatch({ type: "openSuccess", path, result });
+    return result;
   } catch (e) {
     const error: EngineError = e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
     dispatch({ type: "openError", path, error });
+    return null;
+  }
+}
+
+/**
+ * 열린 파일에 프리셋을 적용한다. 파일을 클릭해서 열었든 로드 큐가 미리 열었든
+ * 같은 함수를 쓰므로 두 경로의 결과가 갈라지지 않는다.
+ *
+ * presetApplyStarted를 엔진 호출 *전에* 보내는 것이 요점이다: 이 래치가 서 있어야
+ * 자동 적용이 같은 세션에 두 번 걸리지 않고, 적용이 실패해도 재시도로 번지지
+ * 않는다(FileEntry.presetApplied 주석 참고).
+ */
+export async function applyPresetEffect(
+  dispatch: Dispatch<AppAction>,
+  path: string,
+  sessionId: number,
+  preset: Preset
+): Promise<SkippedLayer[]> {
+  dispatch({ type: "presetApplyStarted", path });
+  try {
+    const result = await withEvictedSessionRetry(
+      path,
+      sessionId,
+      (sid) => applyPreset(sid, preset),
+      (r) => dispatch({ type: "sessionRefreshed", path, result: r })
+    );
+    dispatch({
+      type: "applyPresetResult",
+      path,
+      matchedLayerIds: result.matchedLayerIds,
+      operations: result.operations,
+    });
+    // 규칙에 걸렸는데 그릴 것이 없어 빠진 레이어. 이름은 LINE인데 결과에 없으면
+    // 사람이 그 이유를 알 방법이 없으므로 돌려준다. 텍스트는 빼는 것이 규칙
+    // 자체이므로(라인 PSD의 텍스트는 작업 메모다) 여기 담지 않는다.
+    //
+    // 여기서 바로 알리지 않고 돌려주는 이유: 파일을 한꺼번에 불러올 때 파일마다
+    // 카드를 띄우면 화면이 카드로 덮여 진짜 오류가 묻힌다. 언제 어떻게 알릴지는
+    // 부르는 쪽이 정한다(App.tsx의 로드 큐는 끝에 한 장으로 모아 띄운다).
+    return (result.skippedLayers ?? []).filter((s) => s.reason !== "text");
+  } catch (e) {
+    const error: EngineError = e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
+    dispatch({ type: "pushError", title: `프리셋 자동 적용 실패: ${path}`, error });
+    return [];
   }
 }
 

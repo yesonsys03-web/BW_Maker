@@ -1,16 +1,33 @@
-import { useEffect, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { collectPsdFiles } from "../lib/engine";
+import { describeScan } from "../lib/fileScan";
 import { toEngineError } from "../lib/preview";
 import type { EngineError } from "../lib/types";
 import type { FileEntry, FileStatus } from "../state/appStore";
 
+interface LoadBar {
+  done: number;
+  total: number;
+  label: string;
+}
+
 interface FilePanelProps {
   files: FileEntry[];
   activePath: string | null;
+  /** 파일을 여는 큐의 진행 상황. 안 돌고 있으면 null. */
+  loadProgress: LoadBar | null;
+  /**
+   * 미리보기를 미리 만들어 두는 큐의 진행 상황. 여는 작업이 끝난 뒤에 도는
+   * 뒷정리라 진행바는 같은 자리에 쓰되 문구로 구분한다 — 이건 기다릴 필요가
+   * 없고, 도는 중에도 파일을 눌러 작업할 수 있다.
+   */
+  prefetchProgress: LoadBar | null;
   onAddFiles: (paths: string[]) => void;
   onSelectFile: (path: string) => void;
   onRemoveFile: (path: string) => void;
+  onCancelLoad: () => void;
   onError: (title: string, error: EngineError) => void;
 }
 
@@ -27,8 +44,74 @@ function fileName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemoveFile, onError }: FilePanelProps) {
+function ProgressBar({ progress, onCancel }: { progress: LoadBar; onCancel: () => void }) {
+  return (
+    <div className="file-load-progress">
+      <div className="export-progress-bar">
+        <div
+          className="export-progress-fill"
+          style={{ width: progress.total > 0 ? `${(progress.done / progress.total) * 100}%` : "0%" }}
+        />
+      </div>
+      <div className="file-load-progress-row">
+        <span className="export-progress-label">
+          {progress.label}... {progress.done}/{progress.total}
+        </span>
+        <button type="button" onClick={onCancel}>
+          중지
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function FilePanel({
+  files,
+  activePath,
+  loadProgress,
+  prefetchProgress,
+  onAddFiles,
+  onSelectFile,
+  onRemoveFile,
+  onCancelLoad,
+  onError,
+}: FilePanelProps) {
   const [isDragOver, setIsDragOver] = useState(false);
+  const [scanning, setScanning] = useState(false);
+
+  // The drag/drop subscription below is registered once and closes over
+  // addPaths, so addPaths must not change identity every time a file lands in
+  // the list — otherwise every add tears down and re-registers the listener.
+  // The current list is read through this ref instead of a dependency.
+  const filesRef = useRef(files);
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  // Folder picking and dropping funnel through here: collect_psd_files walks
+  // folders recursively, passes .psd files through, and drops the rest, so a
+  // folder, a pile of files, or both at once need no separate handling.
+  const addPaths = useCallback(
+    async (paths: string[]) => {
+      if (paths.length === 0) return;
+      setScanning(true);
+      try {
+        const scan = await collectPsdFiles(paths);
+        const existing = new Set(filesRef.current.map((f) => f.path));
+        const alreadyPresent = scan.files.filter((p) => existing.has(p)).length;
+        if (scan.files.length > 0) onAddFiles(scan.files);
+        // Nothing found, a capped walk, an unreadable folder: the list alone
+        // can't say any of that, so it goes to the error panel.
+        const notice = describeScan(scan, alreadyPresent);
+        if (notice) onError("파일 추가", { message: notice, traceback: "" });
+      } catch (e) {
+        onError("파일 추가 실패", toEngineError(e));
+      } finally {
+        setScanning(false);
+      }
+    },
+    [onAddFiles, onError]
+  );
 
   // Primary drop path: Tauri's webview-level drag/drop event, which carries
   // real filesystem paths regardless of whether the browser's native HTML5
@@ -43,8 +126,7 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
           setIsDragOver(true);
         } else if (payload.type === "drop") {
           setIsDragOver(false);
-          const psdPaths = payload.paths.filter((p) => p.toLowerCase().endsWith(".psd"));
-          if (psdPaths.length > 0) onAddFiles(psdPaths);
+          void addPaths(payload.paths);
         } else {
           setIsDragOver(false);
         }
@@ -61,7 +143,7 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
       cancelled = true;
       unlisten?.();
     };
-  }, [onAddFiles]);
+  }, [addPaths]);
 
   async function handleBrowse() {
     try {
@@ -74,6 +156,19 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
       if (paths.length > 0) onAddFiles(paths);
     } catch (e) {
       onError("파일 선택 실패", toEngineError(e));
+    }
+  }
+
+  // Picking a folder pulls in every .psd beneath it, sub-folders included —
+  // work that arrives split one folder per cut goes in with a single pick.
+  async function handleBrowseFolder() {
+    try {
+      const selection = await open({ directory: true, multiple: true });
+      if (!selection) return;
+      const dirs = Array.isArray(selection) ? selection : [selection];
+      await addPaths(dirs);
+    } catch (e) {
+      onError("폴더 선택 실패", toEngineError(e));
     }
   }
 
@@ -96,17 +191,30 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
       const withPath = file as File & { path?: string };
       if (withPath.path) paths.push(withPath.path);
     }
-    if (paths.length > 0) onAddFiles(paths);
+    void addPaths(paths);
   }
 
   return (
     <div className="file-panel">
       <div className="file-panel-header">
         <span>파일</span>
-        <button type="button" onClick={() => void handleBrowse()}>
-          + 추가
-        </button>
+        <div className="file-panel-actions">
+          <button type="button" onClick={() => void handleBrowse()} disabled={scanning}>
+            + 추가
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleBrowseFolder()}
+            disabled={scanning}
+            title="폴더 안의 PSD를 하위 폴더까지 모두 추가합니다"
+          >
+            {scanning ? "읽는 중..." : "+ 폴더"}
+          </button>
+        </div>
       </div>
+      {(loadProgress ?? prefetchProgress) && (
+        <ProgressBar progress={(loadProgress ?? prefetchProgress)!} onCancel={onCancelLoad} />
+      )}
       <div
         className={`file-drop-zone${isDragOver ? " drag-over" : ""}`}
         onDragOver={handleDragOver}
@@ -114,7 +222,9 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
         onDrop={handleDrop}
       >
         {files.length === 0 ? (
-          <p className="file-drop-hint">PSD 파일을 여기로 끌어다 놓거나 위의 + 추가 버튼을 사용하세요.</p>
+          <p className="file-drop-hint">
+            PSD 파일이나 폴더를 여기로 끌어다 놓거나 위의 + 추가 / + 폴더 버튼을 사용하세요.
+          </p>
         ) : (
           <ul className="file-list">
             {files.map((file) => (
