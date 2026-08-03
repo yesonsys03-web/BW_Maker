@@ -6,28 +6,42 @@ function isGroup(node: TreeNode): boolean {
 }
 
 /**
- * Preview-visible pixel leaf ids, in document order: included (checkbox on)
- * and not preview-hidden (eye toggle off). Merge/rename/flatten/reorder ops
- * never change which source pixels compose the flattened image, so this only
- * needs includedIds/previewHiddenIds against the original tree shape — the
+ * Preview-visible pixel leaf ids, in document order.
+ *
+ * solo가 비어 있으면 지금까지와 같다: 체크됐고(includedIds) 눈이 켜진
+ * (previewHiddenIds에 없는) pixel leaf.
+ *
+ * solo가 하나라도 있으면 solo된 것만 그린다 — 체크박스와 눈을 둘 다 무시한다.
+ * "이게 라인인가?"를 확인하려면 아직 체크하지 않은 레이어도 봐야 하고, 앞서 무엇을
+ * 꺼뒀는지 기억하지 않아도 되어야 하기 때문이다. solo를 풀면 두 상태가 그대로
+ * 살아 있으므로 원래 화면으로 돌아온다.
+ *
+ * Merge/rename/flatten/reorder ops never change which source pixels compose the
+ * flattened image, so this only needs the original tree shape — the
  * `entries`/ops layer is irrelevant to what gets rendered.
  */
 export function visibleIdsForPreview(
   tree: TreeNode[],
   includedIds: number[],
-  previewHiddenIds: number[]
+  previewHiddenIds: number[],
+  soloIds: number[]
 ): number[] {
   const includedSet = new Set(includedIds);
   const hiddenSet = new Set(previewHiddenIds);
+  const soloSet = new Set(soloIds);
   const out: number[] = [];
 
   function walk(nodes: TreeNode[]) {
     for (const node of nodes) {
       if (isGroup(node)) {
         walk(node.children ?? []);
-      } else if (node.kind === "pixel" && includedSet.has(node.id) && !hiddenSet.has(node.id)) {
-        out.push(node.id);
+        continue;
       }
+      if (node.kind !== "pixel") continue;
+      const visible = soloSet.size > 0
+        ? soloSet.has(node.id)
+        : includedSet.has(node.id) && !hiddenSet.has(node.id);
+      if (visible) out.push(node.id);
     }
   }
 

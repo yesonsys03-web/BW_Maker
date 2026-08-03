@@ -41,36 +41,65 @@ const tree: TreeNode[] = [
 ];
 
 test("all included and not preview-hidden yields every pixel leaf in document order", () => {
-  expect(visibleIdsForPreview(tree, [1, 2, 5, 7, 8], [])).toEqual([1, 2, 5, 7, 8]);
+  expect(visibleIdsForPreview(tree, [1, 2, 5, 7, 8], [], [])).toEqual([1, 2, 5, 7, 8]);
 });
 
 test("excluded (not included) ids are dropped even when not preview-hidden", () => {
-  expect(visibleIdsForPreview(tree, [1, 5, 7, 8], [])).toEqual([1, 5, 7, 8]);
+  expect(visibleIdsForPreview(tree, [1, 5, 7, 8], [], [])).toEqual([1, 5, 7, 8]);
 });
 
 test("preview-hidden ids are dropped even when included", () => {
-  expect(visibleIdsForPreview(tree, [1, 2, 5, 7, 8], [5])).toEqual([1, 2, 7, 8]);
+  expect(visibleIdsForPreview(tree, [1, 2, 5, 7, 8], [5], [])).toEqual([1, 2, 7, 8]);
 });
 
 test("both excluded and preview-hidden combine (either drops the id)", () => {
-  expect(visibleIdsForPreview(tree, [1, 5, 7, 8], [7])).toEqual([1, 5, 8]);
+  expect(visibleIdsForPreview(tree, [1, 5, 7, 8], [7], [])).toEqual([1, 5, 8]);
 });
 
 test("result order follows the tree/document order, not the includedIds argument order", () => {
-  expect(visibleIdsForPreview(tree, [8, 1, 5], [])).toEqual([1, 5, 8]);
+  expect(visibleIdsForPreview(tree, [8, 1, 5], [], [])).toEqual([1, 5, 8]);
 });
 
 test("non-pixel ids (group or type) in includedIds/previewHiddenIds are ignored, not surfaced", () => {
   // 3 and 6 are groups, 4 is a non-pixel leaf; none should ever appear in the output.
-  expect(visibleIdsForPreview(tree, [1, 2, 3, 4, 5, 6, 7, 8], [3, 4, 6])).toEqual([1, 2, 5, 7, 8]);
+  expect(visibleIdsForPreview(tree, [1, 2, 3, 4, 5, 6, 7, 8], [3, 4, 6], [])).toEqual([1, 2, 5, 7, 8]);
 });
 
 test("empty includedIds yields an empty preview", () => {
-  expect(visibleIdsForPreview(tree, [], [])).toEqual([]);
+  expect(visibleIdsForPreview(tree, [], [], [])).toEqual([]);
 });
 
 test("empty tree yields an empty preview regardless of ids", () => {
-  expect(visibleIdsForPreview([], [1, 2], [])).toEqual([]);
+  expect(visibleIdsForPreview([], [1, 2], [], [])).toEqual([]);
+});
+
+// --- solo (설계 문서 2절) ---
+
+test("solo shows only the soloed leaves", () => {
+  expect(visibleIdsForPreview(tree, [1, 2, 5, 7, 8], [], [2, 7])).toEqual([2, 7]);
+});
+
+// solo는 "이것만 보여달라"는 뜻이지 "내보낼 것 중에서 고른다"가 아니다. 아직
+// 체크하지 않은 레이어가 라인인지 확인하는 것이 이 기능의 목적이다.
+test("solo ignores the include checkbox", () => {
+  expect(visibleIdsForPreview(tree, [], [], [5])).toEqual([5]);
+});
+
+test("solo ignores the eye toggle", () => {
+  expect(visibleIdsForPreview(tree, [1, 2, 5, 7, 8], [5], [5])).toEqual([5]);
+});
+
+test("solo still yields document order, not the order they were soloed", () => {
+  expect(visibleIdsForPreview(tree, [1, 2, 5, 7, 8], [], [8, 1])).toEqual([1, 8]);
+});
+
+// 그릴 수 있는 것은 pixel leaf뿐이라는 제약은 solo가 풀어주지 않는다.
+test("solo cannot conjure a non-pixel leaf into the preview", () => {
+  expect(visibleIdsForPreview(tree, [], [], [4])).toEqual([]);
+});
+
+test("a solo id that is not in the tree is simply absent", () => {
+  expect(visibleIdsForPreview(tree, [1, 2], [], [99])).toEqual([]);
 });
 
 test("pixelLeafIds returns every pixel leaf id in document order, ignoring included/hidden state", () => {
