@@ -12,6 +12,12 @@ export interface Entry {
 export interface OpsState {
   includedIds: number[]; // 체크박스 (정렬된 리프 id, 아래→위)
   previewHiddenIds: number[]; // 눈 아이콘 off (미리보기 전용, 내보내기와 무관)
+  /**
+   * solo (미리보기 전용). 하나라도 있으면 미리보기는 이것만 그리고 체크박스와
+   * 눈을 무시한다 — 이름만으로 라인인지 알 수 없는 레이어를 눈으로 판정하는 용도다.
+   * previewHiddenIds와 독립이라, solo를 풀면 원래 화면이 그대로 돌아온다.
+   */
+  soloIds: number[];
   ops: Operation[]; // exclude 제외: merge/rename/reorder/flatten
   entries: Entry[]; // includedIds+ops로부터 계산된 현재 내보내기 목록 (아래→위)
 }
@@ -20,6 +26,8 @@ export type OpsAction =
   | { type: "reset"; includedIds: number[] }
   | { type: "setIncluded"; includedIds: number[] }
   | { type: "togglePreview"; layerId: number }
+  | { type: "toggleSolo"; layerId: number }
+  | { type: "setSolo"; layerIds: number[]; solo: boolean }
   | { type: "pushOp"; op: Operation }
   | { type: "undo" };
 
@@ -296,6 +304,20 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
         ? state.previewHiddenIds.filter((id) => id !== layerId)
         : [...state.previewHiddenIds, layerId];
       return { ...state, previewHiddenIds };
+    }
+    case "toggleSolo": {
+      const { layerId } = action;
+      const soloIds = state.soloIds.includes(layerId)
+        ? state.soloIds.filter((id) => id !== layerId)
+        : [...state.soloIds, layerId];
+      return { ...state, soloIds };
+    }
+    case "setSolo": {
+      const target = new Set(action.layerIds);
+      const soloIds = action.solo
+        ? Array.from(new Set([...state.soloIds, ...action.layerIds]))
+        : state.soloIds.filter((id) => !target.has(id));
+      return { ...state, soloIds };
     }
     case "pushOp": {
       // Throws on invalid refs (unchanged) — caller/UI catches and displays.

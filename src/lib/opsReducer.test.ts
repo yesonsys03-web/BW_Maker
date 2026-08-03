@@ -350,3 +350,50 @@ test("merging layers that are already in the destination is a no-op", () => {
   const dest = mergeDestinations(entries, [], PLANES).find((d) => d.name === "MG")!;
   expect(mergeIntoOps(entries, [2, 3], dest)).toEqual([]);
 });
+
+// --- solo (설계 문서 3절) ---
+
+const soloBase: OpsState = {
+  includedIds: [1, 2, 3],
+  previewHiddenIds: [2],
+  soloIds: [],
+  ops: [],
+  entries: [],
+};
+
+test("toggleSolo adds a leaf, then removes it", () => {
+  const on = opsReducer(soloBase, { type: "toggleSolo", layerId: 1 });
+  expect(on.soloIds).toEqual([1]);
+  const off = opsReducer(on, { type: "toggleSolo", layerId: 1 });
+  expect(off.soloIds).toEqual([]);
+});
+
+test("toggleSolo keeps earlier solos — several layers can be soloed at once", () => {
+  const one = opsReducer(soloBase, { type: "toggleSolo", layerId: 1 });
+  const two = opsReducer(one, { type: "toggleSolo", layerId: 3 });
+  expect(two.soloIds).toEqual([1, 3]);
+});
+
+test("setSolo turns a whole group on and off in one action", () => {
+  const on = opsReducer(soloBase, { type: "setSolo", layerIds: [1, 2, 3], solo: true });
+  expect(on.soloIds).toEqual([1, 2, 3]);
+  const off = opsReducer(on, { type: "setSolo", layerIds: [1, 2, 3], solo: false });
+  expect(off.soloIds).toEqual([]);
+});
+
+test("setSolo does not duplicate ids that are already soloed", () => {
+  const one = opsReducer(soloBase, { type: "toggleSolo", layerId: 2 });
+  const many = opsReducer(one, { type: "setSolo", layerIds: [1, 2], solo: true });
+  expect(many.soloIds).toEqual([2, 1]);
+});
+
+// 비파괴가 이 기능의 전제다 — solo를 풀면 공들여 만든 숨기기 조합이 그대로
+// 돌아와야 한다.
+test("solo never disturbs the eye toggles or the export state", () => {
+  const on = opsReducer(soloBase, { type: "setSolo", layerIds: [1, 3], solo: true });
+  const off = opsReducer(on, { type: "setSolo", layerIds: [1, 3], solo: false });
+  expect(off.previewHiddenIds).toEqual([2]);
+  expect(off.includedIds).toEqual([1, 2, 3]);
+  expect(off.ops).toEqual([]);
+  expect(off.entries).toEqual([]);
+});
