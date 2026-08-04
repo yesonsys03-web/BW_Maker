@@ -60,10 +60,13 @@ function deferred<T>() {
 }
 
 let runs: { paths: string[]; d: ReturnType<typeof deferred<{ results: unknown[] }>> }[] = [];
+/** 배경 큐에 알린 실행 상태의 이력. 배치가 도는 동안 켜지고 끝나면 꺼져야 한다. */
+let runningSignals: boolean[] = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
   runs = [];
+  runningSignals = [];
   engine.onEngineEvent.mockResolvedValue(() => {});
   engine.pathsExist.mockImplementation(async (paths: string[]) => paths.map(() => false));
   engine.batchRun.mockImplementation((paths: string[]) => {
@@ -92,7 +95,9 @@ function finish(index: number) {
 }
 
 async function startRun() {
-  render(<BatchPanel files={FILES} onError={vi.fn()} />);
+  render(
+    <BatchPanel files={FILES} onError={vi.fn()} onRunningChange={(r) => runningSignals.push(r)} />
+  );
   await waitFor(() => expect(screen.getByRole("button", { name: "배치 실행" })).toBeTruthy());
   click("배치 실행");
   await waitFor(() => expect(runs.length).toBeGreaterThan(0));
@@ -161,4 +166,19 @@ test("results appear as each file lands, not only at the end", async () => {
 
   await waitFor(() => expect(resultCells()).toContain("a.psd"));
   expect(resultCells()).not.toContain("b.psd");
+});
+
+test("the background queues are told to stand aside while a batch runs", async () => {
+  // 배치는 이제 파일 사이마다 엔진을 비운다. 그 틈에 미리보기 준비가 끼어들면
+  // 아티스트가 기다리는 배치가 그만큼 느려진다.
+  await startRun();
+  expect(runningSignals).toEqual([true]);
+
+  // 다음 파일이 나가야 그것을 끝낼 수 있다 — 한 번에 하나씩이 이 큐의 전제다.
+  for (let i = 0; i < FILES.length; i += 1) {
+    await waitFor(() => expect(runs).toHaveLength(i + 1));
+    finish(i);
+  }
+
+  await waitFor(() => expect(runningSignals).toEqual([true, false]));
 });

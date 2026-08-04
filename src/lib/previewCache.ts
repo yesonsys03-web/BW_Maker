@@ -84,6 +84,28 @@ export function previewCacheKey(
  * 위한 것이다 — PreviewCanvas는 파일이 바뀌면 화면의 이미지를 버리므로, 이게
  * 없으면 돌아올 때마다 합성 렌더와 base64 왕복을 처음부터 되풀이한다.
  */
+/**
+ * 준비 큐가 이 그림을 (다시) 만들어야 하는가.
+ *
+ * "캐시에 없으면 만든다"로는 끝나지 않는다. 캐시는 예산제 LRU라 폴더가 예산을
+ * 넘기면 앞쪽부터 버려지는데, 그 축출을 만들 근거로 삼으면 큐가 방금 만든 것을
+ * 곧바로 다시 집는다 — 실제로 107개 폴더에서 큐가 0/105로 무한 재시작하며 엔진을
+ * 영원히 붙잡았고, 배치가 그 뒤에서 절반 속도로 기었다.
+ *
+ * 그래서 이번에 만든 키를 함께 본다. 키에는 경로·수정시각·표시 레이어·라인색이
+ * 모두 들어가므로, 레이어를 토글하거나 프리셋을 다시 걸거나 포토샵에서 저장하면
+ * 키가 달라져 정상적으로 다시 만든다. 바뀐 것이 없는데 축출됐다는 이유만으로
+ * 다시 만드는 경우만 사라진다 — 그 파일은 눌렀을 때 화면이 그린다.
+ */
+export function needsPrefetch(
+  key: string | null,
+  cache: PreviewCache,
+  alreadyMade: ReadonlySet<string>
+): boolean {
+  if (key === null) return false;
+  return !alreadyMade.has(key) && cache.get(key) === undefined;
+}
+
 export class PreviewCache {
   private entries = new Map<string, string>();
   private total = 0;

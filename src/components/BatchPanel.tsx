@@ -10,6 +10,12 @@ import type { BatchItemResult, EngineError, Preset } from "../lib/types";
 interface BatchPanelProps {
   files: FileEntry[];
   onError: (title: string, error: EngineError) => void;
+  /**
+   * 배치가 도는 동안 배경 큐들이 비켜설 수 있도록 알린다. 파일 사이의 틈은
+   * 사람이 누른 것을 처리하라고 생긴 것이지, 미리보기 준비가 끼어들라고 생긴
+   * 것이 아니다.
+   */
+  onRunningChange: (running: boolean) => void;
 }
 
 interface ProgressState {
@@ -60,7 +66,7 @@ interface PendingRun {
  * independent of any currently-open session, and the engine keeps going past
  * per-file failures, so this UI only ever renders the final results list.
  */
-export function BatchPanel({ files, onError }: BatchPanelProps) {
+export function BatchPanel({ files, onError, onRunningChange }: BatchPanelProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedPresetName, setSelectedPresetName] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set(files.map((f) => f.path)));
@@ -166,6 +172,7 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
     { append = false }: { append?: boolean } = {}
   ) {
     setRunning(true);
+    onRunningChange(true);
     setStopped(null);
     setStopping(false);
     stopRef.current = false;
@@ -193,6 +200,7 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
       onError("배치 실행 실패", toEngineError(e));
     } finally {
       setRunning(false);
+      onRunningChange(false);
       setStopping(false);
       setProgress(null);
       setFileProgress(null);

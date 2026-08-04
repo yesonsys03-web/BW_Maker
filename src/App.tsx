@@ -29,7 +29,7 @@ import {
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, toEngineError } from "./lib/preview";
-import { PreviewCache, previewRenderSpec } from "./lib/previewCache";
+import { PreviewCache, needsPrefetch, previewRenderSpec } from "./lib/previewCache";
 import { openFailureReport, type FailedOpen } from "./lib/openReport";
 import { undrawableReport } from "./lib/skippedReport";
 import { missingFromChunk, nextThumbnailChunk } from "./lib/thumbnailQueue";
@@ -427,6 +427,25 @@ function AppShell() {
   const prefetchingRef = useRef(false);
   /** 미리 만들기에 실패한 파일. 다시 집으면 큐가 끝나지 않으므로 빼둔다. */
   const prefetchFailedRef = useRef<Set<string>>(new Set());
+  /**
+   * 이번에 만들어둔 미리보기의 키. 캐시에서 밀려나도 다시 만들지 않기 위한 것이다
+   * — 자세한 이유는 lib/previewCache.ts의 needsPrefetch 주석에 있다.
+   */
+  const prefetchedKeysRef = useRef<Set<string>>(new Set());
+  /**
+   * 배치가 도는 중인지. 배경 큐들이 그동안 비켜서기 위한 신호다.
+   *
+   * 배치는 이제 파일 하나씩 부르므로 파일 사이마다 엔진이 빈다. 그 틈은 사람이
+   * 누른 것을 처리하라고 생긴 것이지, 배경 작업이 끼어들라고 생긴 것이 아니다 —
+   * 비켜서지 않으면 아티스트가 기다리는 배치가 그만큼 느려진다.
+   */
+  const batchRunningRef = useRef(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const handleBatchRunningChange = useCallback((busy: boolean) => {
+    batchRunningRef.current = busy;
+    setBatchRunning(busy);
+  }, []);
+
   /** 화면이 지금 엔진에 렌더를 걸고 있는지. 준비 큐가 그동안 비켜서기 위한 신호. */
   const canvasRenderingRef = useRef(false);
   const handleCanvasRendering = useCallback((busy: boolean) => {
@@ -458,7 +477,7 @@ function AppShell() {
     // 있어 준비 큐도 할 일이 있고, 로드 큐도 남은 대기 파일로 출발한다). 그러면
     // 세션 두 칸을 두고 다투다 'unknown or evicted session'이 난다. 효과는 선언
     // 순서대로 도니, 로드 큐가 동기적으로 세워둔 ref를 여기서 보면 그 틈이 없다.
-    if (loading || drainingRef.current || prefetchingRef.current) return;
+    if (loading || drainingRef.current || prefetchingRef.current || batchRunning) return;
     if (prefetchCancelled) return;
 
     const pending = () => {
@@ -476,10 +495,7 @@ function AppShell() {
           f.path !== activePathRef.current
       );
       return ready
-        .filter((f) => {
-          const plan = previewPlanFor(f);
-          return plan?.key != null && cache.get(plan.key) === undefined;
-        })
+        .filter((f) => needsPrefetch(previewPlanFor(f)?.key ?? null, cache, prefetchedKeysRef.current))
         .map((f) => f.path);
     };
     if (pending().length === 0) return;
@@ -493,7 +509,10 @@ function AppShell() {
         // 화면이 그림을 그리는 동안에는 비켜선다. 세션이 두 칸뿐이라 둘이 동시에
         // 열면 서로의 세션을 밀어내고, 그러다 재시도 상한을 넘기면 사람이 보려던
         // 그림이 실패한다 — 미리 만들어두려다 지금 보는 화면을 망치는 셈이다.
+        // 기다리는 동안에도 중지를 본다. 예전에는 회차 사이에서만 확인해서, 최대
+        // 60초를 기다리는 사이에 누른 중지가 그동안 아무 반응이 없었다.
         for (let waited = 0; canvasRenderingRef.current && waited < PREFETCH_YIELD_MAX_MS; waited += 200) {
+          if (prefetchCancelledRef.current || drainingRef.current || abandonedRef.current) return;
           await new Promise((resolve) => window.setTimeout(resolve, 200));
         }
 
@@ -518,6 +537,7 @@ function AppShell() {
             }
           );
           previewCacheRef.current.set(plan.key, await loadPngDataUrl(pngPath));
+          prefetchedKeysRef.current.add(plan.key);
         } catch (e) {
           // 한 파일의 실패로 준비 전체를 멈추지 않는다. 예전에는 여기서 예외가
           // 큐 밖으로 나가 회차가 통째로 끊겼고, 효과가 다시 돌면서 같은 파일에서
@@ -533,7 +553,8 @@ function AppShell() {
       // 로드 큐가 출발하면 즉시 비켜선다. 사람이 기다리는 것은 파일이 열리는
       // 쪽이고, 미리 만들어두는 일은 그 뒤에 해도 된다. 취소 표시는 건드리지
       // 않으므로 로드가 끝나 loading이 내려가면 알아서 다시 돈다.
-      cancelled: () => abandonedRef.current || prefetchCancelledRef.current || drainingRef.current,
+      cancelled: () =>
+        abandonedRef.current || prefetchCancelledRef.current || drainingRef.current || batchRunningRef.current,
     })
       .then(() => {
         // 미리 만들어두는 일이 실패해도 작업을 막지 않는다(누를 때 그리면 된다).
@@ -549,7 +570,7 @@ function AppShell() {
       .finally(() => {
         prefetchingRef.current = false;
       });
-  }, [loading, prefetchCancelled, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
+  }, [loading, prefetchCancelled, batchRunning, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
 
   /**
    * 파일별 내보내기 장수. opsByPath에 이미 있는 값을 세는 것뿐이라 따로 저장하거나
@@ -621,7 +642,7 @@ function AppShell() {
         //
         // 버려진 인스턴스에서도 멈춘다 — activePathRef는 언마운트 뒤에도 값을
         // 들고 있어, 이 확인이 없으면 죽은 화면이 남은 청크를 계속 받아간다.
-        if (abandonedRef.current || !path || loadingRef.current) return;
+        if (abandonedRef.current || !path || loadingRef.current || batchRunningRef.current) return;
         const file = filesRef.current.find((f) => f.path === path);
         if (file?.sessionId === undefined) return;
         const chunk = nextThumbnailChunk(
@@ -845,7 +866,7 @@ function AppShell() {
           {bottomTab === "history" ? (
             <OpsHistory ops={ops} tree={activeFile?.tree} onUndo={undoOp} />
           ) : (
-            <BatchPanel files={state.files} onError={pushError} />
+            <BatchPanel files={state.files} onError={pushError} onRunningChange={handleBatchRunningChange} />
           )}
         </div>
       </div>

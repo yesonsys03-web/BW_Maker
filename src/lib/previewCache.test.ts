@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { PreviewCache, previewCacheKey, previewRenderSpec } from "./previewCache";
+import { PreviewCache, needsPrefetch, previewCacheKey, previewRenderSpec } from "./previewCache";
 import type { TreeNode } from "./types";
 
 const F1 = { path: "/a.psd", mtime: 100 };
@@ -137,4 +137,32 @@ test("an entry larger than the whole budget is still kept — it is what the scr
   cache.set("big", "0123456789");
   expect(cache.get("big")).toBe("0123456789");
   expect(cache.size).toBe(1);
+});
+
+// --- 준비 큐가 무엇을 다시 만들 것인가 ---
+// 107개 폴더에서 미리보기를 다 만든 뒤에도 준비 큐가 0/105로 계속 재시작했다.
+// 캐시는 예산제 LRU라 폴더가 예산을 넘기면 앞쪽부터 버려지는데, 큐가 "캐시에
+// 있는가"로 할 일을 고르니 방금 버려진 것이 곧바로 다시 잡혔다 — 만든 것을
+// 스스로 버리고 다시 만드는 무한 루프였고, 엔진을 영원히 붙잡았다.
+
+test("a key that is not in the cache and was never made is worth making", () => {
+  expect(needsPrefetch("k", new PreviewCache(), new Set())).toBe(true);
+});
+
+test("a key already in the cache is not made again", () => {
+  const cache = new PreviewCache();
+  cache.set("k", "data:image/png;base64,AAA");
+  expect(needsPrefetch("k", cache, new Set())).toBe(false);
+});
+
+test("a key made earlier is not made again just because the cache dropped it", () => {
+  // 이 한 줄이 무한 루프를 끊는다. 축출은 캐시의 정상 동작이므로 그것을 근거로
+  // 다시 만들면 큐가 영영 끝나지 않는다. 눌렀을 때 그 자리에서 그리면 된다.
+  const cache = new PreviewCache();
+  expect(needsPrefetch("k", cache, new Set(["k"]))).toBe(false);
+});
+
+test("a file with no key yet is skipped", () => {
+  // 트리나 수정 시각을 아직 모르는 파일. 만들 그림이 정해지지 않았다.
+  expect(needsPrefetch(null, new PreviewCache(), new Set())).toBe(false);
 });
