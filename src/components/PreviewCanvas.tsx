@@ -5,13 +5,19 @@ import {
   PREVIEW_BACKGROUND_LABELS,
   PREVIEW_BACKGROUND_STORAGE_KEY,
   isDocumentView,
+  KEY_ZOOM_FACTOR,
   MIN_PREVIEW_SCALE,
   nextScale,
   PREVIEW_MAX_SIZE,
   parsePreviewBackground,
+  recenterOn,
+  scaledBy,
   toEngineError,
+  viewCommandFor,
   visibleIdsForPreview,
+  zoomAround,
   type PreviewBackground,
+  type ViewPoint,
 } from "../lib/preview";
 import { previewCacheKey, type PreviewCache } from "../lib/previewCache";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
@@ -142,6 +148,23 @@ export function PreviewCanvas({
   const draggingRef = useRef<{ x: number; y: number } | null>(null);
   const viewportCleanupRef = useRef<(() => void) | null>(null);
   const viewportElRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 포인터가 뷰포트 안에 있을 때의 마지막 위치(뷰포트 중앙 기준). 밖이면 null.
+   *
+   * 단축키가 이 값으로 자기 차례인지 판단한다 — Harmony처럼 커서 아래의 뷰가
+   * 키를 받는다. 포커스를 쓰지 않으므로 레이어 검색창이나 대화상자와 겹칠 일이
+   * 구조적으로 없고, N이 어차피 커서 위치를 필요로 하니 값도 이미 여기 있다.
+   */
+  const cursorRef = useRef<ViewPoint | null>(null);
+  /**
+   * scale의 거울. 커서 고정 확대는 새 배율과 새 이동량을 함께 계산해야 하는데,
+   * 이동량 쪽이 **직전** 배율을 즉시 읽어야 한다. 휠을 굴리면 한 프레임 안에
+   * 여러 번 들어오므로 상태만 보면 같은 배율을 두 번 읽어 그림이 어긋난다.
+   */
+  const scaleRef = useRef(scale);
+  useEffect(() => {
+    scaleRef.current = scale;
+  }, [scale]);
   /** 지금 그려진 이미지의 원본 픽셀 크기. 맞춤 배율을 계산하는 기준이다. */
   const naturalSizeRef = useRef<{ w: number; h: number } | null>(null);
   /**
@@ -169,6 +192,31 @@ export function PreviewCanvas({
     fittedRef.current = true;
     setScale(Math.max(MIN_PREVIEW_SCALE, Math.min(1, box)));
     setOffset({ x: 0, y: 0 });
+  }, []);
+
+  /** 화면 좌표를 뷰포트 중앙 기준으로 옮긴다. 커서 위치는 전부 이 좌표계로 다닌다. */
+  const pointFromClient = useCallback((clientX: number, clientY: number): ViewPoint | null => {
+    const el = viewportElRef.current;
+    if (!el) return null;
+    const box = el.getBoundingClientRect();
+    return { x: clientX - (box.left + box.width / 2), y: clientY - (box.top + box.height / 2) };
+  }, []);
+
+  /**
+   * 커서 아래를 붙잡은 채 배율만 바꾼다. 휠과 1/2가 같은 이 길로 들어온다.
+   *
+   * 배율과 이동량이 별개의 상태라 순서가 중요하다. setScale의 갱신 함수 안에서
+   * setOffset을 부르면 StrictMode가 갱신 함수를 두 번 돌리면서 이동이 두 번
+   * 걸린다 — 그래서 직전 배율은 거울에서 읽고 두 상태를 나란히 세운다.
+   */
+  const zoomAroundCursor = useCallback((computeNext: (prev: number) => number, cursor: ViewPoint) => {
+    const prev = scaleRef.current;
+    const next = computeNext(prev);
+    // 사람이 배율을 정했으므로 이후로는 자동으로 되돌리지 않는다.
+    fittedRef.current = false;
+    scaleRef.current = next;
+    setScale(next);
+    setOffset((off) => zoomAround(off, prev, next, cursor));
   }, []);
 
   /** 그림이 붙는(또는 이미 붙어 있는) 순간의 크기를 재고, 아직 맞춤 상태면 맞춘다. */
@@ -338,9 +386,11 @@ export function PreviewCanvas({
       if (!el) return;
       function handleWheel(e: WheelEvent) {
         e.preventDefault();
-        // 사람이 배율을 정했으므로 이후로는 자동으로 되돌리지 않는다.
-        fittedRef.current = false;
-        setScale((prev) => nextScale(prev, e.deltaY));
+        // 휠도 커서를 기준으로 확대한다 — 같은 화면에서 휠과 1/2가 서로 다른
+        // 곳을 기준으로 삼으면 확대 방식이 두 가지가 된다.
+        const cursor = pointFromClient(e.clientX, e.clientY);
+        if (!cursor) return;
+        zoomAroundCursor((prev) => nextScale(prev, e.deltaY), cursor);
       }
       // Non-passive so preventDefault actually stops page scroll/zoom.
       el.addEventListener("wheel", handleWheel, { passive: false });
@@ -355,8 +405,41 @@ export function PreviewCanvas({
         observer.disconnect();
       };
     },
-    [applyFit]
+    [applyFit, pointFromClient, zoomAroundCursor]
   );
+
+  // 뷰 단축키 (Toon Boom Harmony와 같은 배치): 1 축소, 2 확대, N 커서 위치를
+  // 가운데로, Shift+M 맞춤으로 되돌리기.
+  //
+  // window에 걸고 커서 위치로 자기 차례를 가린다. 뷰포트에 포커스를 주는 방식은
+  // 클릭이 판 드래그의 시작과 겹쳐 화면이 의도치 않게 밀린다.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const cursor = cursorRef.current;
+      if (!cursor) return;
+      // 글자를 받는 곳이 눌리고 있으면 그쪽 것이다. 커서가 우연히 뷰 위에 있는
+      // 동안 레이어 이름을 치면 "line"의 n에 화면이 움직여버린다.
+      const target = e.target as HTMLElement | null;
+      if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName ?? "")) {
+        return;
+      }
+      const command = viewCommandFor(e);
+      if (!command) return;
+      if (command === "reset") {
+        applyFit();
+        return;
+      }
+      if (command === "recenter") {
+        fittedRef.current = false;
+        setOffset((off) => recenterOn(off, cursor));
+        return;
+      }
+      const factor = command === "zoomIn" ? KEY_ZOOM_FACTOR : 1 / KEY_ZOOM_FACTOR;
+      zoomAroundCursor((prev) => scaledBy(prev, factor), cursor);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [applyFit, zoomAroundCursor]);
 
   function handlePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -364,6 +447,9 @@ export function PreviewCanvas({
   }
 
   function handlePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    // 드래그 중인지와 무관하게 먼저 기록한다 — 단축키는 끌지 않고 커서만 올려둔
+    // 상태에서 쓰는 것이 보통이다.
+    cursorRef.current = pointFromClient(e.clientX, e.clientY);
     if (!draggingRef.current) return;
     const dx = e.clientX - draggingRef.current.x;
     const dy = e.clientY - draggingRef.current.y;
@@ -410,6 +496,14 @@ export function PreviewCanvas({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
+        onPointerEnter={(e) => {
+          cursorRef.current = pointFromClient(e.clientX, e.clientY);
+        }}
+        // 커서가 나가면 단축키도 이 뷰를 떠난다. 마지막 위치를 들고 있으면 다른
+        // 패널에 마우스를 둔 채 누른 키에 화면이 움직인다.
+        onPointerLeave={() => {
+          cursorRef.current = null;
+        }}
       >
         {imgSrc && (
           <img

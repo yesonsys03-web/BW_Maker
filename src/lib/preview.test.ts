@@ -9,6 +9,10 @@ import {
   PREVIEW_BACKGROUND_LABELS,
   nextScale,
   parsePreviewBackground,
+  recenterOn,
+  scaledBy,
+  viewCommandFor,
+  zoomAround,
   pixelLeafIds,
   visibleIdsForPreview,
 } from "./preview";
@@ -209,4 +213,102 @@ test("isDocumentView ignores ordering", () => {
 
 test("isDocumentView is false with no tree yet", () => {
   expect(isDocumentView(undefined, [])).toBe(false);
+});
+
+// --- 뷰 단축키 (Harmony식 1 / 2 / N / Shift+M) ---
+
+test("the digits and N map to view commands", () => {
+  expect(viewCommandFor({ code: "Digit1" })).toBe("zoomOut");
+  expect(viewCommandFor({ code: "Digit2" })).toBe("zoomIn");
+  expect(viewCommandFor({ code: "KeyN" })).toBe("recenter");
+});
+
+test("the key is read by physical code, so a Korean keyboard still recenters", () => {
+  // 한글 입력 상태에서 N을 누르면 event.key는 "ㅜ"로 온다. code는 자판 배열과
+  // 무관하게 KeyN이므로, 여기서 code만 보면 두 상태가 같은 명령이 된다.
+  expect(viewCommandFor({ code: "KeyN", key: "ㅜ" })).toBe("recenter");
+  expect(viewCommandFor({ code: "KeyN", key: "n" })).toBe("recenter");
+});
+
+test("reset needs shift — bare M does nothing", () => {
+  expect(viewCommandFor({ code: "KeyM", shiftKey: true })).toBe("reset");
+  expect(viewCommandFor({ code: "KeyM" })).toBeNull();
+});
+
+test("a command key held with ctrl/alt/meta is left to the OS and the app", () => {
+  expect(viewCommandFor({ code: "Digit2", metaKey: true })).toBeNull();
+  expect(viewCommandFor({ code: "Digit1", ctrlKey: true })).toBeNull();
+  expect(viewCommandFor({ code: "KeyN", altKey: true })).toBeNull();
+  expect(viewCommandFor({ code: "KeyM", shiftKey: true, metaKey: true })).toBeNull();
+});
+
+test("shift on the zoom keys is ignored — the digit is what matters", () => {
+  // Shift+2는 자판에 따라 "@"가 되지만 code는 Digit2 그대로다. 확대를 기대한
+  // 손가락이 shift에 걸려 아무 일도 안 일어나는 편이 더 나쁘다.
+  expect(viewCommandFor({ code: "Digit2", shiftKey: true })).toBe("zoomIn");
+});
+
+test("keys the view does not claim are left alone", () => {
+  expect(viewCommandFor({ code: "Digit3" })).toBeNull();
+  expect(viewCommandFor({ code: "KeyA" })).toBeNull();
+});
+
+test("scaledBy multiplies and clamps with the same bounds as the wheel", () => {
+  expect(scaledBy(1, 2)).toBeCloseTo(2);
+  expect(scaledBy(MAX_PREVIEW_SCALE, 2)).toBe(MAX_PREVIEW_SCALE);
+  expect(scaledBy(MIN_PREVIEW_SCALE, 0.5)).toBe(MIN_PREVIEW_SCALE);
+});
+
+/** 커서 아래에 있던 문서 좌표가 확대 뒤 화면 어디로 갔는지. 안 움직여야 한다. */
+function pointUnderCursorAfterZoom(
+  offset: { x: number; y: number },
+  scale: number,
+  next: number,
+  cursor: { x: number; y: number }
+) {
+  const doc = { x: (cursor.x - offset.x) / scale, y: (cursor.y - offset.y) / scale };
+  const moved = zoomAround(offset, scale, next, cursor);
+  return { x: moved.x + doc.x * next, y: moved.y + doc.y * next };
+}
+
+test("zoomAround keeps the point under the cursor under the cursor", () => {
+  const cursor = { x: 100, y: 50 };
+  const after = pointUnderCursorAfterZoom({ x: 30, y: -10 }, 1, 2, cursor);
+  expect(after.x).toBeCloseTo(cursor.x);
+  expect(after.y).toBeCloseTo(cursor.y);
+});
+
+test("zoomAround holds the point on the way out too", () => {
+  const cursor = { x: -220, y: 140 };
+  const after = pointUnderCursorAfterZoom({ x: -75, y: 60 }, 3, 1.5, cursor);
+  expect(after.x).toBeCloseTo(cursor.x);
+  expect(after.y).toBeCloseTo(cursor.y);
+});
+
+test("zooming a centred image from its centre moves nothing", () => {
+  expect(zoomAround({ x: 0, y: 0 }, 1, 2, { x: 0, y: 0 })).toEqual({ x: 0, y: 0 });
+});
+
+test("a zoom that the clamp refused does not shift the image", () => {
+  // 상한에 걸려 배율이 그대로면 화면도 그대로여야 한다. next를 현재와 같은 값으로
+  // 넘기는 것이 그 경우다 — 여기서 offset이 움직이면 키를 눌러도 배율은 안 변한
+  // 채 그림만 미끄러진다.
+  const offset = { x: 40, y: -25 };
+  expect(zoomAround(offset, 2, 2, { x: 90, y: 15 })).toEqual(offset);
+});
+
+test("recenterOn brings the point under the cursor to the middle", () => {
+  const offset = { x: 30, y: -10 };
+  const cursor = { x: 100, y: 50 };
+  const scale = 2;
+  const doc = { x: (cursor.x - offset.x) / scale, y: (cursor.y - offset.y) / scale };
+
+  const moved = recenterOn(offset, cursor);
+
+  expect(moved.x + doc.x * scale).toBeCloseTo(0);
+  expect(moved.y + doc.y * scale).toBeCloseTo(0);
+});
+
+test("recenterOn with the cursor already centred changes nothing", () => {
+  expect(recenterOn({ x: 12, y: 34 }, { x: 0, y: 0 })).toEqual({ x: 12, y: 34 });
 });
