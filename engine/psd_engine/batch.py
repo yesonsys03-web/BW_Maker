@@ -36,7 +36,8 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
                                       overwrite=overwrite, progress=cb,
                                       line_color=preset.get("lineColor"))
             for entry, out in zip(entries, result["outputs"]):
-                out["verification"] = verify_export(s, [entry], out["outputPath"])
+                out["verification"] = verify_export(s, [entry], out["outputPath"],
+                                                    line_color=preset.get("lineColor"))
             verification = {"ok": all(o["verification"]["ok"] for o in result["outputs"])}
             result["outputPath"] = str(out_dir)
         else:
@@ -44,7 +45,7 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
                                 embed_preview=preset.get("embedPreview", True),
                                 overwrite=overwrite, progress=cb,
                                 line_color=preset.get("lineColor"))
-            verification = verify_export(s, entries, out_path)
+            verification = verify_export(s, entries, out_path, line_color=preset.get("lineColor"))
         return {
             "path": str(path), "ok": verification["ok"],
             "outputPath": result["outputPath"],

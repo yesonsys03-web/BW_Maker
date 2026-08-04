@@ -197,3 +197,38 @@ def test_split_export_applies_line_color_like_the_single_file_path(session, tmp_
 def test_split_export_rejects_an_empty_plan(session, tmp_path):
     with pytest.raises(ValueError, match="no entries to export"):
         export_psd_split(session, [], tmp_path / "s.psd")
+
+
+# 색 통일을 켠 채 배치를 돌렸더니 파일마다 "실패"가 떴는데, 나온 PSD는 멀쩡했다.
+# 틀린 것은 내보내기가 아니라 검증이었다: export는 모든 레이어의 RGB를 지정한
+# 색으로 덮어 쓰는데(알파는 그대로), verify는 line_color를 모른 채 원본의 원래
+# 색과 대조했다. 실측으로 알파 차이 0, RGB 차이 255 — 색만 통째로 어긋났다.
+def test_verify_accounts_for_the_line_color_that_export_applied(session, tmp_path):
+    entries = _plan(session, [3, 4, 5], [])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path, line_color="#000000")
+
+    v = verify_export(session, entries, out_path, line_color="#000000")
+
+    assert v["ok"] is True
+    assert all(c["pixelOk"] for c in v["layers"])
+
+
+def test_verify_still_catches_a_wrong_color(session, tmp_path):
+    # 색을 아는 것과 무엇이든 통과시키는 것은 다르다. 다른 색으로 나갔다면 잡아야 한다.
+    entries = _plan(session, [4], [])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path, line_color="#123456")
+
+    v = verify_export(session, entries, out_path, line_color="#000000")
+
+    assert v["ok"] is False
+    assert v["layers"][0]["pixelOk"] is False
+
+
+def test_verify_without_a_line_color_is_unchanged(session, tmp_path):
+    entries = _plan(session, [3, 4], [])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path)
+
+    assert verify_export(session, entries, out_path)["ok"] is True

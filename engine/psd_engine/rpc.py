@@ -178,7 +178,7 @@ class Engine:
             if verify:
                 # 파일마다 그 파일에 들어간 엔트리 하나로 검증한다.
                 for entry, out in zip(entries, result["outputs"]):
-                    out["verification"] = verify_export(s, [entry], out["outputPath"])
+                    out["verification"] = verify_export(s, [entry], out["outputPath"], line_color=lineColor)
                 result["verification"] = {
                     "ok": all(o["verification"]["ok"] for o in result["outputs"]),
                     "canvasOk": all(o["verification"]["canvasOk"] for o in result["outputs"]),
@@ -193,7 +193,7 @@ class Engine:
         result = _export(s, entries, outputPath, embed_preview=embedPreview,
                          overwrite=overwrite, progress=progress, line_color=lineColor)
         if verify:
-            result["verification"] = verify_export(s, entries, outputPath)
+            result["verification"] = verify_export(s, entries, outputPath, line_color=lineColor)
         return result
 
     # ---- dispatch ----
