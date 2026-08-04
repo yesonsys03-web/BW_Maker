@@ -188,6 +188,29 @@ function AppShell() {
     presetRef.current = selectedPreset;
   }, [state.files, state.activePath, selectedPreset]);
 
+  /**
+   * 이 인스턴스가 버려졌는지. 세 배경 큐가 회차 사이에 확인한다.
+   *
+   * 큐의 중복 실행은 ref로 막는데(draining/prefetching/drainingThumbs), 그 ref는
+   * 마운트된 인스턴스의 것이다. 리마운트되면 새 인스턴스는 빈 ref로 자기 큐를
+   * 출발시키고 옛 큐는 그대로 돈다 — 옛 큐가 읽는 취소 ref도 함께 버려졌으므로
+   * 진행바의 "중지"조차 닿지 않는다. 개발 중 HMR로 이것이 여섯 겹까지 쌓여 세션
+   * 두 칸을 두고 서로를 밀어냈고, 파일 40~49개가 한꺼번에 'unknown or evicted
+   * session'으로 떨어졌다(세션 id가 900까지 갔다 — 그만큼 PSD를 다시 읽었다).
+   *
+   * 큐 효과들보다 먼저 선언한다. 효과는 선언 순서대로 도니, 다시 마운트될 때
+   * 큐가 출발하기 전에 표시가 내려가 있어야 한다. StrictMode의 정리-재설치도
+   * 같은 인스턴스라 여기서 다시 false가 되고, 그 정리와 재설치 사이는 동기
+   * 구간이라 큐가 그 틈에 확인할 일이 없다.
+   */
+  const abandonedRef = useRef(false);
+  useEffect(() => {
+    abandonedRef.current = false;
+    return () => {
+      abandonedRef.current = true;
+    };
+  }, []);
+
   // 큐가 도는 동안 엔진을 두고 다투는 다른 작업들을 멈추기 위한 플래그. 세션이
   // 두 개뿐이라, 동시에 세 군데서 열면 서로의 세션을 밀어내며 PSD를 계속 다시
   // 파싱하게 된다.
@@ -260,7 +283,7 @@ function AppShell() {
         if (progress === null) drainingRef.current = false;
         setLoadProgress(progress);
       },
-      cancelled: () => loadCancelledRef.current,
+      cancelled: () => abandonedRef.current || loadCancelledRef.current,
     })
       .then(() => {
         if (undrawableByPath.length === 0) return;
@@ -426,7 +449,7 @@ function AppShell() {
       // 로드 큐가 출발하면 즉시 비켜선다. 사람이 기다리는 것은 파일이 열리는
       // 쪽이고, 미리 만들어두는 일은 그 뒤에 해도 된다. 취소 표시는 건드리지
       // 않으므로 로드가 끝나 loading이 내려가면 알아서 다시 돈다.
-      cancelled: () => prefetchCancelledRef.current || drainingRef.current,
+      cancelled: () => abandonedRef.current || prefetchCancelledRef.current || drainingRef.current,
     })
       .then(() => {
         // 미리 만들어두는 일이 실패해도 작업을 막지 않는다(누를 때 그리면 된다).
@@ -496,7 +519,10 @@ function AppShell() {
         const path = activePathRef.current;
         // 로드 큐가 도는 동안에는 양보한다. 세션이 두 칸뿐이라 썸네일 요청이
         // 큐가 방금 연 세션을 밀어낸다. 큐가 끝나면 아래 효과가 다시 부른다.
-        if (!path || loadingRef.current) return;
+        //
+        // 버려진 인스턴스에서도 멈춘다 — activePathRef는 언마운트 뒤에도 값을
+        // 들고 있어, 이 확인이 없으면 죽은 화면이 남은 청크를 계속 받아간다.
+        if (abandonedRef.current || !path || loadingRef.current) return;
         const file = filesRef.current.find((f) => f.path === path);
         if (file?.sessionId === undefined) return;
         const chunk = nextThumbnailChunk(

@@ -267,6 +267,102 @@ test("no thumbnail is rendered while the load queue is running", async () => {
   await waitFor(() => expect(engine.renderThumbnails).toHaveBeenCalled());
 });
 
+/**
+ * 리마운트(개발 중의 HMR, StrictMode)로 죽은 인스턴스가 남기는 큐를 막는다.
+ *
+ * 세 큐 모두 중복 실행은 ref로 막는데, 그 ref는 마운트된 인스턴스의 것이다.
+ * 리마운트되면 새 인스턴스는 빈 ref로 자기 큐를 출발시키고 옛 큐는 그대로 돈다 —
+ * 아무도 그것을 세울 수 없다(옛 큐가 읽는 취소 ref도 함께 버려졌으므로 진행바의
+ * "중지"조차 닿지 않는다). 실제로 이렇게 여섯 개가 겹쳐 돌면서 세션 두 칸을 두고
+ * 서로를 밀어냈고, 파일 40~49개가 한꺼번에 'unknown or evicted session'으로
+ * 떨어졌다(에러 카드 7장, 세션 id 128→900).
+ */
+test("a remount does not leave the old load queue running", async () => {
+  const view = render(<App />);
+  await addFiles({ click });
+  expect(opens).toHaveLength(1);
+
+  view.unmount();
+  // 이미 나간 열기 하나는 끝난다. 그 뒤로 죽은 큐가 다음 파일을 집으면 안 된다.
+  opens[0].d.resolve({
+    sessionId: 1,
+    width: 10,
+    height: 10,
+    colorMode: "RGB",
+    depth: 8,
+    tree: treeOf([1, 2, 3]),
+    mtime: 1,
+  });
+
+  await new Promise((r) => setTimeout(r, 50));
+  expect(opens).toHaveLength(1);
+});
+
+test("a remount does not leave the old preview-prefetch queue running", async () => {
+  // 활성 파일(세션 1)은 캔버스가 그리므로 즉시 끝내고, 준비 큐가 맡는 나머지
+  // 파일만 테스트가 붙잡는다. 캔버스까지 붙잡으면 준비 큐가 양보하느라 안 뜬다.
+  const held: ReturnType<typeof deferred<{ pngPath: string }>>[] = [];
+  const holdUnlessActive = (sessionId: number) => {
+    if (sessionId === 1) return Promise.resolve({ pngPath: "/tmp/p.png" });
+    const d = deferred<{ pngPath: string }>();
+    held.push(d);
+    return d.promise;
+  };
+  engine.renderPreview.mockImplementation(holdUnlessActive);
+  engine.renderDocumentPreview.mockImplementation(holdUnlessActive);
+
+  const view = render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+  await waitFor(() => expect(opens).toHaveLength(2));
+  await finishOpen(1, 2);
+  await waitFor(() => expect(opens).toHaveLength(3));
+  await finishOpen(2, 3);
+
+  // 로드가 끝나면 준비 큐가 돈다. 보고 있는 파일은 건너뛰므로 b.psd가 첫 대상이다.
+  await waitFor(() => expect(held).toHaveLength(1), { timeout: 3000 });
+
+  view.unmount();
+  held[0].resolve({ pngPath: "/tmp/p.png" });
+
+  await new Promise((r) => setTimeout(r, 50));
+  expect(held).toHaveLength(1);
+});
+
+test("a remount does not leave the old thumbnail queue running", async () => {
+  const held: ReturnType<typeof deferred<{ thumbs: Record<string, string> }>>[] = [];
+  engine.renderThumbnails.mockImplementation(() => {
+    const d = deferred<{ thumbs: Record<string, string> }>();
+    held.push(d);
+    return d.promise;
+  });
+
+  const view = render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1, [1, 2, 3]);
+  await waitFor(() => expect(opens).toHaveLength(2));
+
+  // 큐가 멈춰야 썸네일이 풀린다.
+  click(screen.getByRole("button", { name: "중지" }));
+  await finishOpen(1, 2);
+  await waitFor(() => expect(screen.getByText(/중지됨/)).toBeTruthy());
+
+  const observer = await waitFor(() => {
+    const o = FakeIntersectionObserver.latest();
+    expect(o).toBeTruthy();
+    return o;
+  });
+  observer.reveal([1, 2, 3]);
+  await waitFor(() => expect(held).toHaveLength(1));
+
+  view.unmount();
+  // 청크는 2장씩이라 3번 행이 남아 있다. 죽은 큐가 그것을 받으러 가면 안 된다.
+  held[0].resolve({ thumbs: { "1": "/tmp/1.png", "2": "/tmp/2.png" } });
+
+  await new Promise((r) => setTimeout(r, 50));
+  expect(held).toHaveLength(1);
+});
+
 test("thumbnails are requested only for the rows that are on screen", async () => {
   render(<App />);
   await addFiles({ click });
