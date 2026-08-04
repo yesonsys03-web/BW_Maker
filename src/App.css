@@ -1214,6 +1214,14 @@ input[type="text"] {
   font-size: 0.85em;
 }
 
+/* 진행 문구와 중지/재개 버튼을 한 줄에. 파일 패널 진행바와 같은 배치다. */
+.batch-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+}
+
 .batch-file-list {
   display: flex;
   flex-direction: column;
