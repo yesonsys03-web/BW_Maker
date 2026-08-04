@@ -22,6 +22,7 @@ import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, toEngineError } from "./lib/preview";
 import { PreviewCache, previewRenderSpec } from "./lib/previewCache";
+import { undrawableReport } from "./lib/skippedReport";
 import { missingFromChunk, nextThumbnailChunk } from "./lib/thumbnailQueue";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
 import type { Preset } from "./lib/types";
@@ -257,8 +258,8 @@ function AppShell() {
     if (!state.files.some((f) => f.status === "idle")) return;
     drainingRef.current = true;
 
-    // 규칙에 걸렸지만 그릴 픽셀이 없어 빠진 레이어들을 파일별로 모은다. 파일마다
-    // 카드를 띄우면 화면이 카드로 덮여 진짜 오류가 묻히므로 끝에 한 장으로 낸다.
+    // 라인이 하나도 안 나온 자리를 파일별로 모은다. 파일마다 카드를 띄우면 화면이
+    // 카드로 덮여 진짜 오류가 묻히므로 끝에 한 장으로 낸다.
     const undrawableByPath: Array<{ path: string; layers: SkippedLayer[] }> = [];
 
     void drainLoadQueue({
@@ -286,14 +287,10 @@ function AppShell() {
       cancelled: () => abandonedRef.current || loadCancelledRef.current,
     })
       .then(() => {
-        if (undrawableByPath.length === 0) return;
-        const total = undrawableByPath.reduce((n, f) => n + f.layers.length, 0);
-        pushError(`그릴 픽셀이 없어 뺀 레이어 ${total}개 (파일 ${undrawableByPath.length}개)`, {
-          message: undrawableByPath
-            .map(({ path, layers }) => `${fileName(path)}\n  ${layers.map((l) => `${l.path} (${l.kind})`).join("\n  ")}`)
-            .join("\n"),
-          traceback: "",
-        });
+        const report = undrawableReport(
+          undrawableByPath.map(({ path, layers }) => ({ name: fileName(path), layers }))
+        );
+        if (report) pushError(report.title, { message: report.message, traceback: "" });
       })
       // 개별 파일의 실패는 openError/pushError로 이미 보고되고 큐는 계속 돈다.
       // 여기까지 오는 것은 큐 자체가 무너진 경우뿐이라 조용히 넘기면 안 된다.
