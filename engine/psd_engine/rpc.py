@@ -5,6 +5,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import traceback
 from collections import deque
 from pathlib import Path
@@ -222,9 +224,55 @@ def _as_utf8(stream):
     return stream
 
 
+def _watch_for_orphaning():
+    """
+    앱이 사라지면 엔진도 끝낸다.
+
+    앱은 종료할 때 stdin을 닫아 아래 루프가 EOF로 빠져나오게 한다. 그런데 그
+    신호는 **루프가 stdin을 읽고 있을 때만** 닿는다. 배치처럼 한 번의 요청이
+    수십 분 도는 동안에는 아무도 stdin을 보지 않으므로 EOF가 쌓인 채로 남고,
+    엔진은 앱이 없어진 줄 모르고 계속 판다 — 실측으로 CPU 99%·RSS 8.9GB짜리가
+    남아 산출물을 계속 썼다.
+
+    그래서 메인 루프 밖에서 부모를 지켜본다. 이 스레드는 긴 작업과 무관하게
+    도므로 그때도 동작하고, 앱이 SIGKILL로 죽거나 터미널에서 Ctrl-C로 끊겨
+    정리 코드가 아예 안 도는 경우까지 함께 막는다.
+
+    죽는 방식은 os._exit이다. 지금 하던 작업을 중간에 끊는 것이 목적이므로
+    정상 종료 절차(atexit의 임시 디렉터리 정리 포함)를 기다리지 않는다 — 부모가
+    없는 이상 그 결과를 받을 사람도 없다.
+    """
+    poll = float(os.environ.get("PSD_ENGINE_ORPHAN_POLL", "2"))
+    try:
+        original = os.getppid()
+    except AttributeError:  # 윈도우 등 getppid가 없는 환경
+        return
+
+    def orphaned():
+        """
+        부모가 사라졌는가.
+
+        "처음 본 부모와 달라졌는가"만 보면 안 된다. 엔진은 psd_tools·pytoshop을
+        임포트하느라 시작이 굼떠서, 앱이 그 사이에 죽으면 여기 도달했을 때 이미
+        고아다 — 그러면 original이 처음부터 1로 잡혀 비교가 영영 거짓이 되고,
+        정확히 "배치 중에 앱을 강제 종료했다"가 그 순서다.
+        """
+        ppid = os.getppid()
+        return ppid == 1 or ppid != original
+
+    def loop():
+        while True:
+            time.sleep(poll)
+            if orphaned():
+                os._exit(0)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def main(stdin=None, stdout=None):
     from .patches import apply_pytoshop_patches
     apply_pytoshop_patches()
+    _watch_for_orphaning()
     stdin = stdin or _as_utf8(sys.stdin)
     stdout = stdout or _as_utf8(sys.stdout)
     engine = Engine(out=stdout)
