@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { findConflicts, planBatchOutputs } from "../lib/batch";
 import { batchRun, onEngineEvent, pathsExist } from "../lib/engine";
 import { loadPresets } from "../lib/presets";
+import { batchOutcome, describeVerification } from "../lib/verifyReport";
 import { toEngineError } from "../lib/preview";
 import type { FileEntry } from "../state/appStore";
 import type { BatchItemResult, EngineError, Preset } from "../lib/types";
@@ -377,12 +378,16 @@ export function BatchPanel({ files, onError, onRunningChange }: BatchPanelProps)
           <tbody>
             {results.map((r, i) => (
               <Fragment key={r.path}>
-                <tr className={r.ok ? "batch-row-ok" : "batch-row-fail"}>
+                <tr className={`batch-row-${batchOutcome(r)}`}>
                   <td title={r.path}>{fileName(r.path)}</td>
                   <td>
-                    {r.ok ? "성공" : (
+                    {batchOutcome(r) === "ok" ? (
+                      "성공"
+                    ) : (
                       <>
-                        실패{" "}
+                        {/* 쓰기가 실패한 것과 썼는데 검증이 어긋난 것은 다르다 —
+                            뒤엣것은 산출물이 디스크에 있고 열어볼 수 있다. */}
+                        {batchOutcome(r) === "failed" ? "실패" : "확인 필요"}{" "}
                         <button type="button" onClick={() => toggleExpanded(i)}>
                           {expandedRows.has(i) ? "접기" : "자세히"}
                         </button>
@@ -392,11 +397,20 @@ export function BatchPanel({ files, onError, onRunningChange }: BatchPanelProps)
                   <td>{r.layerCount ?? "-"}</td>
                   <td title={r.outputPath}>{r.outputPath ? fileName(r.outputPath) : "-"}</td>
                 </tr>
-                {!r.ok && expandedRows.has(i) && r.error && (
+                {batchOutcome(r) !== "ok" && expandedRows.has(i) && (
                   <tr className="batch-row-detail">
                     <td colSpan={4}>
-                      <p className="error-card-message">{r.error.message}</p>
-                      <pre className="error-card-traceback">{r.error.traceback}</pre>
+                      {r.error ? (
+                        <>
+                          <p className="error-card-message">{r.error.message}</p>
+                          <pre className="error-card-traceback">{r.error.traceback}</pre>
+                        </>
+                      ) : (
+                        <p className="error-card-message">
+                          {(r.verification && describeVerification(r.verification)) ??
+                            "무엇이 어긋났는지 엔진이 알려주지 않았습니다."}
+                        </p>
+                      )}
                     </td>
                   </tr>
                 )}

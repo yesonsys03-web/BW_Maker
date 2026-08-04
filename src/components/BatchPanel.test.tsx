@@ -78,9 +78,14 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-/** 결과 표의 파일 셀. 같은 이름이 위쪽 파일 선택 목록에도 있어 역할로 좁힌다. */
+/** 결과 표의 셀. 같은 이름이 위쪽 파일 선택 목록에도 있어 역할로 좁힌다. */
 function resultCells() {
   return screen.queryAllByRole("cell").map((c) => c.textContent);
+}
+
+/** 상태 칸에는 버튼 글자가 붙으므로("실패 자세히") 부분 일치로 본다. */
+function hasCell(text: string) {
+  return resultCells().some((c) => c?.includes(text));
 }
 
 function click(name: string) {
@@ -181,4 +186,44 @@ test("the background queues are told to stand aside while a batch runs", async (
   }
 
   await waitFor(() => expect(runningSignals).toEqual([true, false]));
+});
+
+// 오늘 실제로 겪은 것: 색 통일을 켠 배치가 파일마다 "실패"를 냈는데 `자세히`를
+// 눌러도 아무것도 안 나왔다. 상세 칸이 error가 있을 때만 그려졌기 때문이고,
+// 검증 불일치는 예외가 아니라 결과값이라 error가 없다.
+test("a file that was written but did not verify says so, and says why", async () => {
+  await startRun();
+  runs[0].d.resolve({
+    results: [{
+      path: "/cuts/a.psd",
+      ok: false,
+      outputPath: "/out/a_LINE.psd",
+      layerCount: 21,
+      verification: {
+        ok: false, canvasOk: true, layerCountOk: true, expectedLayers: 21, actualLayers: 21,
+        layers: [
+          { name: "RUG", nameOk: true, pixelChecked: true, pixelOk: false },
+          { name: "BG", nameOk: true, pixelChecked: true, pixelOk: true },
+        ],
+      },
+    }],
+  });
+
+  // 쓰기 실패가 아니다 — 파일은 디스크에 있다.
+  await waitFor(() => expect(hasCell("확인 필요")).toBe(true));
+  expect(hasCell("실패")).toBe(false);
+
+  click("자세히");
+  await waitFor(() => expect(screen.getByText(/픽셀이 원본과 다른 레이어 1개: RUG/)).toBeTruthy());
+});
+
+test("a file that could not be written is still a plain failure", async () => {
+  await startRun();
+  runs[0].d.resolve({
+    results: [{ path: "/cuts/a.psd", ok: false, error: { message: "output already exists", traceback: "T" } }],
+  });
+
+  await waitFor(() => expect(hasCell("실패")).toBe(true));
+  click("자세히");
+  await waitFor(() => expect(screen.getByText("output already exists")).toBeTruthy());
 });
