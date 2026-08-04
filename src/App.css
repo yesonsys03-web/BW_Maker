@@ -299,6 +299,16 @@ input[type="text"] {
   min-width: 0;
 }
 
+/* 내보내기에 나갈 장수. 이름과 상태 배지 사이에서 줄바꿈되면 "3 / 장"으로
+   깨지므로 붙여두고, 이름이 먼저 자리를 갖도록 줄어들지 않게만 한다. */
+.file-entry-count {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 0.78em;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .status-badge {
   flex-shrink: 0;
   font-size: 0.72em;

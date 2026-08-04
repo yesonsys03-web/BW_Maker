@@ -465,6 +465,21 @@ function AppShell() {
   }, [loading, prefetchCancelled, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
 
   /**
+   * 파일별 내보내기 장수. opsByPath에 이미 있는 값을 세는 것뿐이라 따로 저장하거나
+   * 엔진을 부를 것이 없다. 프리셋이 아직 안 걸린 파일은 빠진다 — 그때의 entries는
+   * 매칭 전의 전체 픽셀 leaf라 내보낼 장수가 아니다.
+   */
+  const entryCounts = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const file of state.files) {
+      if (!file.presetApplied) continue;
+      const ops = state.opsByPath[file.path];
+      if (ops) out[file.path] = ops.entries.length;
+    }
+    return out;
+  }, [state.files, state.opsByPath]);
+
+  /**
    * 진행바 자리에 띄울 "중지됨" 문구. 도는 큐가 있으면 진행바가 우선이라 null이다.
    *
    * 파일 열기가 중지된 경우에는 남은 개수를 말한다 — 사람이 아쉬워하는 값이 그것이다.
@@ -630,6 +645,7 @@ function AppShell() {
         loadProgress={loadProgress ? { ...loadProgress, label: "여는 중" } : null}
         prefetchProgress={prefetchProgress ? { ...prefetchProgress, label: "미리보기 준비 중" } : null}
         stopped={stoppedLabel}
+        entryCounts={entryCounts}
         onAddFiles={handleAddFiles}
         onSelectFile={selectFile}
         onRemoveFile={removeFile}

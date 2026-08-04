@@ -32,6 +32,16 @@ interface FilePanelProps {
    * 있습니다" 카드 한 장뿐이다.
    */
   stopped: string | null;
+  /**
+   * 파일별로 내보내기에 나갈 장수(병합까지 끝난 뒤). splitLayers를 켜두면 그대로
+   * 출력 파일 수다. 아직 프리셋이 안 걸린 파일은 없다.
+   *
+   * 이걸 행에 그냥 다는 것이 요점이다. 예전에는 이상해 보이는 파일만 골라 카드로
+   * 띄웠는데, ErrorPanel에 뜨니 형태가 "뭔가 잘못됐다"였고 정작 나머지 파일의
+   * 장수는 감췄다. 스물넷을 한눈에 훑어 이상한 것을 직접 고르는 편이, 무엇이
+   * 이상한지를 임계값으로 정해두는 것보다 낫다.
+   */
+  entryCounts: Record<string, number>;
   onAddFiles: (paths: string[]) => void;
   onSelectFile: (path: string) => void;
   onRemoveFile: (path: string) => void;
@@ -94,6 +104,7 @@ export function FilePanel({
   loadProgress,
   prefetchProgress,
   stopped,
+  entryCounts,
   onAddFiles,
   onSelectFile,
   onRemoveFile,
@@ -265,6 +276,11 @@ export function FilePanel({
                     {fileName(file.path)}
                   </span>
                   <span className={`status-badge status-${file.status}`}>{STATUS_LABEL[file.status]}</span>
+                  {entryCounts[file.path] !== undefined && (
+                    <span className="file-entry-count" title="내보내기에 나갈 장수">
+                      {entryCounts[file.path]}장
+                    </span>
+                  )}
                 </button>
                 <button
                   type="button"
