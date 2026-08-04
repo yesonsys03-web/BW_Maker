@@ -34,3 +34,7 @@ target/engine-*
 *.njsproj
 *.sln
 *.sw?
+
+# scripts/export-baseline.py 가 뜬 픽셀 기준선. 실제 납품 PSD에 딸린 측정 결과라
+# 리포에 넣지 않는다 — 원본이 바뀌면 무효가 되고, 뜨는 데 몇 시간이 걸린다.
+baseline/
