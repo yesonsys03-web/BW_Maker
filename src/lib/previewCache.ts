@@ -2,12 +2,19 @@ import { isDocumentView, visibleIdsForPreview } from "./preview";
 import type { TreeNode } from "./types";
 
 /**
- * 렌더된 미리보기 이미지(data URL) 캐시 상한(문자 수). 1500px PNG 한 장이
- * base64로 대략 0.3~1.5MB이므로, 이 예산이면 라인 작업 한 컷 분량의 토글
- * 조합과 파일 몇 개를 담고도 남는다. 초과하면 LRU로 버린다 — 엔진의
- * PREVIEW_TILE_BUDGET_BYTES(engine/psd_engine/render.py)와 같은 방식이다.
+ * 렌더된 미리보기 이미지(data URL) 캐시 상한(문자 수). 초과하면 LRU로 버린다 —
+ * 엔진의 PREVIEW_TILE_BUDGET_BYTES(engine/psd_engine/render.py)와 같은 방식이다.
+ *
+ * 처음에는 48MB였다. "한 컷 분량"을 기준으로 잡은 값인데, 폴더를 통째로 열어
+ * 25개를 오가는 지금 방식에는 모자란다: 1500px PNG 한 장이 base64로 1~4MB이고
+ * 여기에 토글 조합마다 다른 판이 더 쌓이므로, 예산을 넘긴 순간부터 오래된 파일이
+ * 버려진다. 그 파일을 다시 누르면 합성을 처음부터 다시 하는데, 실측으로 가장
+ * 무거운 파일이 **41초**였다(1.3GB / VtINTVoxOfficeDeskFrontWDa).
+ *
+ * 버리는 대가가 그만큼 크므로 넉넉히 잡는다. 문자 하나가 2바이트여도 512MB
+ * 수준이고, 세션 하나가 파일 크기만큼(700MB급) 먹는 엔진 쪽에 비하면 작다.
  */
-export const PREVIEW_CACHE_BUDGET_CHARS = 48 * 1024 * 1024;
+export const PREVIEW_CACHE_BUDGET_CHARS = 256 * 1024 * 1024;
 
 /**
  * 한 파일을 어떻게 렌더하고 그 결과를 어느 키에 담을지. 화면에 띄우는 쪽과 미리
