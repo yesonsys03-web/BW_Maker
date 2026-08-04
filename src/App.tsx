@@ -204,9 +204,19 @@ function AppShell() {
   //
   // 실측상 세션 하나가 파일 크기만큼(700MB급) 메모리를 쓰므로 총량은 늘리지
   // 않았다 — 두 칸 중 한 칸을 화면 몫으로 못박는 것뿐이다.
+  //
+  // 다만 로드 큐가 도는 동안에는 고정을 푼다. 그때는 이 pin이 지키는 것이 없다 —
+  // 미리보기 캔버스는 paused(=loading)라 안 그리고, 썸네일도 준비 큐도 loading에
+  // 막혀 있어 활성 파일의 세션을 읽는 사람이 아무도 없다. 그런데 고정해두면 두 칸
+  // 중 한 칸이 묶여 큐가 쓸 수 있는 것은 한 칸뿐이고, 여유가 0이 된다: 어디선가
+  // open_psd가 하나만 끼어들어도 큐가 방금 연 세션이 곧바로 밀려나 apply_preset이
+  // 'unknown or evicted session'으로 떨어진다(재시도 상한까지 밀린다). 로드 중에는
+  // 두 칸을 다 큐에 주고, 끝나는 순간 다시 고정한다.
   useEffect(() => {
-    void pinFile(state.activePath).catch((e) => pushError("파일 고정 실패", toEngineError(e)));
-  }, [state.activePath, pushError]);
+    void pinFile(loading ? null : state.activePath).catch((e) =>
+      pushError("파일 고정 실패", toEngineError(e))
+    );
+  }, [state.activePath, loading, pushError]);
 
   // 미리보기 준비 큐. 로드가 끝난 뒤 조용히 돌면서 파일마다 라인 합성을 미리
   // 만들어 캐시에 넣어둔다 — 그래야 파일을 눌렀을 때 엔진에 가지 않고 바로 뜬다.
