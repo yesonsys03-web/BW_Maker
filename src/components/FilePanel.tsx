@@ -50,6 +50,8 @@ interface FilePanelProps {
   onAddFiles: (paths: string[]) => void;
   onSelectFile: (path: string) => void;
   onRemoveFile: (path: string) => void;
+  /** 목록을 통째로 비운다. 폴더를 갈아끼울 때 쓴다. */
+  onClearFiles: () => void;
   onCancelLoad: () => void;
   onResume: () => void;
   onError: (title: string, error: EngineError) => void;
@@ -117,12 +119,29 @@ export function FilePanel({
   onAddFiles,
   onSelectFile,
   onRemoveFile,
+  onClearFiles,
   onCancelLoad,
   onResume,
   onError,
 }: FilePanelProps) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  /**
+   * 사람이 직접 손댄 파일이 있는지. 프리셋 자동 적용만 걸린 파일은 여기 안 든다
+   * (FileEntry.edited 주석 참고) — 폴더를 갈아끼울 때마다 확인창이 뜨면 그 창은
+   * 곧 아무도 안 읽는 창이 된다.
+   */
+  const hasEdits = files.some((f) => f.edited === true);
+
+  function handleClear() {
+    if (hasEdits) {
+      setConfirmClear(true);
+      return;
+    }
+    onClearFiles();
+  }
 
   // The drag/drop subscription below is registered once and closes over
   // addPaths, so addPaths must not change identity every time a file lands in
@@ -261,6 +280,14 @@ export function FilePanel({
           </button>
           <button
             type="button"
+            onClick={handleClear}
+            disabled={files.length === 0}
+            title="목록을 비웁니다 (엔진 세션도 닫습니다)"
+          >
+            비우기
+          </button>
+          <button
+            type="button"
             onClick={() => void handleBrowseFolder()}
             disabled={scanning}
             title="폴더 안의 PSD를 하위 폴더까지 모두 추가합니다"
@@ -321,6 +348,38 @@ export function FilePanel({
           </ul>
         )}
       </div>
+
+      {confirmClear && (
+        <div
+          className="modal-overlay"
+          onClick={(e) => {
+            e.stopPropagation();
+            setConfirmClear(false);
+          }}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h3>목록을 비울까요?</h3>
+            <p>
+              직접 편집한 파일이 {files.filter((f) => f.edited === true).length}개 있습니다. 비우면 그
+              편집(병합·이름변경 등)은 되돌릴 수 없습니다. 원본 PSD는 그대로입니다.
+            </p>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setConfirmClear(false)}>
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmClear(false);
+                  onClearFiles();
+                }}
+              >
+                비우기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -72,6 +72,7 @@ function AppShell() {
     addFiles,
     selectFile,
     removeFile,
+    clearFiles,
     togglePreview,
     setPreviewHidden,
     toggleSolo,
@@ -304,6 +305,18 @@ function AppShell() {
     },
     [addFiles, setLoadCancel, setPrefetchCancel]
   );
+
+  /**
+   * 목록을 비운다. 비우기는 "이 폴더는 끝났다"는 뜻이므로 중지 표시와 미리 만들기
+   * 실패 목록도 함께 내린다 — 이전 폴더에서 세운 중지가 다음 폴더의 큐를 막으면
+   * 사람은 누른 적 없는 중지를 만나게 된다.
+   */
+  const handleClearFiles = useCallback(() => {
+    setLoadCancel(false);
+    setPrefetchCancel(false);
+    prefetchFailedRef.current.clear();
+    clearFiles();
+  }, [clearFiles, setLoadCancel, setPrefetchCancel]);
 
   /**
    * 중지 표시를 푼다. 큐를 여기서 직접 부르지 않는 것이 요점이다 — 상태가
@@ -737,6 +750,7 @@ function AppShell() {
         onAddFiles={handleAddFiles}
         onSelectFile={selectFile}
         onRemoveFile={removeFile}
+        onClearFiles={handleClearFiles}
         onCancelLoad={cancelLoad}
         onResume={handleResume}
         onError={pushError}

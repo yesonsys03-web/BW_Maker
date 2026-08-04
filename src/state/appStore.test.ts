@@ -632,6 +632,41 @@ describe("engineRestarted", () => {
   });
 });
 
+// 폴더를 갈아끼우기 위한 것이다. `+ 폴더`는 기존 목록에 덧붙이므로, 폴더 2만
+// 보려면 먼저 비울 수 있어야 한다.
+describe("clearFiles", () => {
+  test("empties the list and everything keyed by it", () => {
+    let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd", "/b.psd"] });
+    s = appReducer(s, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+    s = { ...s, matchedIdsByPath: { "/a.psd": [1] } };
+
+    const cleared = appReducer(s, { type: "clearFiles" });
+
+    expect(cleared.files).toEqual([]);
+    expect(cleared.activePath).toBeNull();
+    expect(cleared.opsByPath).toEqual({});
+    expect(cleared.matchedIdsByPath).toEqual({});
+  });
+
+  test("clears the error cards too — they were all about the list being emptied", () => {
+    // 카드에 달린 파일 버튼이 사라진 파일을 가리키면 눌러도 아무 데도 못 간다.
+    let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
+    s = appReducer(s, {
+      type: "pushError",
+      title: "라인이 하나도 안 나온 자리 1곳",
+      error: { message: "a.psd", traceback: "" },
+      files: ["/a.psd"],
+    });
+    expect(s.errors).toHaveLength(1);
+
+    expect(appReducer(s, { type: "clearFiles" }).errors).toEqual([]);
+  });
+});
+
 describe("openFileEffect (async orchestration against the mocked engine)", () => {
   test("dispatches openStart then openSuccess on success", async () => {
     mockOpenPsd.mockResolvedValue({ sessionId: 9, width: 1, height: 1, colorMode: "RGB", depth: 8, tree: [] });

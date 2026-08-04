@@ -97,6 +97,7 @@ export type AppAction =
   | { type: "dismissError"; index: number }
   | { type: "pushError"; title: string; error: EngineError; files?: string[] }
   | { type: "removeFile"; path: string }
+  | { type: "clearFiles" }
   | { type: "sessionRefreshed"; path: string; result: OpenResult }
   | { type: "engineRestarted" };
 
@@ -364,6 +365,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         errors: [...state.errors, { title: action.title, error: action.error, files: action.files }],
       };
 
+    case "clearFiles":
+      // 목록에 딸린 것은 전부 함께 비운다. 오류 카드까지 비우는 것이 요점이다 —
+      // 그 카드들은 방금 치운 폴더에 대한 이야기이고, 카드의 파일 버튼이 이제
+      // 없는 파일을 가리키면 눌러도 아무 데도 못 간다.
+      return { ...initialAppState };
+
     case "removeFile": {
       const wasActive = state.activePath === action.path;
       const opsByPath = { ...state.opsByPath };
@@ -525,6 +532,28 @@ export async function removeFileEffect(dispatch: Dispatch<AppAction>, file: File
   dispatch({ type: "removeFile", path: file.path });
 }
 
+/**
+ * 목록을 통째로 비운다. 폴더를 갈아끼우기 위한 것이다 — `+ 폴더`는 기존 목록에
+ * 덧붙이므로, 다음 폴더만 보려면 먼저 비울 수 있어야 한다.
+ *
+ * 세션은 파일마다 하나씩 닫되 하나가 실패해도 나머지를 계속 닫는다. 그리고 닫기
+ * 결과와 무관하게 목록은 비운다 — 엔진 쪽 정리가 안 됐다고 화면이 옛 목록에
+ * 붙들려 있으면 사람이 할 수 있는 일이 없다. 어차피 세션은 LRU가 두 칸이라
+ * 대부분 이미 축출돼 있고, 남은 것도 다음 open이 밀어낸다.
+ */
+export async function clearFilesEffect(dispatch: Dispatch<AppAction>, files: FileEntry[]): Promise<void> {
+  dispatch({ type: "clearFiles" });
+  for (const file of files) {
+    if (file.sessionId === undefined) continue;
+    try {
+      await closeSession(file.sessionId);
+    } catch {
+      // 이미 축출된 세션을 닫으려 한 것이 대부분이다. 목록을 비우려던 사람에게
+      // 알릴 것이 없고, 카드를 띄우면 방금 비운 화면이 다시 카드로 덮인다.
+    }
+  }
+}
+
 export interface AppContextValue {
   state: AppState;
   ops: OpsState;
@@ -533,6 +562,7 @@ export interface AppContextValue {
   addFiles: (paths: string[]) => void;
   selectFile: (path: string) => void;
   removeFile: (path: string) => void;
+  clearFiles: () => void;
   togglePreview: (layerId: number) => void;
   setPreviewHidden: (layerIds: number[], hidden: boolean) => void;
   toggleSolo: (layerId: number) => void;
@@ -646,6 +676,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [state.files]
   );
 
+  const clearFiles = useCallback(() => {
+    void clearFilesEffect(dispatch, state.files);
+  }, [state.files]);
+
   const refreshSession = useCallback(
     (path: string, result: OpenResult) => dispatch({ type: "sessionRefreshed", path, result }),
     []
@@ -665,6 +699,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       addFiles,
       selectFile,
       removeFile,
+      clearFiles,
       togglePreview,
       setPreviewHidden,
       toggleSolo,
@@ -685,6 +720,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       addFiles,
       selectFile,
       removeFile,
+      clearFiles,
       togglePreview,
       setPreviewHidden,
       toggleSolo,
