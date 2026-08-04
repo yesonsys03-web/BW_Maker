@@ -72,8 +72,12 @@ class SessionStore:
         psd = PSDImage.open(path)
         if psd.color_mode != ColorMode.RGB:
             raise ValueError(f"unsupported color mode: {psd.color_mode!r} (RGB only)")
-        if psd.depth != 8:
-            raise ValueError(f"unsupported bit depth: {psd.depth} (8-bit only)")
+        # 심도는 묻지 않는다. 8비트만 받던 시절이 있었는데, 실제 납품 폴더에 16비트가
+        # 섞여 있었고(37개 중 2개) 열어보니 막을 이유가 없었다 — psd-tools의 topil이
+        # 이미 8비트 RGBA로 내려서 돌려주므로 render.py도 export.py도 달라질 것이
+        # 없다. 산출물은 원래부터 8비트다(export.py는 심도를 다루지 않는다).
+        #
+        # 색 모드는 계속 막는다. CMYK는 채널 구성 자체가 달라 그리는 쪽이 실패한다.
         built = build_tree(psd)
         sid = next(self._ids)
         self._sessions[sid] = {

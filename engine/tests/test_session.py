@@ -40,6 +40,15 @@ def test_rejects_non_rgb8(tmp_path):
         store.open(bad)
 
 
+# 실제 납품 폴더(03_Color_Key/00_PNTCO)에 16비트 PSD가 섞여 있었다 — 37개 중 2개.
+# psd-tools가 topil에서 이미 8비트 RGBA로 내려주므로 렌더도 내보내기도 그대로
+# 동작한다. 열기를 막고 있던 것은 게이트뿐이었다.
+def test_opens_a_16_bit_psd(fixture_psd16):
+    store = SessionStore()
+    sid = store.open(fixture_psd16)
+    assert store.get(sid)["tree"]
+
+
 # 배경 작업이 파일을 차례로 여는 동안 화면이 보고 있는 세션이 밀려나면, 썸네일과
 # 미리보기가 매번 PSD를 다시 읽어야 하고 서로의 재오픈이 상대를 걷어차다 결국
 # 'unknown or evicted session'으로 실패한다. 그래서 한 칸을 화면 몫으로 못박는다.

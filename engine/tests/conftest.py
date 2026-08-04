@@ -18,6 +18,17 @@ def make_image(name, value, x, y, w, h, alpha=255, visible=True, blend=None):
     )
 
 
+def make_image16(name, value, x, y, w, h, alpha=65535, visible=True):
+    """16비트 채널을 든 레이어. 실제 납품 폴더에 16비트 PSD가 섞여 있다."""
+    px = np.full((h, w), value, np.uint16)
+    a = np.full((h, w), alpha, np.uint16)
+    return nested_layers.Image(
+        name=name, channels={0: px, 1: px, 2: px, -1: a},
+        top=y, left=x, opacity=255, visible=visible,
+        blend_mode=enums.BlendMode.normal,
+    )
+
+
 def write_psd(path, layers_top_first, width=CANVAS_W, height=CANVAS_H):
     apply_pytoshop_patches()
     psd = nested_layers.nested_layers_to_psd(
@@ -62,3 +73,21 @@ def blend_mode_psd(tmp_path):
         make_image("base", 255, 0, 0, 32, 32),
     ], width=32, height=32)
     return p
+
+
+@pytest.fixture
+def fixture_psd16(tmp_path):
+    """16비트 RGB PSD. 8비트와 같은 모양이되 채널만 uint16이다."""
+    apply_pytoshop_patches()
+    layers = [nested_layers.Group(name="*ART", layers=[
+        make_image16("line", 3000, 0, 0, 16, 12),
+        make_image16("fill", 30000, 0, 0, 32, 24),
+    ])]
+    psd = nested_layers.nested_layers_to_psd(
+        layers, color_mode=enums.ColorMode.rgb,
+        depth=enums.ColorDepth.depth16, size=(CANVAS_W, CANVAS_H),
+    )
+    path = tmp_path / "depth16.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
