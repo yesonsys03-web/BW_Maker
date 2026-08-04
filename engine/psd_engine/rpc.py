@@ -107,15 +107,20 @@ class Engine:
         return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
                                           line_color=lineColor)}
 
-    def auto_merge_operations(self, sessionId, layerIds, roleTokens=None, rule="role"):
+    # 이 둘은 세션이 아니라 트리를 받는다. 이름만 보고 묶는 계산이라 픽셀도 PSD도
+    # 필요 없는데, 세션을 요구하면 그것이 축출됐을 때 700MB짜리 파일을 통째로 다시
+    # 읽어야 한다 — 버튼 한 번에 3.4초다. 화면은 트리를 이미 들고 있고(FileEntry.tree)
+    # 그것은 세션이 밀려나도 남으므로, 그대로 보내면 왕복이 사라진다.
+    #
+    # 규칙 자체는 여전히 엔진에만 있다. 프런트에 다시 구현하면 배치 실행 결과와
+    # 갈라지기 때문이다 — 옮긴 것은 입력이지 규칙이 아니다.
+    def auto_merge_operations(self, tree, layerIds, roleTokens=None, rule="role"):
         """레이어 패널의 자동 병합 버튼용. 프리셋 경로와 같은 함수를 쓴다."""
-        s = self.store.get(sessionId)
-        return {"operations": auto_merge_operations(s["tree"], layerIds, roleTokens, rule=rule)}
+        return {"operations": auto_merge_operations(tree, layerIds, roleTokens, rule=rule)}
 
-    def auto_merge_preview(self, sessionId, layerIds, roleTokens=None):
+    def auto_merge_preview(self, tree, layerIds, roleTokens=None):
         """규칙별 결과 장수. 드롭다운이 누르기 전에 보여준다."""
-        s = self.store.get(sessionId)
-        return {"rules": auto_merge_preview(s["tree"], layerIds, roleTokens)}
+        return {"rules": auto_merge_preview(tree, layerIds, roleTokens)}
 
     def render_document_preview(self, sessionId, maxSize=1500):
         s = self.store.get(sessionId)

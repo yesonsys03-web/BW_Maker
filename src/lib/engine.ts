@@ -8,6 +8,7 @@ import type {
   Preset,
   ExportResult,
   BatchItemResult,
+  TreeNode,
 } from "./types";
 
 export class EngineRpcError extends Error implements EngineError {
@@ -91,12 +92,12 @@ export async function applyPreset(
  * 배치 실행 결과가 갈라지지 않는다.
  */
 export async function autoMergeOperations(
-  sessionId: number,
+  tree: TreeNode[],
   layerIds: number[],
   roleTokens: string[] | null,
   rule: MergeRule
 ): Promise<{ operations: Operation[] }> {
-  return callEngine("auto_merge_operations", { sessionId, layerIds, roleTokens, rule }) as Promise<{
+  return callEngine("auto_merge_operations", { tree, layerIds, roleTokens, rule }) as Promise<{
     operations: Operation[];
   }>;
 }
@@ -107,11 +108,11 @@ export async function autoMergeOperations(
  * 쓰기 때문에 표시된 숫자와 결과가 어긋나지 않는다.
  */
 export async function autoMergePreview(
-  sessionId: number,
+  tree: TreeNode[],
   layerIds: number[],
   roleTokens: string[] | null = null
 ): Promise<{ rules: Record<MergeRule, { layerCount: number; names: string[] }> }> {
-  return callEngine("auto_merge_preview", { sessionId, layerIds, roleTokens }) as Promise<{
+  return callEngine("auto_merge_preview", { tree, layerIds, roleTokens }) as Promise<{
     rules: Record<MergeRule, { layerCount: number; names: string[] }>;
   }>;
 }

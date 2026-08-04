@@ -369,15 +369,17 @@ export function LayerTree({
    * (프리셋의 요소별 병합과 같은 함수) 여기서는 그 결과 연산만 받아 쌓는다 —
    * 규칙을 프런트에도 따로 구현하면 배치 실행 결과와 갈라진다.
    */
+  // 세션이 아니라 트리를 보낸다 — 이름만 보고 묶는 계산이라 픽셀이 필요 없고,
+  // 트리는 세션이 밀려나도 화면에 남아 있다. 세션을 쓰던 때는 파일을 오갔다
+  // 돌아오면 축출된 세션을 되살리느라 버튼 한 번에 PSD 재파싱 3.4초가 붙었다.
   async function openRuleMenu() {
-    const sid = sessionId;
-    if (!sid) return;
+    if (!tree) return;
     const targets = bulkTogglableIds(filteredLeaves);
     if (targets.length === 0) return;
     setRuleMenuOpen(true);
     setRulePreview(null);
     try {
-      const { rules } = await autoMergePreview(sid, targets, roleTokens);
+      const { rules } = await autoMergePreview(tree, targets, roleTokens);
       setRulePreview(rules);
     } catch (e) {
       setRuleMenuOpen(false);
@@ -386,14 +388,13 @@ export function LayerTree({
   }
 
   async function handleAutoMerge(rule: MergeRule) {
-    const sid = sessionId;
-    if (!sid) return;
+    if (!tree) return;
     const targets = bulkTogglableIds(filteredLeaves);
     if (targets.length === 0) return;
     setRuleMenuOpen(false);
     setAutoMerging(true);
     try {
-      const { operations } = await autoMergeOperations(sid, targets, roleTokens, rule);
+      const { operations } = await autoMergeOperations(tree, targets, roleTokens, rule);
       // 규칙을 바꿔 다시 누르는 것이 정상 사용이다. 이미 병합된 상태 위에 그대로
       // 얹으면 새 병합이 대상을 못 찾고 무시되므로, autoMergeOps가 먼저 풀고
       // 병합 항목 id를 현재 상태에 맞춰준다.
