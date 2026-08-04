@@ -20,8 +20,9 @@ import {
 } from "./lib/layout";
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS } from "./lib/presets";
-import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError } from "./lib/preview";
+import { PREVIEW_MAX_SIZE, toEngineError } from "./lib/preview";
 import { PreviewCache, previewRenderSpec } from "./lib/previewCache";
+import { missingFromChunk, nextThumbnailChunk } from "./lib/thumbnailQueue";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
 import type { Preset } from "./lib/types";
 
@@ -29,16 +30,18 @@ type BottomTab = "history" | "batch";
 
 /**
  * 썸네일을 한 번에 몇 장씩 요청할지. 엔진은 stdin 큐를 순서대로 처리하므로 이
- * 값이 곧 "썸네일 작업이 미리보기 요청을 최대 얼마나 붙잡아두는가"이다.
+ * 값이 곧 "썸네일 작업이 사람이 누른 요청을 최대 얼마나 붙잡아두는가"이다.
+ *
+ * 8이었는데 2로 줄였다. 48px 썸네일 한 장에도 레이어의 원본 해상도 RGBA를 통째로
+ * 디코드하기 때문에(engine/psd_engine/render.py) 장당 비용이 파일 크기에 따라
+ * 수십 배로 벌어진다 — 실측으로 1.4GB짜리 파일은 8장 묶음 하나가 **19초**였고,
+ * 그동안 클릭한 것이 전부 그 뒤에서 기다렸다. 총량은 그대로지만 한 번에 잡는
+ * 시간이 1/4로 줄어 반응이 그만큼 빨라진다.
  */
-const THUMBNAIL_CHUNK_SIZE = 8;
+const THUMBNAIL_CHUNK_SIZE = 2;
 
-/**
- * 첫 썸네일 청크를 보내기 전에 두는 짧은 지연. 파일을 열면 이 효과와
- * PreviewCanvas의 렌더 요청이 같은 틱에 깨어나는데, 아티스트가 기다리는 것은
- * 그림이지 썸네일이 아니다. 이만큼 양보해 미리보기 요청이 큐에 먼저 들어가게 한다.
- */
-const THUMBNAIL_START_DELAY_MS = 250;
+/** 실패 목록이 아직 없는 파일용. 매번 새 Set을 만들지 않기 위한 것. */
+const EMPTY_IDS: ReadonlySet<number> = new Set<number>();
 
 /**
  * 미리보기 준비 큐가 "화면이 그리는 중"을 기다려 주는 시간의 상한. 화면 쪽이
@@ -77,7 +80,24 @@ function AppShell() {
   // Thumbnails per file path (layer ids are only unique within a session, so
   // keying by path — not a flat id map — avoids collisions across files).
   const [thumbsByPath, setThumbsByPath] = useState<Record<string, Record<number, string>>>({});
-  const fetchedPathsRef = useRef<Set<string>>(new Set());
+  /**
+   * 위 상태의 거울. 큐가 한 회차를 마치고 곧바로 다음 회차를 계산하는데, 그때
+   * React는 아직 새 상태를 반영하지 않았다 — 상태만 보면 방금 받은 묶음을 다시
+   * 집어 큐가 끝나지 않는다. 갱신은 항상 둘을 함께 한다.
+   */
+  const thumbsRef = useRef<Record<string, Record<number, string>>>({});
+  /** 파일별로 "지금 화면에 보이는 행". LayerTree가 스크롤에 맞춰 갈아 끼운다. */
+  const wantedThumbsRef = useRef<Map<string, number[]>>(new Map());
+  /** 렌더에 실패했거나 엔진이 끝내 주지 않은 id. 다시 집으면 큐가 끝나지 않는다. */
+  const failedThumbsRef = useRef<Map<string, Set<number>>>(new Map());
+  const drainingThumbsRef = useRef(false);
+
+  const rememberFailedThumbs = useCallback((path: string, ids: number[]) => {
+    if (ids.length === 0) return;
+    const failed = failedThumbsRef.current.get(path) ?? new Set<number>();
+    for (const id of ids) failed.add(id);
+    failedThumbsRef.current.set(path, failed);
+  }, []);
 
   // 레이어 패널 폭. 파일이 아니라 사람에게 붙는 설정이라 재시작을 넘어 유지된다.
   const [treeWidth, setTreeWidth] = useState(() =>
@@ -457,106 +477,104 @@ function AppShell() {
     void applyPresetEffect(dispatch, path, sessionId, selectedPreset);
   }, [state.activePath, activeFile?.sessionId, activeFile?.presetApplied, selectedPreset, loading, dispatch]);
 
-  /**
-   * 지금 파일에서 썸네일을 받을 레이어들. 내용으로 만든 키라, 세션이 재오픈되어
-   * tree가 새 배열로 바뀌어도 값은 그대로다 — 아래 효과가 그때 다시 돌지 않게
-   * 하는 것이 요점이다.
-   */
-  const thumbIdsKey = useMemo(
-    () => (activeFile?.tree ? pixelLeafIds(activeFile.tree).join(",") : ""),
-    [activeFile?.tree]
-  );
-
-  // Background thumbnail render per opened file, in chunks. A failure lands on
-  // the error stack and leaves that file's rows showing names only.
+  // 썸네일은 "화면에 보이는 행"만 만든다. LayerTree가 스크롤에 따라 목록을
+  // 알려주고(onThumbnailsNeeded), 여기서 아직 못 받은 것만 청크로 나눠 받는다.
   //
-  // Chunked because the engine serves its stdin queue strictly in order: one
-  // request covering all 165 layers of a real plate occupies it for ~13s, and
-  // the preview the artist is actually waiting for sits behind that. Per
-  // chunk the wait is ~1s, and rows fill in progressively instead of all at
-  // the end. Chunks are issued one at a time (each awaited before the next),
-  // so a chunk's PNGs are always read before the engine's render-dir ring
-  // rotates them away.
-  useEffect(() => {
-    const path = state.activePath;
-    const sessionId = activeFile?.sessionId;
-    const tree = activeFile?.tree;
-    if (!path || !sessionId || !tree) return;
-    // 로드 큐가 도는 동안에는 양보한다. 썸네일은 한 파일에 수십 번 요청을 내는데,
-    // 엔진 세션은 두 개뿐이라 그 요청들이 큐가 방금 연 세션을 밀어내 버린다.
-    // 큐가 끝나면 fetchedPathsRef에 표시가 없으므로 그때 다시 걸린다.
-    if (loading) return;
-    if (fetchedPathsRef.current.has(path)) return;
-    fetchedPathsRef.current.add(path);
+  // 예전에는 파일을 열자마자 전 레이어를 만들었다. 실측으로 엔진 시간의 66%가
+  // 아무도 안 보는 썸네일이었고(303회 / 1038초), 엔진은 stdin 큐를 순서대로
+  // 처리하므로 그동안 사람이 누른 것이 전부 그 뒤에서 기다렸다 — 자동 병합이
+  // "어떤 파일은 즉시, 어떤 파일은 몇 초"로 갈리던 이유가 이것이다. 계산 자체는
+  // 0.01초였고, 기다린 것은 앞에 쌓인 썸네일 청크들이었다.
+  //
+  // 청크를 하나씩 await하는 것은 그대로다. 엔진 렌더 디렉터리는 세대가 돌아가므로
+  // 다음 청크를 내기 전에 이번 PNG를 다 읽어야 한다.
+  const drainThumbnails = useCallback(async () => {
+    if (drainingThumbsRef.current) return;
+    drainingThumbsRef.current = true;
+    try {
+      for (;;) {
+        const path = activePathRef.current;
+        // 로드 큐가 도는 동안에는 양보한다. 세션이 두 칸뿐이라 썸네일 요청이
+        // 큐가 방금 연 세션을 밀어낸다. 큐가 끝나면 아래 효과가 다시 부른다.
+        if (!path || loadingRef.current) return;
+        const file = filesRef.current.find((f) => f.path === path);
+        if (file?.sessionId === undefined) return;
+        const chunk = nextThumbnailChunk(
+          wantedThumbsRef.current.get(path) ?? [],
+          thumbsRef.current[path],
+          failedThumbsRef.current.get(path) ?? EMPTY_IDS,
+          THUMBNAIL_CHUNK_SIZE
+        );
+        if (chunk.length === 0) return;
 
-    const ids = pixelLeafIds(tree);
-    if (ids.length === 0) return;
-
-    let cancelled = false;
-    let finished = false;
-    void (async () => {
-      try {
-        await new Promise((resolve) => window.setTimeout(resolve, THUMBNAIL_START_DELAY_MS));
-        // 청크마다 갱신되는 현재 세션 id. 처음 잡은 값을 끝까지 쓰면, 중간에 한 번
-        // 축출돼 재오픈된 뒤로는 남은 청크가 전부 죽은 id로 나간다 — 청크마다
-        // 재오픈(=PSD 전체 재파싱)이 한 번씩 붙어 세션 두 칸을 쉴 새 없이
-        // 갈아치우고, 그 바람에 다른 작업의 세션까지 말려든다.
-        let currentSid = sessionId;
-        for (let i = 0; i < ids.length; i += THUMBNAIL_CHUNK_SIZE) {
-          if (cancelled) return;
-          const chunk = ids.slice(i, i + THUMBNAIL_CHUNK_SIZE);
+        let sid = file.sessionId;
+        try {
           const { thumbs } = await withEvictedSessionRetry(
             path,
-            currentSid,
-            (sid) => renderThumbnails(sid, chunk, 48),
+            sid,
+            (s) => renderThumbnails(s, chunk, 48),
             (result) => {
-              currentSid = result.sessionId;
+              // 청크마다 현재 id를 갱신한다. 처음 잡은 값을 끝까지 쓰면 축출된
+              // 뒤의 청크가 전부 죽은 id로 나가 매번 재오픈(=PSD 재파싱)이 붙는다.
+              sid = result.sessionId;
               refreshSession(path, result);
             }
           );
           const entries = await Promise.all(
-            Object.entries(thumbs).map(async ([id, path_]) => [Number(id), await loadPngDataUrl(path_)] as const)
+            Object.entries(thumbs).map(async ([id, p]) => [Number(id), await loadPngDataUrl(p)] as const)
           );
-          if (cancelled) return;
-          setThumbsByPath((prev) => ({ ...prev, [path]: { ...prev[path], ...Object.fromEntries(entries) } }));
+          // 상태와 ref를 함께 올린다. 다음 회차가 곧바로 ref를 읽으므로, 상태만
+          // 갱신하면 React가 반영하기 전에 같은 묶음을 다시 집어 큐가 돌지 않는다.
+          const merged = { ...thumbsRef.current, [path]: { ...thumbsRef.current[path], ...Object.fromEntries(entries) } };
+          thumbsRef.current = merged;
+          setThumbsByPath(merged);
+          // 엔진이 끝내 안 준 id는 없는 것으로 본다 — 안 그러면 같은 묶음이 계속 나간다.
+          rememberFailedThumbs(path, missingFromChunk(chunk, thumbs));
+        } catch (e) {
+          // 이 묶음만 포기하고 나머지는 계속 받는다. 실패한 행은 이름만 보인다.
+          rememberFailedThumbs(path, chunk);
+          pushError("썸네일 렌더링 실패", toEngineError(e));
         }
-        finished = true;
-      } catch (e) {
-        if (cancelled) return;
-        pushError("썸네일 렌더링 실패", toEngineError(e));
       }
-    })();
+    } finally {
+      drainingThumbsRef.current = false;
+    }
+  }, [rememberFailedThumbs, refreshSession, pushError]);
 
-    return () => {
-      cancelled = true;
-      // Switching away mid-run leaves this file with only some of its rows
-      // filled. Clearing the marker lets a later visit pick the rest up —
-      // keeping it would strand those rows on names-only forever.
-      if (!finished) fetchedPathsRef.current.delete(path);
-    };
-    // tree 배열이나 sessionId가 아니라 "어떤 레이어들의 썸네일인가"(thumbIdsKey)에
-    // 반응한다. 세션이 조용히 재오픈되면 둘 다 값은 그대로인 채 바뀌는데, 그것을
-    // 의존성으로 두면 효과가 다시 돌고 정리 함수가 fetchedPathsRef의 표시를 지워
-    // 31개 청크를 처음부터 다시 시작한다. 그 재시작이 또 재오픈을 부르면서
-    // 엔진을 영영 붙잡는다 — 미리보기 준비가 0에서 멈춰 있던 원인이 이것이다.
-  }, [state.activePath, thumbIdsKey, loading, refreshSession, pushError]);
+  /** LayerTree가 알려주는 "지금 보이는 행". 목록을 통째로 바꾼다 — 지나간 행은 빠진다. */
+  const requestThumbnails = useCallback(
+    (visibleIds: number[]) => {
+      const path = activePathRef.current;
+      if (!path) return;
+      wantedThumbsRef.current.set(path, visibleIds);
+      void drainThumbnails();
+    },
+    [drainThumbnails]
+  );
+
+  // 로드 큐가 끝났거나 파일이 열렸을 때 멈춰 있던 큐를 다시 깨운다. 보이는 행은
+  // 그대로인데 그때는 양보하느라(또는 세션이 없어) 받지 못했을 수 있다.
+  useEffect(() => {
+    if (!loading) void drainThumbnails();
+  }, [loading, state.activePath, activeFile?.sessionId, drainThumbnails]);
 
   // Removing a file (FilePanel's "×") drops its thumbnails/fetch-marker too,
   // so re-adding the same path later re-fetches instead of reusing stale
   // (or, worse, silently absent) thumbnail data.
   useEffect(() => {
     const validPaths = new Set(state.files.map((f) => f.path));
-    setThumbsByPath((prev) => {
-      let changed = false;
-      const next: typeof prev = {};
-      for (const [p, v] of Object.entries(prev)) {
-        if (validPaths.has(p)) next[p] = v;
-        else changed = true;
-      }
-      return changed ? next : prev;
-    });
-    for (const p of fetchedPathsRef.current) {
-      if (!validPaths.has(p)) fetchedPathsRef.current.delete(p);
+    let changed = false;
+    const next: Record<string, Record<number, string>> = {};
+    for (const [p, v] of Object.entries(thumbsRef.current)) {
+      if (validPaths.has(p)) next[p] = v;
+      else changed = true;
+    }
+    if (changed) {
+      thumbsRef.current = next;
+      setThumbsByPath(next);
+    }
+    for (const map of [wantedThumbsRef.current, failedThumbsRef.current]) {
+      for (const p of map.keys()) if (!validPaths.has(p)) map.delete(p);
     }
   }, [state.files]);
 
@@ -648,6 +666,7 @@ function AppShell() {
           onToggleSolo={toggleSolo}
           onSetSolo={setSolo}
           onPushOp={pushOp}
+          onThumbnailsNeeded={requestThumbnails}
           onError={pushError}
         />
       </div>

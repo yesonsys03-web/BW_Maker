@@ -44,6 +44,16 @@ interface LayerTreeProps {
   onToggleSolo: (layerId: number) => void;
   onSetSolo: (layerIds: number[], solo: boolean) => void;
   onPushOp: (op: Operation) => void;
+  /**
+   * 지금 화면에 보이는 pixel leaf id 전부. 스크롤할 때마다 새 목록으로 불린다.
+   *
+   * 썸네일을 이것만 만든다 — 500장짜리 파일을 열자마자 전부 렌더하던 때는 엔진
+   * 시간의 66%가 아무도 안 보는 그림에 갔고, 엔진은 요청을 한 줄로 세워 처리하므로
+   * 그동안 사람이 누른 것이 전부 그 뒤에서 기다렸다(자동 병합이 "랜덤하게" 느리던
+   * 이유). 목록에서 빠진 행은 큐에서도 빠지므로, 빠르게 훑고 지나간 구간까지
+   * 만들지는 않는다.
+   */
+  onThumbnailsNeeded: (visibleLayerIds: number[]) => void;
   onError: (title: string, error: EngineError) => void;
 }
 
@@ -119,6 +129,7 @@ export function LayerTree({
   onToggleSolo,
   onSetSolo,
   onPushOp,
+  onThumbnailsNeeded,
   onError,
 }: LayerTreeProps) {
   const [collapsedIds, setCollapsedIds] = useState<Set<number>>(new Set());
@@ -142,6 +153,8 @@ export function LayerTree({
   // 길어질 수 있어 한 단계 접어둔다.
   const [mergeIntoOpen, setMergeIntoOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  /** 스크롤되는 트리 본체. 썸네일 관측자의 기준(root)이다. */
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
   const previewHiddenSet = useMemo(() => new Set(ops.previewHiddenIds), [ops.previewHiddenIds]);
@@ -208,6 +221,45 @@ export function LayerTree({
           : [],
     [filtering, flatRows, expandedMerges, tree, collapsedIds]
   );
+
+  /**
+   * 화면에 들어온 행만 썸네일을 요청한다.
+   *
+   * 목록이 바뀔 때마다(스크롤이 아니라 행 구성이 바뀔 때) 관측자를 새로 걸고
+   * 지금 붙어 있는 행들을 관찰한다. rootMargin으로 화면 조금 바깥까지 미리
+   * 잡아, 스크롤하는 동안 빈 칸이 따라오지 않게 한다.
+   *
+   * 나간 행은 목록에서 뺀다. 한 번 보인 것을 계속 쌓으면 빠르게 훑고 지나간
+   * 구간까지 전부 만들게 되어, 결국 예전처럼 500장을 만들게 된다.
+   */
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root) return;
+    const visible = new Set<number>();
+    const report = () => onThumbnailsNeeded([...visible]);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        let changed = false;
+        for (const entry of entries) {
+          const raw = (entry.target as HTMLElement).dataset.thumbId;
+          const id = raw === undefined ? NaN : Number(raw);
+          if (!Number.isFinite(id)) continue;
+          if (entry.isIntersecting) {
+            if (!visible.has(id)) {
+              visible.add(id);
+              changed = true;
+            }
+          } else if (visible.delete(id)) {
+            changed = true;
+          }
+        }
+        if (changed) report();
+      },
+      { root, rootMargin: "300px 0px" }
+    );
+    root.querySelectorAll<HTMLElement>("[data-thumb-id]").forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
+  }, [visibleOrder, onThumbnailsNeeded]);
 
   // Layer ids are only unique within a single session, so switching the
   // active file (a new `path`) must drop any selection/collapse/menu state
@@ -564,7 +616,9 @@ export function LayerTree({
           👁
         </button>
         {node.kind === "pixel" && (
-          <span className="node-thumb-slot">
+          // data-thumb-id로 관측자가 이 행을 알아본다(아래 IntersectionObserver).
+          // 썸네일이 아직 없어도 자리는 있으므로 "보이면 그때 만든다"가 성립한다.
+          <span className="node-thumb-slot" data-thumb-id={node.id}>
             {thumbs[node.id] && <img className="node-thumb" src={thumbs[node.id]} alt="" draggable={false} />}
           </span>
         )}
@@ -696,7 +750,7 @@ export function LayerTree({
   }
 
   return (
-    <div className="layer-tree">
+    <div className="layer-tree" ref={scrollRef}>
       <div className="layer-filter-bar">
         <div className="layer-filter-row">
           <input
