@@ -45,7 +45,7 @@ const preset: Preset = {
   lineColor: null,
 } as unknown as Preset;
 
-const initial: AppState = { files: [], activePath: null, opsByPath: {}, matchedIds: [], errors: [] };
+const initial: AppState = { files: [], activePath: null, opsByPath: {}, matchedIdsByPath: {}, errors: [] };
 
 const leaf = (id: number, kind: string, visible = true): TreeNode => ({
   id,
@@ -247,7 +247,7 @@ describe("ops actions delegate to the active file's OpsState", () => {
       matchedLayerIds: [5, 1],
       operations: [{ op: "merge", layerIds: [1, 5], name: "M" }],
     });
-    expect(s.matchedIds).toEqual([5, 1]);
+    expect(s.matchedIdsByPath["/a.psd"]).toEqual([5, 1]);
     expect(s.opsByPath["/a.psd"].includedIds).toEqual([1, 5]);
     expect(s.opsByPath["/a.psd"].ops).toEqual([{ op: "merge", layerIds: [1, 5], name: "M" }]);
     expect(s.opsByPath["/a.psd"].entries.map((e) => e.entryId)).toEqual([-1]);
@@ -269,8 +269,76 @@ describe("ops actions delegate to the active file's OpsState", () => {
     }).not.toThrow();
     expect(s!.errors).toHaveLength(0);
     // 매칭 결과는 반영되고, 대상이 없는 작업만 아무 일도 하지 않는다.
-    expect(s!.matchedIds).toEqual([1]);
+    expect(s!.matchedIdsByPath["/a.psd"]).toEqual([1]);
     expect(s!.opsByPath["/a.psd"].entries).toEqual([{ entryId: 1, sourceIds: [1], name: null }]);
+  });
+
+  // 로드 큐는 목록의 파일을 배경에서 차례로 열고 프리셋까지 붙인다. 레이어 id는
+  // 세션(=파일) 안에서만 유일하므로, 매칭 결과를 전역 칸 하나에 담으면 마지막으로
+  // 처리된 파일의 id가 남는다 — 그 숫자들이 화면이 보고 있는 파일에서는 전혀 다른
+  // 레이어를 가리켜, "라인만"에 mask·fill·grain 같은 것이 섞여 나왔다.
+  test("a background file's preset result leaves the active file's matched ids alone", () => {
+    let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd", "/b.psd"] });
+    s = appReducer(s, { type: "openStart", path: "/a.psd", activate: true });
+    s = appReducer(s, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+    s = appReducer(s, { type: "applyPresetResult", path: "/a.psd", matchedLayerIds: [1], operations: [] });
+
+    // 로드 큐가 배경에서 여는 두 번째 파일. 화면은 계속 /a.psd를 보고 있다.
+    s = appReducer(s, { type: "openStart", path: "/b.psd", activate: false });
+    s = appReducer(s, {
+      type: "openSuccess",
+      path: "/b.psd",
+      result: { sessionId: 2, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+    s = appReducer(s, { type: "applyPresetResult", path: "/b.psd", matchedLayerIds: [2, 5], operations: [] });
+
+    expect(s.activePath).toBe("/a.psd");
+    expect(s.matchedIdsByPath["/a.psd"]).toEqual([1]);
+    expect(s.matchedIdsByPath["/b.psd"]).toEqual([2, 5]);
+  });
+
+  // 위 테스트의 절반 — 프리셋이 붙기 전, 파일이 열리는 것만으로도 전역 칸은
+  // 비워졌다. 그동안 화면의 "라인만" 목록이 통째로 사라졌다.
+  test("opening a background file does not clear the active file's matched ids", () => {
+    let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd", "/b.psd"] });
+    s = appReducer(s, { type: "openStart", path: "/a.psd", activate: true });
+    s = appReducer(s, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+    s = appReducer(s, { type: "applyPresetResult", path: "/a.psd", matchedLayerIds: [1, 2], operations: [] });
+
+    s = appReducer(s, {
+      type: "openSuccess",
+      path: "/b.psd",
+      result: { sessionId: 2, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+
+    expect(s.matchedIdsByPath["/a.psd"]).toEqual([1, 2]);
+  });
+
+  // 반대로 그 파일을 **다시** 열면 세션이 새것이므로 옛 매칭은 버려야 한다.
+  test("reopening a file drops its own stale matched ids", () => {
+    let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
+    s = appReducer(s, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+    s = appReducer(s, { type: "applyPresetResult", path: "/a.psd", matchedLayerIds: [1], operations: [] });
+
+    s = appReducer(s, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId: 9, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+
+    expect(s.matchedIdsByPath).not.toHaveProperty("/a.psd");
   });
 
   // --- solo (설계 문서 5절) ---
@@ -497,20 +565,23 @@ describe("removeFile", () => {
     expect(s.opsByPath["/b.psd"]).toEqual(s0.opsByPath["/b.psd"]);
   });
 
-  test("resets activePath and matchedIds when the removed file was active", () => {
+  test("resets activePath and drops the removed file's matched ids when it was active", () => {
     const s0 = twoFilesOpened(); // activePath is /b.psd after the second openSuccess
-    const withMatched = appReducer(s0, { type: "setMatched", matchedIds: [1, 2] });
+    const withMatched: AppState = { ...s0, matchedIdsByPath: { "/a.psd": [1], "/b.psd": [2] } };
     const s = appReducer(withMatched, { type: "removeFile", path: "/b.psd" });
     expect(s.activePath).toBeNull();
-    expect(s.matchedIds).toEqual([]);
+    expect(s.matchedIdsByPath).not.toHaveProperty("/b.psd");
+    // 남은 파일의 매칭 결과는 그대로다 — 지우는 것은 뺀 파일 것뿐이다.
+    expect(s.matchedIdsByPath["/a.psd"]).toEqual([1]);
   });
 
-  test("leaves activePath and matchedIds untouched when removing a non-active file", () => {
+  test("leaves activePath and the active file's matched ids untouched when removing another file", () => {
     const s0 = twoFilesOpened(); // activePath is /b.psd
-    const withMatched = appReducer(s0, { type: "setMatched", matchedIds: [1, 2] });
+    const withMatched: AppState = { ...s0, matchedIdsByPath: { "/a.psd": [1], "/b.psd": [2] } };
     const s = appReducer(withMatched, { type: "removeFile", path: "/a.psd" });
     expect(s.activePath).toBe("/b.psd");
-    expect(s.matchedIds).toEqual([1, 2]);
+    expect(s.matchedIdsByPath).not.toHaveProperty("/a.psd");
+    expect(s.matchedIdsByPath["/b.psd"]).toEqual([2]);
   });
 });
 
@@ -548,7 +619,7 @@ describe("engineRestarted", () => {
       path: "/a.psd",
       result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
     });
-    s = appReducer(s, { type: "setMatched", matchedIds: [1] });
+    s = { ...s, matchedIdsByPath: { "/a.psd": [1] } };
 
     const restarted = appReducer(s, { type: "engineRestarted" });
 
@@ -557,7 +628,7 @@ describe("engineRestarted", () => {
       { path: "/b.psd", status: "idle" },
     ]);
     expect(restarted.activePath).toBeNull();
-    expect(restarted.matchedIds).toEqual([]);
+    expect(restarted.matchedIdsByPath).toEqual({});
   });
 });
 

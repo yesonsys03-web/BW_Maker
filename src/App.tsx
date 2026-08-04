@@ -536,7 +536,7 @@ function AppShell() {
           path={activeFile?.path}
           status={activeFile?.status}
           ops={ops}
-          matchedIds={state.matchedIds}
+          matchedIds={(state.activePath && state.matchedIdsByPath[state.activePath]) || []}
           thumbs={(state.activePath && thumbsByPath[state.activePath]) || {}}
           onSetIncluded={setIncluded}
           onTogglePreview={togglePreview}

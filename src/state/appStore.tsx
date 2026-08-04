@@ -59,7 +59,17 @@ export interface AppState {
   files: FileEntry[];
   activePath: string | null;
   opsByPath: Record<string, OpsState>;
-  matchedIds: number[];
+  /**
+   * 프리셋 규칙에 걸린 레이어 id — 파일별로 나눠 담는다. "라인만" 필터가 이걸
+   * 읽는다.
+   *
+   * 전역 배열 하나로는 안 된다. 레이어 id는 세션(=파일) 안에서만 유일한데,
+   * 로드 큐가 배경에서 파일마다 프리셋을 붙이므로 전역 필드에는 마지막으로
+   * 처리된 파일의 id가 남는다. 그 숫자들은 지금 보고 있는 파일에서 전혀 다른
+   * 레이어를 가리키고, "라인만"에 mask·fill·grain 같은 것이 섞여 나온다.
+   * opsByPath와 같은 모양으로 두는 이유가 이것이다.
+   */
+  matchedIdsByPath: Record<string, number[]>;
   errors: ErrorEntry[];
 }
 
@@ -69,7 +79,6 @@ export type AppAction =
   | { type: "openSuccess"; path: string; result: OpenResult }
   | { type: "openError"; path: string; error: EngineError }
   | { type: "selectFile"; path: string }
-  | { type: "setMatched"; matchedIds: number[] }
   | { type: "togglePreview"; path: string; layerId: number }
   | { type: "setPreviewHidden"; path: string; layerIds: number[]; hidden: boolean }
   | { type: "toggleSolo"; path: string; layerId: number }
@@ -97,7 +106,7 @@ export const initialAppState: AppState = {
   files: [],
   activePath: null,
   opsByPath: {},
-  matchedIds: [],
+  matchedIdsByPath: {},
   errors: [],
 };
 
@@ -168,9 +177,14 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
     case "openSuccess": {
       const { path, result } = action;
+      // 새 세션이라 이 파일의 옛 매칭 결과는 버린다. **이 파일 것만** 버리는
+      // 것이 요점이다 — 배경에서 파일을 여는 동안 보고 있는 파일의 "라인만"
+      // 목록까지 비워지면 안 된다.
+      const matchedIdsByPath = { ...state.matchedIdsByPath };
+      delete matchedIdsByPath[path];
       return {
         ...state,
-        matchedIds: [],
+        matchedIdsByPath,
         files: updateFile(state.files, path, {
           status: "open",
           sessionId: result.sessionId,
@@ -196,9 +210,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
     case "selectFile":
       return { ...state, activePath: action.path };
-
-    case "setMatched":
-      return { ...state, matchedIds: action.matchedIds };
 
     case "togglePreview": {
       const current = state.opsByPath[action.path];
@@ -291,7 +302,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         };
         return {
           ...state,
-          matchedIds: action.matchedLayerIds,
+          // 활성 파일이 아니라 **적용한 파일**의 칸에 넣는다. 로드 큐는 배경에서
+          // 파일마다 프리셋을 붙이는데, 전역 칸 하나에 덮어쓰면 화면이 보고 있는
+          // 파일의 목록이 남의 id로 바뀐다(AppState.matchedIdsByPath 주석 참고).
+          matchedIdsByPath: { ...state.matchedIdsByPath, [action.path]: action.matchedLayerIds },
           // presetApplied: 사람이 "적용"을 먼저 눌렀다면 자동 적용이 그 위에 또
           // 걸릴 이유가 없다. edited: 여기서 만들어진 ops는 프리셋의 산물이지
           // 사람의 편집이 아니므로, 지금 상태에는 지킬 편집이 없다.
@@ -341,12 +355,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       const wasActive = state.activePath === action.path;
       const opsByPath = { ...state.opsByPath };
       delete opsByPath[action.path];
+      // 목록에서 뺀 파일의 매칭 결과도 함께 버린다. 남겨두면 같은 경로를 나중에
+      // 다시 추가했을 때 옛 세션의 id가 되살아난다.
+      const matchedIdsByPath = { ...state.matchedIdsByPath };
+      delete matchedIdsByPath[action.path];
       return {
         ...state,
         files: state.files.filter((f) => f.path !== action.path),
         opsByPath,
+        matchedIdsByPath,
         activePath: wasActive ? null : state.activePath,
-        matchedIds: wasActive ? [] : state.matchedIds,
       };
     }
 
@@ -382,7 +400,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         activePath: null,
-        matchedIds: [],
+        // 옛 프로세스가 들고 있던 세션이 전부 사라졌으므로 그 세션에서 나온
+        // 매칭 결과도 전부 버린다.
+        matchedIdsByPath: {},
         files: state.files.map((f) => ({ path: f.path, status: "idle" })),
       };
 
