@@ -1,5 +1,6 @@
 """열린 PSD 세션 관리. LRU 최대 2개 (640MB급 파일 메모리 보호)."""
 import itertools
+import os
 from collections import OrderedDict
 
 from psd_tools import PSDImage
@@ -32,8 +33,8 @@ class SessionStore:
         self._pinned_path = path
 
     def _pinned_sid(self):
-        """고정된 경로의 세션 중 가장 최근 것. 같은 파일이 두 번 열려 있을 수 있는데
-        (재오픈 직후) 둘 다 지키면 버릴 것이 없어져 상한이 무너진다."""
+        """고정된 경로의 세션. open이 경로+mtime으로 중복을 막으므로 보통 하나뿐이고,
+        아티스트가 저장해 mtime이 갈린 판이 남아 있으면 가장 최근 것을 지킨다."""
         if self._pinned_path is None:
             return None
         for sid in reversed(self._sessions):
@@ -52,6 +53,22 @@ class SessionStore:
             del self._sessions[victim]
 
     def open(self, path):
+        path = str(path)
+        mtime = os.path.getmtime(path)
+        # 같은 파일이 이미 열려 있고 내용도 그대로면 그 세션을 다시 쓴다.
+        #
+        # 두 번 열면 700MB급 파일이 메모리에 두 벌 올라가는 데다, 상한이 2칸이라
+        # 그 복제본이 원본을 밀어낸다 — 축출은 경로가 아니라 세션 단위로 고르고
+        # pin은 가장 최근 것 하나만 지키므로, **고정해둔 파일조차 자기 복제본에게
+        # 밀렸다.** 축출 복구 재시도가 둘 이상 겹칠 때 서로의 세션을 걷어차며
+        # 'unknown or evicted session'을 만들어내던 것이 이것이다.
+        #
+        # mtime을 함께 보는 이유: 아티스트가 포토샵에서 저장했다면 같은 경로라도
+        # 다른 파일이므로 다시 읽어야 한다.
+        for sid, s in self._sessions.items():
+            if s["path"] == path and s["mtime"] == mtime:
+                self._sessions.move_to_end(sid)
+                return sid
         psd = PSDImage.open(path)
         if psd.color_mode != ColorMode.RGB:
             raise ValueError(f"unsupported color mode: {psd.color_mode!r} (RGB only)")
@@ -61,7 +78,8 @@ class SessionStore:
         sid = next(self._ids)
         self._sessions[sid] = {
             "psd": psd,
-            "path": str(path),
+            "path": path,
+            "mtime": mtime,
             "tree": built["tree"],
             "nodes_by_id": built["nodes_by_id"],
             "layers_by_id": built["layers_by_id"],

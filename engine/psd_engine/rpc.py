@@ -78,7 +78,10 @@ class Engine:
             # 재사용해도 되는지 판단하는 근거다 — 세션 id로는 판단할 수 없다.
             # 세션은 LRU에 밀려 수시로 새로 열리지만 그때 파일 내용은 그대로이고,
             # 반대로 아티스트가 포토샵에서 저장하면 내용이 달라진다.
-            "mtime": os.path.getmtime(path),
+            # 세션이 읽어둔 값을 그대로 쓴다. 여기서 다시 재면, 세션을 재사용하는
+            # 경우(SessionStore.open) 트리는 옛 판인데 시각만 새 값이 되어 캐시
+            # 키가 실제 내용과 어긋난다.
+            "mtime": s["mtime"],
         }
 
     def close_session(self, sessionId):
