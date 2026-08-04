@@ -650,7 +650,24 @@ describe("openFileEffect (async orchestration against the mocked engine)", () =>
       type: "openError",
       path: "/a.psd",
       error: { message: "boom", traceback: "Traceback ..." },
+      // 클릭 한 번에 대한 응답이므로 그 자리에서 카드가 떠야 한다.
+      quiet: false,
     });
+  });
+
+  // 폴더를 한꺼번에 불러올 때는 파일마다 카드가 뜨면 패널이 덮인다. collect를 준
+  // 쪽(로드 큐)은 실패를 모아 끝에 한 장으로 내므로, 여기서는 조용히 지나간다.
+  test("with collect, the failure is handed back instead of raising its own card", async () => {
+    mockOpenPsd.mockRejectedValue(new EngineRpcError({ message: "boom", traceback: "T" }));
+    const actions: AppAction[] = [];
+    const collected: Array<[string, string]> = [];
+
+    await openFileEffect((a) => actions.push(a), "/a.psd", {
+      collect: (path, error) => collected.push([path, error.message]),
+    });
+
+    expect(actions[1]).toMatchObject({ type: "openError", path: "/a.psd", quiet: true });
+    expect(collected).toEqual([["/a.psd", "boom"]]);
   });
 });
 

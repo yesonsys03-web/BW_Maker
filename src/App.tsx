@@ -30,6 +30,7 @@ import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, toEngineError } from "./lib/preview";
 import { PreviewCache, previewRenderSpec } from "./lib/previewCache";
+import { openFailureReport, type FailedOpen } from "./lib/openReport";
 import { undrawableReport } from "./lib/skippedReport";
 import { missingFromChunk, nextThumbnailChunk } from "./lib/thumbnailQueue";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
@@ -322,13 +323,20 @@ function AppShell() {
     // 라인이 하나도 안 나온 자리를 파일별로 모은다. 파일마다 카드를 띄우면 화면이
     // 카드로 덮여 진짜 오류가 묻히므로 끝에 한 장으로 낸다.
     const undrawableByPath: Array<{ path: string; layers: SkippedLayer[] }> = [];
+    // 열리지 않은 파일. 파일마다 카드를 띄우면 화면이 덮이므로 끝에 한 장으로 낸다 —
+    // 빠진 레이어 카드와 같은 이유다.
+    const openFailures: FailedOpen[] = [];
 
     void drainLoadQueue({
       pendingPaths: () => filesRef.current.filter((f) => f.status === "idle").map((f) => f.path),
       processPath: async (path) => {
         // 아직 아무것도 안 보고 있으면 첫 파일을 띄워준다. 그 뒤로는 사람이
         // 보고 있는 화면을 뺏지 않는다.
-        const result = await openFileEffect(dispatch, path, { activate: activePathRef.current === null });
+        const result = await openFileEffect(dispatch, path, {
+          activate: activePathRef.current === null,
+          collect: (failed, error) =>
+            openFailures.push({ path: failed, name: fileName(failed), message: error.message, traceback: error.traceback }),
+        });
         const preset = presetRef.current;
         // 프리셋은 파일을 연 직후에 붙인다 — 그래야 세션이 아직 엔진의 LRU 안에
         // 있어서 다시 파싱하지 않는다.
@@ -348,6 +356,11 @@ function AppShell() {
       cancelled: () => abandonedRef.current || loadCancelledRef.current,
     })
       .then(() => {
+        const failures = openFailureReport(openFailures);
+        if (failures) {
+          pushError(failures.title, { message: failures.message, traceback: failures.traceback }, failures.paths);
+        }
+
         const report = undrawableReport(
           undrawableByPath.map(({ path, layers }) => ({ path, name: fileName(path), layers }))
         );

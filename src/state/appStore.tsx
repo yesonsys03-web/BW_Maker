@@ -83,7 +83,7 @@ export type AppAction =
   | { type: "addFiles"; paths: string[] }
   | { type: "openStart"; path: string; activate: boolean }
   | { type: "openSuccess"; path: string; result: OpenResult }
-  | { type: "openError"; path: string; error: EngineError }
+  | { type: "openError"; path: string; error: EngineError; quiet?: boolean }
   | { type: "selectFile"; path: string }
   | { type: "togglePreview"; path: string; layerId: number }
   | { type: "setPreviewHidden"; path: string; layerIds: number[]; hidden: boolean }
@@ -211,7 +211,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         files: updateFile(state.files, action.path, { status: "error" }),
-        errors: [...state.errors, { title: `파일 열기 실패: ${action.path}`, error: action.error }],
+        // quiet면 카드를 내지 않는다. 폴더를 한꺼번에 불러올 때 파일마다 카드가
+        // 뜨면 패널이 덮이므로, 로드 큐가 모아 끝에 한 장으로 낸다.
+        errors: action.quiet
+          ? state.errors
+          : [...state.errors, { title: `파일 열기 실패: ${action.path}`, error: action.error }],
       };
 
     case "selectFile":
@@ -434,7 +438,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 export async function openFileEffect(
   dispatch: Dispatch<AppAction>,
   path: string,
-  options: { activate?: boolean } = {}
+  options: { activate?: boolean; collect?: (path: string, error: EngineError) => void } = {}
 ): Promise<OpenResult | null> {
   dispatch({ type: "openStart", path, activate: options.activate !== false });
   try {
@@ -443,7 +447,10 @@ export async function openFileEffect(
     return result;
   } catch (e) {
     const error: EngineError = e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
-    dispatch({ type: "openError", path, error });
+    // collect를 준 쪽은 실패를 모아 스스로 알린다(로드 큐). 안 준 쪽은 클릭 한
+    // 번에 대한 응답이므로 그 자리에서 카드가 뜨는 것이 맞다.
+    dispatch({ type: "openError", path, error, quiet: options.collect !== undefined });
+    options.collect?.(path, error);
     return null;
   }
 }
