@@ -1300,6 +1300,34 @@ input[type="text"] {
   white-space: pre-wrap;
 }
 
+/* 카드가 이름을 댄 파일로 가는 버튼. 본문에 적힌 순서 그대로 늘어선다. */
+.error-card-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3em;
+  margin: 0.4em 0 0;
+}
+
+.error-card-file {
+  padding: 0.15em 0.5em;
+  font: inherit;
+  font-size: 0.9em;
+  color: inherit;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  /* 파일명이 길어 카드를 넘기므로 자른다. 전체 경로는 title에 있다. */
+  max-width: 22em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.error-card-file:hover {
+  background: var(--bg-2);
+}
+
 .error-card-traceback {
   margin: 0.4em 0 0;
   max-height: 200px;

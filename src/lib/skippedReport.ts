@@ -1,6 +1,7 @@
 import type { SkippedLayer } from "./engine";
 
 export interface UndrawableFile {
+  path: string;
   /** 화면에 보일 파일 이름. 경로 전체를 넣으면 카드가 한 줄을 다 먹는다. */
   name: string;
   layers: SkippedLayer[];
@@ -19,7 +20,9 @@ export interface UndrawableFile {
  * (`line curves`) 파일이 잘못된 것이 아니라는 신호가 되는데, 이름만으로는
  * 그것이 안 보인다.
  */
-export function undrawableReport(files: UndrawableFile[]): { title: string; message: string } | null {
+export function undrawableReport(
+  files: UndrawableFile[]
+): { title: string; message: string; paths: string[] } | null {
   if (files.length === 0) return null;
 
   let places = 0;
@@ -44,5 +47,7 @@ export function undrawableReport(files: UndrawableFile[]): { title: string; mess
   return {
     title: `라인이 하나도 안 나온 자리 ${places}곳 (파일 ${files.length}개)`,
     message: blocks.join("\n"),
+    // 본문에 적힌 순서 그대로. 카드에서 눌러 그 파일로 간다.
+    paths: files.map((f) => f.path),
   };
 }

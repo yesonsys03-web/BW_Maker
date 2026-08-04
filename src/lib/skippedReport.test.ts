@@ -15,6 +15,7 @@ test("counts places, not layers — two empty lines in one group are one place",
   // 있었는데, 사람이 열어볼 자리는 그 그룹 하나다.
   const report = undrawableReport([
     {
+      path: "/cuts/a.psd",
       name: "a.psd",
       layers: [layer("BGCU/BG/wall 2/trim/TRIM copy 26/LINES"), layer("BGCU/BG/wall 2/trim/TRIM copy 26/LINES")],
     },
@@ -27,13 +28,16 @@ test("counts places, not layers — two empty lines in one group are one place",
 test("separate groups are separate places", () => {
   const report = undrawableReport([
     {
+      path: "/cuts/a.psd",
       name: "a.psd",
       layers: [layer("BGCU/BG/trim/TRIM copy 27/LINES"), layer("BGCU/BG/trim/TRIM copy 28/LINES")],
     },
-    { name: "b.psd", layers: [layer("LayOut/BG/Railing/Railing/LINE")] },
+    { path: "/cuts/b.psd", name: "b.psd", layers: [layer("LayOut/BG/Railing/Railing/LINE")] },
   ]);
 
   expect(report?.title).toBe("라인이 하나도 안 나온 자리 3곳 (파일 2개)");
+  // 카드에서 눌러 갈 수 있도록, 본문에 적힌 순서 그대로 경로가 따라온다.
+  expect(report?.paths).toEqual(["/cuts/a.psd", "/cuts/b.psd"]);
   expect(report?.message).toBe(
     [
       "a.psd",
@@ -46,13 +50,13 @@ test("separate groups are separate places", () => {
 });
 
 test("the kind is kept — an adjustment layer never had pixels to begin with", () => {
-  const report = undrawableReport([{ name: "a.psd", layers: [layer("LayOut/BG/line curves", "curves")] }]);
+  const report = undrawableReport([{ path: "/cuts/a.psd", name: "a.psd", layers: [layer("LayOut/BG/line curves", "curves")] }]);
 
   expect(report?.message).toBe("a.psd\n  LayOut/BG — line curves (curves)");
 });
 
 test("a layer at the document root has no group to name", () => {
-  const report = undrawableReport([{ name: "a.psd", layers: [layer("LINE")] }]);
+  const report = undrawableReport([{ path: "/cuts/a.psd", name: "a.psd", layers: [layer("LINE")] }]);
 
   expect(report?.message).toBe("a.psd\n  (최상위) — LINE (pixel)");
 });

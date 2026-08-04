@@ -288,9 +288,9 @@ function AppShell() {
     })
       .then(() => {
         const report = undrawableReport(
-          undrawableByPath.map(({ path, layers }) => ({ name: fileName(path), layers }))
+          undrawableByPath.map(({ path, layers }) => ({ path, name: fileName(path), layers }))
         );
-        if (report) pushError(report.title, { message: report.message, traceback: "" });
+        if (report) pushError(report.title, { message: report.message, traceback: "" }, report.paths);
       })
       // 개별 파일의 실패는 openError/pushError로 이미 보고되고 큐는 계속 돈다.
       // 여기까지 오는 것은 큐 자체가 무너진 경우뿐이라 조용히 넘기면 안 된다.
@@ -746,7 +746,7 @@ function AppShell() {
         />
       )}
 
-      <ErrorPanel errors={state.errors} onDismiss={dismissError} />
+      <ErrorPanel errors={state.errors} onDismiss={dismissError} onSelectFile={selectFile} />
     </div>
   );
 }

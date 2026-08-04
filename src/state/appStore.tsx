@@ -53,6 +53,12 @@ export interface FileEntry {
 export interface ErrorEntry {
   title: string;
   error: EngineError;
+  /**
+   * 본문에 이름이 적힌 파일들의 경로, 적힌 순서 그대로. 카드에서 눌러 그 파일로
+   * 갈 수 있게 하려는 것이다 — 폴더 하나가 스물넷이면 이름을 읽고 목록에서 다시
+   * 찾는 일이 카드를 읽는 것보다 오래 걸린다.
+   */
+  files?: string[];
 }
 
 export interface AppState {
@@ -89,7 +95,7 @@ export type AppAction =
   | { type: "presetApplyStarted"; path: string }
   | { type: "undoOp"; path: string }
   | { type: "dismissError"; index: number }
-  | { type: "pushError"; title: string; error: EngineError }
+  | { type: "pushError"; title: string; error: EngineError; files?: string[] }
   | { type: "removeFile"; path: string }
   | { type: "sessionRefreshed"; path: string; result: OpenResult }
   | { type: "engineRestarted" };
@@ -349,7 +355,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, errors: state.errors.filter((_, i) => i !== action.index) };
 
     case "pushError":
-      return { ...state, errors: [...state.errors, { title: action.title, error: action.error }] };
+      return {
+        ...state,
+        errors: [...state.errors, { title: action.title, error: action.error, files: action.files }],
+      };
 
     case "removeFile": {
       const wasActive = state.activePath === action.path;
@@ -526,7 +535,7 @@ export interface AppContextValue {
   applyPresetResult: (matchedLayerIds: number[], operations: Operation[]) => void;
   undoOp: () => void;
   dismissError: (index: number) => void;
-  pushError: (title: string, error: EngineError) => void;
+  pushError: (title: string, error: EngineError, files?: string[]) => void;
   refreshSession: (path: string, result: OpenResult) => void;
   engineRestarted: () => void;
 }
@@ -617,7 +626,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const dismissError = useCallback((index: number) => dispatch({ type: "dismissError", index }), []);
 
   const pushError = useCallback(
-    (title: string, error: EngineError) => dispatch({ type: "pushError", title, error }),
+    (title: string, error: EngineError, files?: string[]) => dispatch({ type: "pushError", title, error, files }),
     []
   );
 
