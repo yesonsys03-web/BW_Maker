@@ -13,7 +13,15 @@ import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
 import { loadPngDataUrl, pinFile, renderDocumentPreview, renderPreview, renderThumbnails } from "./lib/engine";
 import {
+  BOTTOM_PANEL_HEIGHT_STORAGE_KEY,
+  DEFAULT_FILE_PANEL_WIDTH,
+  FILE_PANEL_WIDTH_STORAGE_KEY,
+  clampFilePanelWidth,
+  parseFilePanelWidth,
+  DEFAULT_BOTTOM_PANEL_HEIGHT,
   DEFAULT_TREE_PANEL_WIDTH,
+  clampBottomPanelHeight,
+  parseBottomPanelHeight,
   TREE_PANEL_WIDTH_STORAGE_KEY,
   clampTreePanelWidth,
   parseTreePanelWidth,
@@ -105,6 +113,59 @@ function AppShell() {
     parseTreePanelWidth(window.localStorage.getItem(TREE_PANEL_WIDTH_STORAGE_KEY))
   );
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  // 파일 패널 폭. 핸들이 오른쪽 모서리에 있으므로 오른쪽으로 끌수록 넓어진다.
+  const [fileWidth, setFileWidth] = useState(() =>
+    parseFilePanelWidth(window.localStorage.getItem(FILE_PANEL_WIDTH_STORAGE_KEY))
+  );
+  const fileDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  function handleFileResizeStart(e: React.PointerEvent<HTMLDivElement>) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    fileDragRef.current = { startX: e.clientX, startWidth: fileWidth };
+  }
+
+  function handleFileResizeMove(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = fileDragRef.current;
+    if (!drag) return;
+    setFileWidth(clampFilePanelWidth(drag.startWidth + (e.clientX - drag.startX), window.innerWidth));
+  }
+
+  function handleFileResizeEnd(e: React.PointerEvent<HTMLDivElement>) {
+    if (!fileDragRef.current) return;
+    fileDragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    window.localStorage.setItem(FILE_PANEL_WIDTH_STORAGE_KEY, String(fileWidth));
+  }
+
+  // 아래 패널 높이. 폭과 같은 이유로 사람에게 붙는 설정이라 재시작을 넘어 유지된다.
+  const [bottomHeight, setBottomHeight] = useState(() =>
+    parseBottomPanelHeight(window.localStorage.getItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY))
+  );
+  const bottomDragRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  function handleBottomResizeStart(e: React.PointerEvent<HTMLDivElement>) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    bottomDragRef.current = { startY: e.clientY, startHeight: bottomHeight };
+  }
+
+  function handleBottomResizeMove(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = bottomDragRef.current;
+    if (!drag) return;
+    // 핸들은 패널 위쪽 모서리에 있으므로 위로 끌수록 높아진다.
+    setBottomHeight(clampBottomPanelHeight(drag.startHeight - (e.clientY - drag.startY), window.innerHeight));
+  }
+
+  function handleBottomResizeEnd(e: React.PointerEvent<HTMLDivElement>) {
+    if (!bottomDragRef.current) return;
+    bottomDragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    window.localStorage.setItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY, String(bottomHeight));
+  }
 
   function handleResizeStart(e: React.PointerEvent<HTMLDivElement>) {
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -617,7 +678,13 @@ function AppShell() {
   }, [state.files]);
 
   return (
-    <div className="app-shell" style={{ gridTemplateColumns: `240px 1fr ${treeWidth}px` }}>
+    <div
+      className="app-shell"
+      style={{
+        gridTemplateColumns: `${fileWidth}px 1fr ${treeWidth}px`,
+        gridTemplateRows: `auto auto 1fr ${bottomHeight}px`,
+      }}
+    >
       <EngineStatus onRestarted={engineRestarted} onError={pushError} />
 
       <PresetBar
@@ -646,6 +713,14 @@ function AppShell() {
         prefetchProgress={prefetchProgress ? { ...prefetchProgress, label: "미리보기 준비 중" } : null}
         stopped={stoppedLabel}
         entryCounts={entryCounts}
+        onResizeStart={handleFileResizeStart}
+        onResizeMove={handleFileResizeMove}
+        onResizeEnd={handleFileResizeEnd}
+        onResizeReset={() => {
+          const reset = clampFilePanelWidth(DEFAULT_FILE_PANEL_WIDTH, window.innerWidth);
+          setFileWidth(reset);
+          window.localStorage.setItem(FILE_PANEL_WIDTH_STORAGE_KEY, String(reset));
+        }}
         onAddFiles={handleAddFiles}
         onSelectFile={selectFile}
         onRemoveFile={removeFile}
@@ -711,6 +786,22 @@ function AppShell() {
       </div>
 
       <div className="bottom-strip">
+        <div
+          className="bottom-resize-handle"
+          role="separator"
+          aria-label="아래 패널 높이 조절"
+          aria-orientation="horizontal"
+          onPointerDown={handleBottomResizeStart}
+          onPointerMove={handleBottomResizeMove}
+          onPointerUp={handleBottomResizeEnd}
+          onPointerCancel={handleBottomResizeEnd}
+          onDoubleClick={() => {
+            const reset = clampBottomPanelHeight(DEFAULT_BOTTOM_PANEL_HEIGHT, window.innerHeight);
+            setBottomHeight(reset);
+            window.localStorage.setItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY, String(reset));
+          }}
+          title="끌어서 높이 조절 (더블클릭으로 초기화)"
+        />
         <div className="bottom-tabs">
           <button
             type="button"

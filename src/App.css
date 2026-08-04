@@ -71,6 +71,8 @@ input[type="text"] {
 .app-shell {
   display: grid;
   grid-template-columns: 240px 1fr 320px;
+  /* 마지막 행 높이는 App.tsx가 인라인으로 덮는다(아래 패널 드래그). 여기 값은
+     그 상태가 붙기 전 한 프레임의 기본값이다. */
   grid-template-rows: auto auto 1fr 160px;
   grid-template-areas:
     "presetbar presetbar presetbar"
@@ -182,11 +184,30 @@ input[type="text"] {
 
 .file-panel {
   grid-area: files;
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--bg-1);
   border-right: 1px solid var(--border);
+}
+
+/* 파일 패널 폭 조절 손잡이. 오른쪽 모서리에 있어 오른쪽으로 끌수록 넓어진다.
+   레이어 패널·아래 패널의 것과 같은 두께·같은 강조색이다. */
+.file-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -3px;
+  width: 6px;
+  z-index: 20;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.file-resize-handle:hover,
+.file-resize-handle:active {
+  background: var(--accent);
 }
 
 .file-panel-header {
@@ -896,11 +917,30 @@ input[type="text"] {
 
 .bottom-strip {
   grid-area: bottom;
+  position: relative;
   border-top: 1px solid var(--border);
   background: var(--bg-1);
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/* 아래 패널 높이 조절 손잡이. 레이어 패널의 것과 같은 두께·같은 강조색이라
+   하나를 찾은 사람은 다른 하나도 찾는다. */
+.bottom-resize-handle {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  z-index: 20;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.bottom-resize-handle:hover,
+.bottom-resize-handle:active {
+  background: var(--accent);
 }
 
 .bottom-tabs {
@@ -933,12 +973,22 @@ input[type="text"] {
 
 /* ---------- ops history ---------- */
 
+/* 아래 패널 높이를 채우고, 스크롤은 목록만 한다. 예전에는 패널 전체가 굴러가서
+   "마지막 취소"가 위로 사라졌다 — 되돌리려고 스크롤을 올려야 하는 버튼이었다. */
+.ops-history {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
 .ops-history-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0.4em;
   font-weight: 600;
+  flex-shrink: 0;
 }
 
 .ops-history-empty {
@@ -953,6 +1003,9 @@ input[type="text"] {
   flex-direction: column;
   gap: 0.2em;
   font-size: 0.9em;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* ---------- export dialog ---------- */
@@ -1132,6 +1185,10 @@ input[type="text"] {
   display: flex;
   flex-direction: column;
   gap: 0.5em;
+  /* 아래 패널을 끌어 키운 만큼 목록도 함께 늘어나야 한다. 이게 없으면 패널만
+     커지고 안은 그대로라 아래가 통째로 빈다. */
+  height: 100%;
+  min-height: 0;
 }
 
 .batch-panel-row {
@@ -1161,7 +1218,10 @@ input[type="text"] {
   display: flex;
   flex-direction: column;
   gap: 0.15em;
-  max-height: 90px;
+  /* 90px 고정이었다 — 패널을 키워도 목록은 네 줄에서 멈췄다. 남는 높이를
+     목록이 가져가고, 아래에 결과 표가 붙으면 그만큼 양보한다. */
+  flex: 1;
+  min-height: 90px;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 6px;

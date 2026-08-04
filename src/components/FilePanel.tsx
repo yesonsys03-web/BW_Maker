@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { collectPsdFiles } from "../lib/engine";
@@ -42,6 +42,11 @@ interface FilePanelProps {
    * 이상한지를 임계값으로 정해두는 것보다 낫다.
    */
   entryCounts: Record<string, number>;
+  /** 오른쪽 모서리의 폭 조절 손잡이. 레이어 패널·아래 패널과 같은 방식이다. */
+  onResizeStart: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizeMove: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizeEnd: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizeReset: () => void;
   onAddFiles: (paths: string[]) => void;
   onSelectFile: (path: string) => void;
   onRemoveFile: (path: string) => void;
@@ -105,6 +110,10 @@ export function FilePanel({
   prefetchProgress,
   stopped,
   entryCounts,
+  onResizeStart,
+  onResizeMove,
+  onResizeEnd,
+  onResizeReset,
   onAddFiles,
   onSelectFile,
   onRemoveFile,
@@ -232,6 +241,18 @@ export function FilePanel({
 
   return (
     <div className="file-panel">
+      <div
+        className="file-resize-handle"
+        role="separator"
+        aria-label="파일 패널 폭 조절"
+        aria-orientation="vertical"
+        onPointerDown={onResizeStart}
+        onPointerMove={onResizeMove}
+        onPointerUp={onResizeEnd}
+        onPointerCancel={onResizeEnd}
+        onDoubleClick={onResizeReset}
+        title="끌어서 폭 조절 (더블클릭으로 초기화)"
+      />
       <div className="file-panel-header">
         <span>파일</span>
         <div className="file-panel-actions">
