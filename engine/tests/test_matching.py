@@ -115,10 +115,19 @@ def test_a_layer_with_nothing_to_draw_is_skipped_and_named():
 
 def test_a_tree_from_before_hasPixels_still_matches_pixel_layers_only():
     # 이 필드가 생기기 전의 트리(예: 옛 세션)에서도 동작이 달라지면 안 된다.
-    old_pixel = {"id": 0, "name": "line", "kind": "pixel", "visible": True, "path": ["line"]}
-    old_smart = {"id": 1, "name": "line2", "kind": "smartobject", "visible": True, "path": ["line2"]}
+    #
+    # 둘을 각자의 그룹에 두는 것은 빈 레이어 보고 규칙 때문이다 — 한 그룹에 두면
+    # pixel 쪽이 결과를 내므로 smartobject 쪽 보고가 접혀, 이 테스트가 보려는
+    # "빠졌고 사유는 noPixels"가 가려진다.
+    old_pixel = {"id": 0, "name": "line", "kind": "pixel", "visible": True, "path": ["A", "line"]}
+    old_smart = {"id": 1, "name": "line2", "kind": "smartobject", "visible": True,
+                 "path": ["B", "line2"]}
+    tree = [
+        {"id": 10, "name": "A", "kind": "group", "path": ["A"], "children": [old_pixel]},
+        {"id": 11, "name": "B", "kind": "group", "path": ["B"], "children": [old_smart]},
+    ]
 
-    matched, skipped = match_preset([old_pixel, old_smart], _preset())
+    matched, skipped = match_preset(tree, _preset())
 
     assert matched == [0]
     assert [s["reason"] for s in skipped] == ["noPixels"]
@@ -532,3 +541,84 @@ def test_exclude_tokens_can_be_replaced_by_the_preset():
     assert match_preset(tree, _preset(excludeTokens=["neon"])) == ([0], [
         {"id": 1, "path": "NEON LINE", "kind": "pixel", "reason": "excludedToken"},
     ])
+
+
+# --- 빈 레이어를 언제 알릴 것인가 ---
+# 카드의 존재 이유는 "이름은 LINE인데 결과에 없으면 사람이 이유를 알 방법이
+# 없다"이다. 그런데 실파일 24개에서 47장이 올라왔고, 열어보니 대부분 알릴 것이
+# 아니었다. 21장은 그룹 이름에 딸려온 자식이라 애초에 라인으로 지목된 적이 없고,
+# 다수는 같은 그룹의 형제가 결과에 들어가 그 자리의 그림이 멀쩡히 나왔다. 남길
+# 것은 "그 자리에서 라인이 하나도 안 나왔다" 하나뿐이다.
+#
+# 실측: HH0305 24개 47 → 11장, 납품 HH0306 25개 4 → 4장(그대로).
+
+def test_an_empty_child_pulled_in_by_the_group_name_is_not_reported():
+    """
+    실제 파일의 `LINE KEY BOARD` 그룹이다 — 라인이 아니라 열쇠 보드다. 자식
+    이름에 단서가 없어 그룹 이름으로 일괄 포함됐는데 그 자식들이 비어 있었고,
+    한 파일에서만 20장이 이 경로로 카드에 올라왔다. 사용자는 `bell`이나
+    `KEYS`를 라인이라고 기대한 적이 없다.
+    """
+    tree = [_group(0, "LINE KEY BOARD", [], [
+        _node(1, "BOARD", "pixel", False, path=["LINE KEY BOARD", "BOARD"]),
+        _node(2, "bell", "pixel", False, path=["LINE KEY BOARD", "bell"]),
+    ])]
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == []
+    assert skipped == []
+
+
+def test_an_empty_line_is_not_reported_when_a_sibling_line_came_through():
+    """
+    `secondary_line`이 비어 있어도 형제 `Line`이 결과에 들어갔으면 그 자리의
+    그림은 나온 것이다. 복제 템플릿의 안 쓰는 슬롯이 이렇게 생긴다 — 한 파일에서
+    복제본마다 하나씩 5장이 나왔다.
+    """
+    tree = [_group(0, "Packets", [], [
+        _node(1, "Line", "pixel", True, path=["Packets", "Line"]),
+        _node(2, "secondary_line", "pixel", False, path=["Packets", "secondary_line"]),
+    ])]
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == [1]
+    assert skipped == []
+
+
+def test_an_empty_line_is_reported_when_the_group_produced_nothing():
+    """
+    남겨야 할 단 하나의 경우다. 복제 꼬리(`TRIM copy 29`)가 통째로 비어 그
+    자리에서 라인이 한 장도 안 나왔다 — 이건 파일을 열어볼 이유가 된다.
+    """
+    tree = [_group(0, "TRIM copy 29", [], [
+        _node(1, "GRAD", "pixel", True, path=["TRIM copy 29", "GRAD"]),
+        _node(2, "LINES", "pixel", False, path=["TRIM copy 29", "LINES"]),
+    ])]
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == []
+    assert [(s["id"], s["reason"]) for s in skipped] == [(2, "noPixels")]
+
+
+def test_a_line_from_another_group_does_not_silence_this_one():
+    """
+    형제로 치는 범위는 같은 그룹뿐이다. 옆 그룹에서 나왔다고 이쪽의 빈자리를
+    덮으면, 복제본이 스무 벌인 파일에서 한 벌의 라인이 통째로 빠져도 아무도
+    모르게 된다.
+    """
+    tree = [
+        _group(0, "TRIM copy 2", [], [
+            _node(1, "LINES", "pixel", True, path=["TRIM copy 2", "LINES"]),
+        ]),
+        _group(2, "TRIM copy 3", [], [
+            _node(3, "LINES", "pixel", False, path=["TRIM copy 3", "LINES"]),
+        ]),
+    ]
+
+    matched, skipped = match_preset(tree, _preset())
+
+    assert matched == [1]
+    assert [(s["id"], s["reason"]) for s in skipped] == [(3, "noPixels")]

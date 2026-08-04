@@ -137,9 +137,24 @@ def match_preset(tree, preset):
     그래서 종류가 아니라 "그릴 픽셀이 있는가"로 가른다 — 스마트오브젝트와 셰이프는
     래스터화된 채널을 함께 저장하므로 픽셀 레이어와 똑같이 렌더된다. 다만 텍스트는
     픽셀이 있어도 뺀다(NON_ART_KINDS). 뺀 것은 조용히 버리지 않고 함께 돌려준다.
+
+    다만 noPixels만은 두 가지를 더 묻고 알린다. 이 사유는 "이름은 LINE인데 결과에
+    없다"를 알리려고 있는 것인데, 실파일 24개에서 47장이 나왔고 열어보니 대부분
+    알릴 것이 아니었다(자세한 근거는 tests/test_matching.py의 같은 절).
+
+      - 자기 이름이 걸린 것만 알린다. 그룹 이름에 딸려온 자식(`LINE KEY BOARD`의
+        `bell`, `KEYS`)은 라인으로 지목된 적이 없다.
+      - 같은 그룹에서 라인이 하나라도 나왔으면 알리지 않는다. 그 자리의 그림은
+        결과물에 들어갔다 — 복제 템플릿의 안 쓰는 슬롯(`secondary_line`)이 이렇다.
+
+    남는 것은 "그 자리에서 라인이 한 장도 안 나왔다"뿐이고, 그것만이 파일을 열어볼
+    이유가 된다. 47 → 11장이 되고 납품 폴더 25개는 4 → 4장으로 그대로다.
     """
     matched = []
     skipped = []
+    #: 결과에 라인이 하나라도 들어간 그룹의 경로. 두 번째 물음의 답이다. 그룹이
+    #: 무엇을 냈는지는 walk가 끝나야 알 수 있으므로 판정은 뒤로 미룬다.
+    producing_parents = set()
     prefixes = tuple(preset.get("excludeGroupPrefixes", []))
     exclude_tokens = preset.get("excludeTokens", DEFAULT_EXCLUDE_TOKENS)
 
@@ -180,12 +195,26 @@ def match_preset(tree, preset):
                 continue
             reason = _leaf_skip_reason(node, exclude_tokens)
             if reason:
+                if reason == SKIP_NO_PIXELS:
+                    if not self_hit:
+                        continue
+                    _skip(node, reason)
+                    # 뒤에서 걸러내기 위한 자리 표시. 돌려주기 전에 지운다.
+                    skipped[-1]["_parent"] = "/".join(node["path"][:-1])
+                    continue
                 _skip(node, reason)
                 continue
             matched.append(node["id"])
+            producing_parents.add("/".join(node["path"][:-1]))
 
     walk(tree, False, False)
-    return matched, skipped
+
+    def _worth_reporting(entry):
+        # _parent가 없으면 noPixels가 아니다 — 그 사유들은 그대로 둔다.
+        parent = entry.pop("_parent", None)
+        return parent is None or parent not in producing_parents
+
+    return matched, [s for s in skipped if _worth_reporting(s)]
 
 
 #: 역할 접미사의 기본값. 요소 이름에서 이 접미사를 떼어내 "같은 요소"를 알아낸다
