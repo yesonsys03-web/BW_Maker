@@ -473,9 +473,13 @@ export function LayerTree({
             <button
               type="button"
               className={`solo-toggle${allSoloed ? " solo-on" : ""}`}
+              // 그릴 수 있는 leaf가 하나도 없으면 누를 것이 없다. 막지 않으면
+              // 눌리기는 하는데 아무 일도 안 일어나고 켜지지도 않는 버튼이 된다
+              // (soloIds가 비어 allSoloed도 영영 false다).
+              disabled={soloIds.length === 0}
               onClick={() => handleGroupSolo(node)}
               aria-label="그룹 solo 토글"
-              title="이 그룹만 보기"
+              title={soloIds.length === 0 ? "이 그룹에는 미리보기에 그릴 레이어가 없습니다" : "이 그룹만 보기"}
             >
               ◉
             </button>
@@ -653,12 +657,15 @@ export function LayerTree({
         <button
           type="button"
           className={`solo-toggle${allSoloed ? " solo-on" : ""}`}
+          // 그룹 버튼과 같은 이유로 막는다 — 소스가 전부 non-pixel이면 solo에
+          // 넣을 id가 없어 눌러도 아무 일이 없다.
+          disabled={soloSourceIds.length === 0}
           onClick={(e) => {
             e.stopPropagation();
             onSetSolo(soloSourceIds, !allSoloed);
           }}
           aria-label="solo 토글"
-          title="이 병합의 소스만 보기"
+          title={soloSourceIds.length === 0 ? "미리보기에 그릴 소스가 없습니다" : "이 병합의 소스만 보기"}
         >
           ◉
         </button>
