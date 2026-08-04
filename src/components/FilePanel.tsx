@@ -24,10 +24,19 @@ interface FilePanelProps {
    * 없고, 도는 중에도 파일을 눌러 작업할 수 있다.
    */
   prefetchProgress: LoadBar | null;
+  /**
+   * 중지된 배경 작업이 남아 있을 때 그것이 무엇인지("남은 파일 22개"). 없으면 null.
+   * 진행바와 같은 자리에 재개 버튼을 띄우는 근거다 — 중지를 누른 그 자리에서
+   * 되돌릴 수 있어야 한다. 이게 없으면 다시 시작하는 방법이 "이미 있는 폴더를
+   * 다시 추가한다"뿐인데, 그건 아무도 짐작할 수 없고 보상도 "이미 목록에
+   * 있습니다" 카드 한 장뿐이다.
+   */
+  stopped: string | null;
   onAddFiles: (paths: string[]) => void;
   onSelectFile: (path: string) => void;
   onRemoveFile: (path: string) => void;
   onCancelLoad: () => void;
+  onResume: () => void;
   onError: (title: string, error: EngineError) => void;
 }
 
@@ -65,15 +74,31 @@ function ProgressBar({ progress, onCancel }: { progress: LoadBar; onCancel: () =
   );
 }
 
+/** 진행바와 같은 자리를 쓰는 "중지됨" 표시. 막대는 없고 재개 버튼만 있다. */
+function StoppedBar({ label, onResume }: { label: string; onResume: () => void }) {
+  return (
+    <div className="file-load-progress">
+      <div className="file-load-progress-row">
+        <span className="export-progress-label">중지됨 — {label}</span>
+        <button type="button" onClick={onResume}>
+          재개
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function FilePanel({
   files,
   activePath,
   loadProgress,
   prefetchProgress,
+  stopped,
   onAddFiles,
   onSelectFile,
   onRemoveFile,
   onCancelLoad,
+  onResume,
   onError,
 }: FilePanelProps) {
   const [isDragOver, setIsDragOver] = useState(false);
@@ -212,9 +237,11 @@ export function FilePanel({
           </button>
         </div>
       </div>
-      {(loadProgress ?? prefetchProgress) && (
+      {loadProgress ?? prefetchProgress ? (
         <ProgressBar progress={(loadProgress ?? prefetchProgress)!} onCancel={onCancelLoad} />
-      )}
+      ) : stopped ? (
+        <StoppedBar label={stopped} onResume={onResume} />
+      ) : null}
       <div
         className={`file-drop-zone${isDragOver ? " drag-over" : ""}`}
         onDragOver={handleDragOver}

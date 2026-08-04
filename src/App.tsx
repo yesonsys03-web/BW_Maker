@@ -129,10 +129,39 @@ function AppShell() {
   // 밀려나도 그대로 쓸 수 있다. 다시 필요한 것은 미리보기 렌더뿐이다.
   const [loadProgress, setLoadProgress] = useState<{ done: number; total: number } | null>(null);
   const drainingRef = useRef(false);
-  const cancelLoadRef = useRef(false);
+  /**
+   * "중지"가 세운 취소 표시. 큐마다 따로 둔다 — 진행바 자리는 하나지만 두 큐는
+   * 별개의 작업이라, "여는 중"에서 누른 중지가 그 뒤에 도는 "미리보기 준비 중"까지
+   * 함께 끄면 사용자는 누른 적 없는 작업이 멈춘 것을 보게 된다.
+   *
+   * 표시를 큐 안이 아니라 여기 바깥에 두는 것이 요점이다. 큐를 시작하는 효과는
+   * state.files가 바뀔 때마다 다시 도는데, 그 효과 안에서 취소를 지우면 중지가
+   * 다음 상태 변화까지밖에 못 간다 — 중지 직후 파일 하나를 클릭해 여는 것만으로도
+   * (selectFile이 idle 파일에 openFileEffect를 부른다) 방금 세운 중지가 풀려
+   * 큐가 통째로 다시 시작됐다. 파일을 새로 추가할 때만 푼다(handleAddFiles).
+   *
+   * 상태와 ref를 함께 든다. 큐가 도는 도중에는 값을 즉시 읽어야 하므로(cancelled)
+   * ref가 필요하고, 취소를 **푸는** 것은 효과를 다시 돌려야 하므로 상태가 필요하다.
+   * ref만 두면 다시 시작할 방법이 없다: 이미 있는 폴더를 다시 추가하면 addFiles
+   * 리듀서가 새 파일이 없다며 같은 state를 그대로 돌려주고(appStore.tsx의
+   * `additions.length === 0`), 그러면 state.files 정체가 그대로라 효과가 안 돈다.
+   */
+  const [loadCancelled, setLoadCancelled] = useState(false);
+  const [prefetchCancelled, setPrefetchCancelled] = useState(false);
+  const loadCancelledRef = useRef(false);
+  const prefetchCancelledRef = useRef(false);
+  const setLoadCancel = useCallback((cancelled: boolean) => {
+    loadCancelledRef.current = cancelled;
+    setLoadCancelled(cancelled);
+  }, []);
+  const setPrefetchCancel = useCallback((cancelled: boolean) => {
+    prefetchCancelledRef.current = cancelled;
+    setPrefetchCancelled(cancelled);
+  }, []);
   const filesRef = useRef(state.files);
   const activePathRef = useRef(state.activePath);
   const presetRef = useRef(selectedPreset);
+  const loadingRef = useRef(false);
   useEffect(() => {
     filesRef.current = state.files;
     activePathRef.current = state.activePath;
@@ -143,16 +172,47 @@ function AppShell() {
   // 두 개뿐이라, 동시에 세 군데서 열면 서로의 세션을 밀어내며 PSD를 계속 다시
   // 파싱하게 된다.
   const loading = loadProgress !== null;
+  // 썸네일 큐는 회차 사이에 이 값을 다시 읽어야 한다 — 효과가 잡아둔 값을 계속
+  // 쓰면 로드가 시작돼도 양보하지 않는다.
+  loadingRef.current = loading;
 
+  /**
+   * 진행바의 "중지". 버튼은 하나지만 진행바가 지금 무엇을 보여주고 있는지에 따라
+   * 그 큐만 세운다 — 사용자는 지금 눈에 보이는 문구를 멈추려고 누른다.
+   */
   const cancelLoad = useCallback(() => {
-    cancelLoadRef.current = true;
-  }, []);
+    if (loading) setLoadCancel(true);
+    else setPrefetchCancel(true);
+  }, [loading, setLoadCancel, setPrefetchCancel]);
+
+  /**
+   * 파일을 새로 추가하는 것은 "이제 다시 시작해도 좋다"는 뜻이므로 중지 표시를
+   * 푼다. 취소가 풀리는 유일한 지점이다 — 그 밖의 상태 변화로는 풀리지 않아야
+   * 중지가 중지로 남는다.
+   */
+  const handleAddFiles = useCallback(
+    (paths: string[]) => {
+      setLoadCancel(false);
+      setPrefetchCancel(false);
+      addFiles(paths);
+    },
+    [addFiles, setLoadCancel, setPrefetchCancel]
+  );
+
+  /**
+   * 중지 표시를 푼다. 큐를 여기서 직접 부르지 않는 것이 요점이다 — 상태가
+   * 바뀌면 두 효과가 다시 돌면서 남은 일을 스스로 다시 센다.
+   */
+  const handleResume = useCallback(() => {
+    setLoadCancel(false);
+    setPrefetchCancel(false);
+  }, [setLoadCancel, setPrefetchCancel]);
 
   useEffect(() => {
     if (drainingRef.current) return;
+    if (loadCancelled) return;
     if (!state.files.some((f) => f.status === "idle")) return;
     drainingRef.current = true;
-    cancelLoadRef.current = false;
 
     // 규칙에 걸렸지만 그릴 픽셀이 없어 빠진 레이어들을 파일별로 모은다. 파일마다
     // 카드를 띄우면 화면이 카드로 덮여 진짜 오류가 묻히므로 끝에 한 장으로 낸다.
@@ -172,8 +232,15 @@ function AppShell() {
           if (undrawable.length > 0) undrawableByPath.push({ path, layers: undrawable });
         }
       },
-      onProgress: setLoadProgress,
-      cancelled: () => cancelLoadRef.current,
+      // 큐가 끝났다는 표시(progress=null)와 drainingRef를 같은 순간에 내린다.
+      // 준비 큐는 loading이 false가 되는 것을 보고 다시 도는데, 그때 drainingRef가
+      // 아직 서 있으면 위의 가드에 걸려 되돌아가고 — 그것을 다시 깨울 신호는
+      // 없다(ref는 의존성이 아니다). 두 값을 붙여두면 그 틈이 생기지 않는다.
+      onProgress: (progress) => {
+        if (progress === null) drainingRef.current = false;
+        setLoadProgress(progress);
+      },
+      cancelled: () => loadCancelledRef.current,
     })
       .then(() => {
         if (undrawableByPath.length === 0) return;
@@ -191,7 +258,7 @@ function AppShell() {
       .finally(() => {
         drainingRef.current = false;
       });
-  }, [state.files, dispatch, pushError]);
+  }, [state.files, loadCancelled, dispatch, pushError]);
 
   // 보고 있는 파일을 엔진에 고정한다. 이게 없으면 배경 작업(미리보기 미리
   // 만들기)이 파일을 차례로 여는 동안 화면이 쓰는 세션이 계속 밀려나고, 썸네일과
@@ -258,7 +325,14 @@ function AppShell() {
   }, []);
 
   useEffect(() => {
-    if (loading || prefetchingRef.current) return;
+    // loading(=loadProgress 상태)만으로는 부족하다. 로드 큐가 방금 시작한 것은
+    // 같은 커밋 안에서 아직 상태에 반영되지 않아, 두 효과가 한 렌더에서 나란히
+    // 출발할 수 있다 — 중지했다가 재개할 때가 정확히 그 경우다(이미 열린 파일이
+    // 있어 준비 큐도 할 일이 있고, 로드 큐도 남은 대기 파일로 출발한다). 그러면
+    // 세션 두 칸을 두고 다투다 'unknown or evicted session'이 난다. 효과는 선언
+    // 순서대로 도니, 로드 큐가 동기적으로 세워둔 ref를 여기서 보면 그 틈이 없다.
+    if (loading || drainingRef.current || prefetchingRef.current) return;
+    if (prefetchCancelled) return;
 
     const pending = () => {
       const cache = previewCacheRef.current;
@@ -284,7 +358,6 @@ function AppShell() {
     if (pending().length === 0) return;
 
     prefetchingRef.current = true;
-    cancelLoadRef.current = false;
     const failures: Array<{ path: string; message: string }> = [];
 
     void drainLoadQueue({
@@ -330,7 +403,10 @@ function AppShell() {
         }
       },
       onProgress: setPrefetchProgress,
-      cancelled: () => cancelLoadRef.current,
+      // 로드 큐가 출발하면 즉시 비켜선다. 사람이 기다리는 것은 파일이 열리는
+      // 쪽이고, 미리 만들어두는 일은 그 뒤에 해도 된다. 취소 표시는 건드리지
+      // 않으므로 로드가 끝나 loading이 내려가면 알아서 다시 돈다.
+      cancelled: () => prefetchCancelledRef.current || drainingRef.current,
     })
       .then(() => {
         // 미리 만들어두는 일이 실패해도 작업을 막지 않는다(누를 때 그리면 된다).
@@ -346,7 +422,23 @@ function AppShell() {
       .finally(() => {
         prefetchingRef.current = false;
       });
-  }, [loading, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
+  }, [loading, prefetchCancelled, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
+
+  /**
+   * 진행바 자리에 띄울 "중지됨" 문구. 도는 큐가 있으면 진행바가 우선이라 null이다.
+   *
+   * 파일 열기가 중지된 경우에는 남은 개수를 말한다 — 사람이 아쉬워하는 값이 그것이다.
+   * 미리보기 준비만 중지된 경우에는 세지 않는다: 무엇이 남았는지는 캐시 적중까지
+   * 봐야 알 수 있어 렌더마다 열린 파일 전부의 트리를 걷게 된다. 재개를 누르면
+   * 큐가 스스로 다시 세고, 할 일이 없으면 그대로 끝난다(버튼은 사라진다).
+   */
+  const stoppedLabel = useMemo(() => {
+    if (loading || prefetchProgress !== null) return null;
+    const idle = state.files.filter((f) => f.status === "idle").length;
+    if (loadCancelled && idle > 0) return `남은 파일 ${idle}개`;
+    if (prefetchCancelled) return "미리보기 준비";
+    return null;
+  }, [loading, prefetchProgress, state.files, loadCancelled, prefetchCancelled]);
 
   // 로드 큐가 지나간 뒤에도 프리셋이 안 걸린 파일을 위한 그물. 프리셋 목록은
   // 비동기로 읽히므로(PresetBar) 그보다 파일이 먼저 열렸을 수 있고, 그런 파일은
@@ -496,10 +588,12 @@ function AppShell() {
         activePath={state.activePath}
         loadProgress={loadProgress ? { ...loadProgress, label: "여는 중" } : null}
         prefetchProgress={prefetchProgress ? { ...prefetchProgress, label: "미리보기 준비 중" } : null}
-        onAddFiles={addFiles}
+        stopped={stoppedLabel}
+        onAddFiles={handleAddFiles}
         onSelectFile={selectFile}
         onRemoveFile={removeFile}
         onCancelLoad={cancelLoad}
+        onResume={handleResume}
         onError={pushError}
       />
 
