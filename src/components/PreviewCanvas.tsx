@@ -5,6 +5,7 @@ import {
   PREVIEW_BACKGROUND_LABELS,
   PREVIEW_BACKGROUND_STORAGE_KEY,
   isDocumentView,
+  MIN_PREVIEW_SCALE,
   nextScale,
   PREVIEW_MAX_SIZE,
   parsePreviewBackground,
@@ -95,6 +96,21 @@ export function PreviewCanvas({
   onError,
 }: PreviewCanvasProps) {
   const [imgSrc, setImgSrc] = useState<string | null>(null);
+  /**
+   * 지금 그림의 배율이 정해졌는지. 아직이면 그림을 감춘다.
+   *
+   * 배율은 원본 크기를 알아야 정해지고, 그건 이미지가 로드된 뒤에야 알 수 있다.
+   * 그동안 그냥 두면 화면이 한 프레임 1:1로 그려졌다가 줄어들어, 파일을 누를
+   * 때마다 깜빡였다. 감췄다가 measureAndFit이 배율과 함께 켜주면 — 두 갱신이
+   * 같은 렌더로 묶이므로 — 1:1 프레임이 아예 그려지지 않는다.
+   */
+  const [fitReady, setFitReady] = useState(false);
+
+  /** 새 그림을 건다. 배율이 다시 정해질 때까지 감춘 채로 둔다. */
+  const showImage = useCallback((src: string | null) => {
+    setImgSrc(src);
+    setFitReady(false);
+  }, []);
   const [loading, setLoading] = useState(false);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -111,8 +127,71 @@ export function PreviewCanvas({
   }
 
   const requestIdRef = useRef(0);
+  /**
+   * 지금 엔진에 걸려 있는 렌더 수. 정리 함수는 아직 안 터진 디바운스 타이머만
+   * 끊으므로, 이미 시작된 렌더 위로 다음 렌더가 겹칠 수 있다. 그때 먼저 끝난
+   * 쪽이 곧바로 "안 바쁨"을 알리면, 뒤엣것이 도는 동안 미리보기 준비 큐가
+   * 비켜서기를 멈추고 파일을 연다 — onRenderingChange가 막으려던 세션 경합이
+   * 그대로 돌아온다. 그래서 하나라도 남아 있으면 바쁜 것으로 본다.
+   *
+   * requestIdRef로 대신할 수 없다. 그 값은 렌더가 걸리지 않는 경로(빈 집합,
+   * 캐시 적중)에서도 올라가므로, 그걸 신호로 삼으면 진행 중인 렌더가 자기
+   * 차례를 영영 못 알아보고 "바쁨"이 그대로 남는다.
+   */
+  const inFlightRef = useRef(0);
   const draggingRef = useRef<{ x: number; y: number } | null>(null);
-  const wheelCleanupRef = useRef<(() => void) | null>(null);
+  const viewportCleanupRef = useRef<(() => void) | null>(null);
+  const viewportElRef = useRef<HTMLDivElement | null>(null);
+  /** 지금 그려진 이미지의 원본 픽셀 크기. 맞춤 배율을 계산하는 기준이다. */
+  const naturalSizeRef = useRef<{ w: number; h: number } | null>(null);
+  /**
+   * 지금 배율이 "뷰어에 맞춤"에서 온 것인지.
+   *
+   * 파일을 열면 그림 전체가 한눈에 보여야 한다 — 엔진은 긴 변 1500px로 렌더하므로
+   * 원본 크기 그대로 두면 화면 밖으로 넘쳐 사람이 매번 휠로 줄여야 했다.
+   *
+   * 사람이 휠이나 드래그로 한 번이라도 손대면 이 표시가 내려가고, 그 뒤로는
+   * 레이어를 토글해 다시 렌더해도 그 배율을 지킨다 — 확대해서 선을 들여다보는
+   * 중에 화면이 제멋대로 되돌아가면 안 된다. 파일을 바꾸면 다시 선다.
+   */
+  const fittedRef = useRef(true);
+
+  /**
+   * 그림 전체가 뷰어에 들어오는 배율로 맞춘다. 원본보다 크게 키우지는 않는다 —
+   * 작은 파일을 늘리면 라인이 뭉개지기만 한다.
+   */
+  const applyFit = useCallback(() => {
+    const el = viewportElRef.current;
+    const nat = naturalSizeRef.current;
+    if (!el || !nat?.w || !nat.h) return;
+    const box = Math.min(el.clientWidth / nat.w, el.clientHeight / nat.h);
+    if (!Number.isFinite(box) || box <= 0) return;
+    fittedRef.current = true;
+    setScale(Math.max(MIN_PREVIEW_SCALE, Math.min(1, box)));
+    setOffset({ x: 0, y: 0 });
+  }, []);
+
+  /** 그림이 붙는(또는 이미 붙어 있는) 순간의 크기를 재고, 아직 맞춤 상태면 맞춘다. */
+  const measureAndFit = useCallback(
+    (img: HTMLImageElement) => {
+      if (img.naturalWidth && img.naturalHeight) {
+        naturalSizeRef.current = { w: img.naturalWidth, h: img.naturalHeight };
+        if (fittedRef.current) applyFit();
+      }
+      // 크기를 못 재도 그림은 내보낸다 — 감춘 채로 남는 것이 가장 나쁘다.
+      setFitReady(true);
+    },
+    [applyFit]
+  );
+
+  // onLoad만으로는 부족하다. 캐시에서 온 data URL은 ref가 붙는 시점에 이미
+  // complete일 수 있고, 그러면 onLoad가 다시 불리지 않아 맞춤이 통째로 건너뛰어진다.
+  const imageCallbackRef = useCallback(
+    (img: HTMLImageElement | null) => {
+      if (img?.complete) measureAndFit(img);
+    },
+    [measureAndFit]
+  );
   // Latest sessionId, read at debounce-timer-fire time rather than captured
   // at effect-setup time — see the render effect below for why.
   const sessionIdRef = useRef(sessionId);
@@ -148,11 +227,15 @@ export function PreviewCanvas({
   // the reopened render and cause a duplicate render_preview call).
   useEffect(() => {
     requestIdRef.current += 1;
-    setImgSrc(null);
+    showImage(null);
     setLoading(false);
     setScale(1);
     setOffset({ x: 0, y: 0 });
-  }, [path]);
+    // 새 파일이므로 다시 뷰어에 맞춘다. 실제 배율은 그림이 붙으면서 원본 크기를
+    // 알게 될 때 정해진다(measureAndFit).
+    naturalSizeRef.current = null;
+    fittedRef.current = true;
+  }, [path, showImage]);
 
   // `sessionId` is deliberately NOT a dependency here (read via sessionIdRef
   // inside the timer instead). withEvictedSessionRetry's reopen already gets
@@ -171,7 +254,7 @@ export function PreviewCanvas({
     if (paused) return;
     if (visibleIds.length === 0) {
       requestIdRef.current += 1; // invalidate any in-flight render from a prior toggle
-      setImgSrc(null);
+      showImage(null);
       setLoading(false);
       return;
     }
@@ -186,7 +269,7 @@ export function PreviewCanvas({
       if (cached !== undefined) {
         // 아직 안 돌아온 이전 요청이 이 그림을 덮어쓰지 못하게 무효화한다.
         requestIdRef.current += 1;
-        setImgSrc(cached);
+        showImage(cached);
         setLoading(false);
         return;
       }
@@ -202,6 +285,7 @@ export function PreviewCanvas({
       if (!sid) return;
       const requestId = ++requestIdRef.current;
       setLoading(true);
+      inFlightRef.current += 1;
       onRenderingChange(true);
       void (async () => {
         try {
@@ -221,14 +305,15 @@ export function PreviewCanvas({
           // 유효하다.
           if (cacheKey) cache.set(cacheKey, dataUrl);
           if (requestIdRef.current !== requestId) return; // superseded by a newer request
-          setImgSrc(dataUrl);
+          showImage(dataUrl);
           setLoading(false);
         } catch (e) {
           if (requestIdRef.current !== requestId) return;
           setLoading(false);
           onError("미리보기 렌더링 실패", toEngineError(e));
         } finally {
-          onRenderingChange(false);
+          inFlightRef.current -= 1;
+          if (inFlightRef.current === 0) onRenderingChange(false);
         }
       })();
     }, delay);
@@ -237,7 +322,7 @@ export function PreviewCanvas({
     // visibleIds 대신 visibleKey에 의존한다 — 키가 같으면 내용이 같으므로 효과가
     // 들고 있는 배열이 한 세대 옛것이어도 렌더 결과는 동일하다. 위 visibleKey의
     // 주석에 왜 배열 정체로는 안 되는지 적어두었다.
-  }, [path, mtime, visibleKey, documentView, lineColor, paused, cache, onRenderingChange, onSessionRefreshed, onError]);
+  }, [path, mtime, visibleKey, documentView, lineColor, paused, cache, showImage, onRenderingChange, onSessionRefreshed, onError]);
 
   // Callback ref (not a plain ref + mount-only effect): the viewport div only
   // exists once sessionId/visibleIds make this component render past the
@@ -245,18 +330,33 @@ export function PreviewCanvas({
   // fire while the ref is still null on first mount (no file open yet) and
   // never re-attach once the div actually appears. The callback ref runs
   // exactly when the DOM node is attached/detached, whenever that happens.
-  const viewportCallbackRef = useCallback((el: HTMLDivElement | null) => {
-    wheelCleanupRef.current?.();
-    wheelCleanupRef.current = null;
-    if (!el) return;
-    function handleWheel(e: WheelEvent) {
-      e.preventDefault();
-      setScale((prev) => nextScale(prev, e.deltaY));
-    }
-    // Non-passive so preventDefault actually stops page scroll/zoom.
-    el.addEventListener("wheel", handleWheel, { passive: false });
-    wheelCleanupRef.current = () => el.removeEventListener("wheel", handleWheel);
-  }, []);
+  const viewportCallbackRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      viewportCleanupRef.current?.();
+      viewportCleanupRef.current = null;
+      viewportElRef.current = el;
+      if (!el) return;
+      function handleWheel(e: WheelEvent) {
+        e.preventDefault();
+        // 사람이 배율을 정했으므로 이후로는 자동으로 되돌리지 않는다.
+        fittedRef.current = false;
+        setScale((prev) => nextScale(prev, e.deltaY));
+      }
+      // Non-passive so preventDefault actually stops page scroll/zoom.
+      el.addEventListener("wheel", handleWheel, { passive: false });
+      // 레이어 패널의 splitter를 끌면 뷰어 폭이 바뀐다. 아직 사람이 배율을 안
+      // 건드렸다면 새 크기에 다시 맞춘다.
+      const observer = new ResizeObserver(() => {
+        if (fittedRef.current) applyFit();
+      });
+      observer.observe(el);
+      viewportCleanupRef.current = () => {
+        el.removeEventListener("wheel", handleWheel);
+        observer.disconnect();
+      };
+    },
+    [applyFit]
+  );
 
   function handlePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -268,6 +368,9 @@ export function PreviewCanvas({
     const dx = e.clientX - draggingRef.current.x;
     const dy = e.clientY - draggingRef.current.y;
     draggingRef.current = { x: e.clientX, y: e.clientY };
+    // 밀어서 위치를 정한 것도 사람의 선택이다. 창 크기가 바뀌었다고 가운데로
+    // 되돌아가면 안 된다.
+    fittedRef.current = false;
     setOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
   }
 
@@ -311,10 +414,17 @@ export function PreviewCanvas({
         {imgSrc && (
           <img
             className="preview-image"
+            ref={imageCallbackRef}
             src={imgSrc}
             alt="미리보기"
             draggable={false}
-            style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
+            onLoad={(e) => measureAndFit(e.currentTarget)}
+            style={{
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+              // 배율이 정해지기 전에는 감춘다. measureAndFit이 배율과 이 값을 한
+              // 번에 켜므로 1:1 프레임이 그려지지 않는다.
+              visibility: fitReady ? "visible" : "hidden",
+            }}
           />
         )}
       </div>
