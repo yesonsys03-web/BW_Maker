@@ -44,6 +44,10 @@ MERGE_TILE_SIZE = 2048
 #: 상황이라 무제한 캐싱은 곧 메모리 압박이 된다. 초과하면 LRU로 버린다.
 PREVIEW_TILE_BUDGET_BYTES = 192 * 1024 * 1024
 
+#: PSD(version 1)가 한 축에 담을 수 있는 최대 크기. pytoshop core.py의
+#: max_size_mapping, psd-tools api/utils.py의 MAX_DIMENSION_PSD와 같은 값이다.
+PSD_MAX_DIMENSION = 30000
+
 
 def parse_line_color(value):
     """
@@ -278,6 +282,18 @@ def _merge_rgba_fast(psd, layers, viewport):
             shape = np.ones(src.shape[:2] + (1,), dtype=np.float32)
         h, w = src.shape[:2]
         y0, x0 = bbox[1] - top, bbox[0] - left
+        # merge_rgba가 뷰포트를 캔버스로 자른 경우에는 레이어가 뷰포트 밖으로
+        # 걸칠 수 있다. 겹치는 부분만 남긴다 — 음수로 슬라이스하면 예외 없이 배열
+        # 반대쪽 끝을 집어 엉뚱한 자리에 그린다.
+        cy0, cx0 = max(0, -y0), max(0, -x0)
+        cy1 = h - max(0, y0 + h - (bottom - top))
+        cx1 = w - max(0, x0 + w - (right - left))
+        if cy1 <= cy0 or cx1 <= cx0:
+            continue
+        if (cy0, cx0, cy1, cx1) != (0, 0, h, w):
+            src, shape = src[cy0:cy1, cx0:cx1], shape[cy0:cy1, cx0:cx1]
+            h, w = src.shape[:2]
+            y0, x0 = y0 + cy0, x0 + cx0
         box = (slice(y0, y0 + h), slice(x0, x0 + w))
 
         alpha_s = shape          # 평범한 레이어는 shape == alpha
@@ -311,6 +327,22 @@ def merge_rgba(psd, layers):
     top = min(b[1] for b in boxes)
     right = max(b[2] for b in boxes)
     bottom = max(b[3] for b in boxes)
+    # 캔버스 밖으로 나간 레이어 bbox는 그대로 둔다. PSD는 그런 bbox를 정상적으로
+    # 들고 있고(납품 25장 중 13장이 그렇다), 합집합이 캔버스보다 커지는 것도 정상이다.
+    # 잘라내면 산출물 좌표가 원본과 어긋나는데, 그 좌표는 나중에 합성할 때 그대로
+    # 맞아야 한다(export_psd_split 참고).
+    #
+    # 단 합집합이 30,000px를 넘으면 합성 자체를 못 한다 — 캔버스가 11901x7297인
+    # 한 장이 32510x9335 뷰포트를 만들어 내보내기가 통째로 죽은 적이 있다. 그때만
+    # 마지막 수단으로 캔버스까지 자른다. 캔버스가 이 한계 안에 있는 한 자르고 나면
+    # 반드시 통과하고, 버려지는 것은 포토샵에서 어차피 보이지 않는 영역이다.
+    if right - left > PSD_MAX_DIMENSION or bottom - top > PSD_MAX_DIMENSION:
+        left, top = max(0, left), max(0, top)
+        right, bottom = min(psd.width, right), min(psd.height, bottom)
+        if right <= left or bottom <= top:
+            # 전부 캔버스 밖이면 그릴 것이 없다 — 빈 레이어와 같이 다룬다. 0x0 배열을
+            # 돌려주면 export가 그것을 레이어로 기록하려다 훨씬 뒤에서 터진다.
+            raise ValueError("merge: all source layers are outside the canvas")
     if FAST_MERGE and _fast_mergeable(psd, layers):
         return _merge_rgba_fast(psd, layers, (left, top, right, bottom))
     wanted = _wanted_ids(psd, layers)

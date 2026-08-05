@@ -29,14 +29,18 @@ def make_image16(name, value, x, y, w, h, alpha=65535, visible=True):
     )
 
 
-def write_psd(path, layers_top_first, width=CANVAS_W, height=CANVAS_H, clipping=()):
+def write_psd(path, layers_top_first, width=CANVAS_W, height=CANVAS_H, clipping=(),
+              version=enums.Version.version_1):
     """
     clipping: 클리핑 플래그를 켤 레이어 이름들. nested_layers.Image에는 그 인자가
     없어서 변환이 끝난 레코드에 직접 세운다.
+
+    version: 30,000px을 넘는 픽스처는 PSB(version 2)로만 쓸 수 있다.
     """
     apply_pytoshop_patches()
     psd = nested_layers.nested_layers_to_psd(
-        layers_top_first, color_mode=enums.ColorMode.rgb, size=(width, height)
+        layers_top_first, color_mode=enums.ColorMode.rgb, version=version,
+        size=(width, height),
     )
     if clipping:
         for record in psd.layer_and_mask_info.layer_info.layer_records:
@@ -141,6 +145,101 @@ def hidden_group_psd(tmp_path):
             ]),
         ]),
         make_image("line", 90, 4, 4, 20, 16),
+    ])
+    return str(p)
+
+
+#: 30,000px을 넘는 PSB 픽스처의 캔버스. 폭만 넘기고 높이는 낮게 잡아, 한계를
+#: 넘는 좌표를 실제로 쓰면서도 테스트가 몇 MB / 몇 초 안에 끝나게 한다.
+WIDE_W, WIDE_H = 32510, 300
+
+
+@pytest.fixture
+def wide_psb(tmp_path):
+    """
+    폭이 PSD 한계(30,000)를 넘는 PSB. 'line far'는 통째로 30,000 뒤에 있다.
+
+    한계를 넘긴 뒤로도 좌표와 픽셀이 살아남는지 보려면 그 지점 **너머에** 그림이
+    있어야 한다. 캔버스만 크고 내용이 전부 앞쪽에 있으면, 좌표를 32비트로 잘라먹는
+    종류의 버그가 아무 흔적도 남기지 않고 지나간다.
+
+    납품 폴더에는 이런 파일이 없다 — PSB 31장의 축을 전부 재보니 가장 큰 것이
+    16558x10148이었다. 그래도 픽스처로 두는 이유는, 산출물이 원본 확장자를 물려받는
+    이상 언젠가 들어올 수 있는 모양이고, 그때 무엇이 되고 무엇이 안 되는지를
+    (test_render.py의 psd-tools 상한 테스트) 코드로 남겨두기 위해서다.
+    """
+    p = tmp_path / "wide.psb"
+    write_psd(p, [
+        nested_layers.Group(name="*ART", layers=[
+            make_image("line far", 200, 30010, 40, 2500, 100),
+            make_image("line", 50, 100, 20, 5000, 200),
+        ]),
+    ], width=WIDE_W, height=WIDE_H, version=enums.Version.psb)
+    return str(p)
+
+
+@pytest.fixture
+def off_canvas_psd(tmp_path):
+    """
+    레이어 bbox가 캔버스 밖으로 나갔지만 합집합은 30,000 아래인 문서 — 즉 **자르면
+    안 되는** 쪽이다.
+
+    실제 납품 PSD에서 예외가 아니라 다수다: 기준선 25장 195엔트리 중 37엔트리(19%)가
+    캔버스 밖으로 나가 있고, 그중 26개가 병합이며, 전부 30,000 근처에도 못 간다
+    (가장 큰 캔버스가 ~10,000px). 이것들이 지금 그대로 잘 나가고 있으므로 좌표가
+    한 픽셀이라도 움직이면 회귀다.
+
+    알파를 그라데이션으로 둔 것은 의도적이다 — 전부 255면 합성 산술이 어긋나도
+    결과가 같아 보인다.
+    """
+    grad = np.tile(np.linspace(0, 255, 40, dtype=np.uint8), (30, 1))
+    p = tmp_path / "off_canvas.psd"
+    write_psd(p, [
+        make_image("outside", 30, -200, 10, 40, 30, alpha=grad),
+        make_image("spills right", 210, CANVAS_W - 15, 8, 40, 30,
+                   alpha=grad[:, ::-1].copy()),
+        make_image("spills left", 90, -12, -9, 40, 30, alpha=grad),
+    ])
+    return str(p)
+
+
+@pytest.fixture
+def oversize_union_psd(tmp_path):
+    """
+    합집합이 30,000을 넘는 문서 — 즉 자르기가 실제로 걸리는 쪽이다.
+
+    'far right'를 x=30500에 두어 합집합 폭을 30,550으로 벌린다. 픽셀은 40x30짜리
+    세 장뿐이라 진짜 30,000px 배열을 만들지 않고도 진짜 임계값을 지나간다
+    (상수를 monkeypatch로 낮추면 임계값 자체가 맞는지는 확인하지 못한다).
+
+    자른 뒤 남는 모양이 세 갈래를 한꺼번에 덮는다: 통째로 밖이라 빠지는 것
+    ('far right'), 오른쪽이 잘리는 것('spills right'), 왼쪽/위가 잘리는 것
+    ('spills left').
+    """
+    grad = np.tile(np.linspace(0, 255, 40, dtype=np.uint8), (30, 1))
+    p = tmp_path / "oversize_union.psd"
+    write_psd(p, [
+        make_image("far right", 30, 30500, 10, 40, 30, alpha=grad),
+        make_image("spills right", 210, 40, 8, 40, 30, alpha=grad[:, ::-1].copy()),
+        make_image("spills left", 90, -10, -6, 40, 30, alpha=grad),
+    ])
+    return str(p)
+
+
+@pytest.fixture
+def all_outside_union_psd(tmp_path):
+    """
+    두 레이어가 전부 캔버스 왼쪽 밖에 있고, 그 합집합만 30,000을 넘는 문서.
+
+    자르기가 걸리는데(합집합 30,940) 자르고 나면 아무것도 남지 않는 유일한 모양이다.
+    한쪽만 밖으로 나가서는 이 상태를 만들 수 없다 — 캔버스와 겹치는 구간이 남기
+    때문이다.
+    """
+    grad = np.tile(np.linspace(0, 255, 40, dtype=np.uint8), (30, 1))
+    p = tmp_path / "all_outside.psd"
+    write_psd(p, [
+        make_image("way left", 30, -31000, 10, 40, 30, alpha=grad),
+        make_image("near left", 90, -100, 10, 40, 30, alpha=grad),
     ])
     return str(p)
 

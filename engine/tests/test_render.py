@@ -2,6 +2,7 @@ import types
 
 import numpy as np
 import pytest
+from PIL import Image
 from psd_tools import PSDImage
 
 from psd_engine import render as render_mod
@@ -203,6 +204,172 @@ def test_merge_rgba_tiles_the_viewport_when_fast_path_is_unavailable(clip_layer_
         f"최대차 {np.abs(tiled.astype(int) - whole.astype(int)).max()}, "
         f"다른 성분 {(tiled != whole).sum()}/{tiled.size}"
     )
+
+
+def _by_name(s, *names):
+    return [next(l for l in s["layers_by_id"].values() if l.name == n) for n in names]
+
+
+def test_merge_rgba_keeps_an_off_canvas_viewport_that_still_fits(off_canvas_psd):
+    """
+    캔버스 밖으로 나갔더라도 담을 수 있는 뷰포트는 그대로 둔다.
+
+    납품 25장 중 13장이 이런 모양이고, 그 26개 병합의 좌표는 지금까지 나간 산출물에
+    그대로 들어 있다. 여기서 자르면 그 전부가 어긋난다 — 자르기는 담을 수 없을 때의
+    마지막 수단이지 기본 동작이 아니다.
+    """
+    s = _session(off_canvas_psd)
+    layers = _by_name(s, "spills left", "spills right")
+
+    arr, left, top = merge_rgba(s["psd"], layers)
+
+    assert (left, top) == (-12, -9)          # 합집합 (-12,-9)-(89,38)
+    assert arr.shape == (47, 101, 4)
+
+
+def test_merge_rgba_clamps_a_viewport_that_cannot_be_composited(oversize_union_psd):
+    """
+    합집합이 30,000을 넘으면 그때는 캔버스까지 자른다.
+
+    캔버스가 11901x7297인 납품 PSB 한 장이 32510x9335 합집합을 만들어 병합이
+    "exceeds the PSD maximum of 30000 px per axis"로 죽은 적이 있다. 버려지는 것은
+    포토샵에서 어차피 보이지 않는 영역이다.
+
+    상수를 monkeypatch로 낮추지 않고 진짜 임계값을 지나간다 — 낮추면 자르는 산술만
+    확인하고 임계값 자체가 맞는지는 확인하지 못한다.
+    """
+    s = _session(oversize_union_psd)
+    psd = s["psd"]
+    layers = _by_name(s, "spills left", "spills right", "far right")
+
+    arr, left, top = merge_rgba(psd, layers)
+
+    # 자르기 전 합집합은 (-10,-6)-(30540,40) = 30550x46 이다.
+    assert (left, top) == (0, 0)
+    assert arr.shape == (40, psd.width, 4)
+    assert left + arr.shape[1] <= psd.width and top + arr.shape[0] <= psd.height
+
+
+def test_merge_rgba_fast_matches_slow_on_a_clamped_viewport(
+        oversize_union_psd, monkeypatch):
+    """
+    뷰포트를 잘랐어도 빠른 경로와 psd.composite 경로의 픽셀이 같아야 한다.
+
+    자르지 않은 뷰포트는 합집합이라 모든 레이어가 그 안에 통째로 들어가지만, 자르고
+    나면 걸쳐 나갈 수 있다. 그때 빠른 경로가 원본 배열을 그대로 얹으면 오프셋이
+    음수가 되는데, numpy는 예외를 내지 않고 배열 반대쪽 끝을 집어 엉뚱한 자리에
+    그린다 — 조용히 틀리는 종류라 여기서 잡아야 한다.
+    """
+    s = _session(oversize_union_psd)
+    layers = _by_name(s, "spills left", "spills right", "far right")
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert fast.shape == slow.shape
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_merge_rgba_fast_matches_slow_when_nothing_is_clamped(off_canvas_psd, monkeypatch):
+    """
+    자르기가 걸리지 않는 평범한 경우에도 두 경로가 같아야 한다.
+
+    _merge_rgba_fast의 걸침 자르기는 이 경우 no-op이어야 한다 — 그것이 납품 파일
+    대부분이 지나가는 길이고, 여기서 한 픽셀이라도 움직이면 기준선이 깨진다.
+    """
+    s = _session(off_canvas_psd)
+    layers = _by_name(s, "spills left", "spills right", "outside")
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert (fast_left, fast_top) == (slow_left, slow_top) == (-200, -9)
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_merge_rgba_tiled_matches_slow_on_a_clamped_viewport(
+        oversize_union_psd, monkeypatch):
+    """
+    타일 경로도 잘린 뷰포트에서 같은 그림을 내야 한다.
+
+    실제 납품 PSD의 병합은 마스크·클리핑이 끼어 빠른 경로를 못 쓰는 것이 많아서
+    이쪽이 오히려 흔한 길이다. 여기서는 걸침을 psd-tools가 처리하지만(타일마다
+    viewport로 잘라 부른다), 이어붙이는 인덱스는 우리가 계산하므로 확인이 필요하다.
+    """
+    s = _session(oversize_union_psd)
+    layers = _by_name(s, "spills left", "spills right", "far right")
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    whole, whole_left, whole_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    monkeypatch.setattr(render_mod, "_fast_mergeable", lambda psd, layers: False)
+    monkeypatch.setattr(render_mod, "MERGE_TILE_SIZE", 8)
+    tiled, tiled_left, tiled_top = merge_rgba(s["psd"], layers)
+
+    assert (tiled_left, tiled_top) == (whole_left, whole_top)
+    assert tiled.shape == whole.shape
+    assert np.array_equal(tiled, whole), (
+        f"최대차 {np.abs(tiled.astype(int) - whole.astype(int)).max()}, "
+        f"다른 성분 {(tiled != whole).sum()}/{tiled.size}"
+    )
+
+
+def test_what_a_psb_over_30000_can_and_cannot_do(wide_psb, tmp_path):
+    """
+    30,000을 넘는 PSB에서 되는 것과 안 되는 것의 경계를 못박아 둔다.
+
+    psd-tools는 PSB에도 PSD v1의 30,000px 축 상한을 건다 — 스펙이 아니라 메모리
+    보호가 이유라고 자기 주석에 적어 두었다(api/utils.py). 그 상한을 풀어줄까
+    고민했지만 풀지 않기로 했다: 납품 파일 26장의 캔버스·그룹 bbox·마스크 리프
+    bbox를 전부 재보니 30,000을 넘는 축이 하나도 없었다(가장 큰 것이 Bar027의
+    *ART 그룹 26367x11024). 닿지 않는 경로를 위해 남의 라이브러리 가드를 전역으로
+    바꾸는 것은 값이 비싸다.
+
+    그래서 경계는 이렇게 남는다. 열기·레이어 단위 추출·병합은 되고(내보내기가
+    쓰는 길은 전부 이쪽이다), 문서 전체를 한 번에 합성하는 것만 막힌다.
+    """
+    from psd_engine.session import SessionStore
+
+    store = SessionStore()
+    s = store.get(store.open(wide_psb))
+    assert s["psd"].version == 2 and s["psd"].width == 32510
+
+    leaves = [l for l in s["layers_by_id"].values() if not l.is_group()]
+    lids = [lid for lid, l in s["layers_by_id"].items() if not l.is_group()]
+
+    # 되는 것 — 내보내기가 실제로 쓰는 길
+    assert extract_rgba(leaves[0]).shape[2] == 4
+    assert render_thumbnails(s, lids, max_size=64, out_dir=tmp_path)
+    arr, left, top = merge_rgba(s["psd"], leaves)
+    assert (left, top) == (100, 20)
+    assert left + arr.shape[1] == 32510, "30,000 뒤의 픽셀이 뷰포트에서 잘렸다"
+
+    # 안 되는 것 — 문서 전체 합성. 배치 내보내기는 여기를 지나지 않는다.
+    with pytest.raises(ValueError, match="exceeds the PSD maximum"):
+        render_document_preview(s, max_size=64, out_dir=tmp_path)
+
+
+def test_merge_rgba_rejects_a_clamped_merge_with_nothing_left(all_outside_union_psd):
+    # 자른 결과 그릴 것이 하나도 남지 않으면 빈 레이어와 같이 다룬다. 0x0 배열을
+    # 돌려주면 export가 그것을 레이어로 기록하려다 훨씬 뒤에서 터진다.
+    s = _session(all_outside_union_psd)
+    layers = _by_name(s, "way left", "near left")   # 합집합 30,940 > 30,000, 전부 캔버스 왼쪽
+    with pytest.raises(ValueError, match="outside the canvas"):
+        merge_rgba(s["psd"], layers)
 
 
 def test_render_thumbnails_and_preview(fixture_psd, tmp_path):
