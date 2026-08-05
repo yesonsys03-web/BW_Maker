@@ -74,14 +74,18 @@ engine/.venv/bin/python scripts/export-baseline.py \
 
 파일당 ~82초이고 기계가 바쁘면 3~4배 나빠진다. 26개 파일이므로 35분~2시간. `--resume`이 있으니 중간에 끊겨도 진행 중이던 파일 하나만 잃는다. **볼륨이 마운트돼 있는지 먼저 확인한다** (`ls /Volumes/bgfinal`).
 
-- [ ] **Step 3: 헤더의 `createdAt`이 현재 커밋보다 뒤인지 확인**
+- [ ] **Step 3: 기준선이 정말 현재 픽셀 코드로 찍혔는지 확인**
+
+`createdAt`을 **HEAD**와 비교하면 안 된다 — 캡처가 20분쯤 걸리는 사이 문서·테스트 커밋이 얼마든지 얹힐 수 있고, 그것들은 픽셀에 닿지 않는다. 비교 대상은 **픽셀을 만드는 코드를 마지막으로 건드린 커밋**이다.
 
 ```bash
-head -1 baseline/hh0306.jsonl | engine/.venv/bin/python -c "import json,sys; print(json.load(sys.stdin))"
-git log -1 --format=%cI
+head -1 baseline/hh0306.jsonl | engine/.venv/bin/python -c "import json,sys; print('createdAt', json.load(sys.stdin)['createdAt'])"
+git log -1 --format='%cI %h %s' -- engine/psd_engine scripts/
 ```
 
-`createdAt`이 `fde2310`의 커밋 시각보다 **뒤**여야 한다. 앞서면 그 기준선은 못 쓴다.
+`createdAt`이 두 번째 명령이 찍은 커밋 시각보다 **뒤**여야 한다. 앞서면 그 기준선은 못 쓴다.
+
+**2026-08-05 실행 기록**: `createdAt` 2026-08-05T14:27:15, 픽셀 코드를 마지막으로 건드린 커밋은 `0fbbeef`. 캡처가 도는 동안 `5af9585`(문서)와 `942e49c`(테스트)가 얹혔지만 `git diff --name-only 0fbbeef..HEAD -- engine/psd_engine scripts/`가 비어 있어 무관하다. `export-baseline.py`는 서브프로세스를 쓰지 않고 시작 시 엔진을 import하므로 도는 중의 편집에도 영향받지 않는다. 26개 기록, 실패 0, 1191초.
 
 이 태스크는 커밋을 만들지 않는다(`baseline/`은 gitignored).
 
