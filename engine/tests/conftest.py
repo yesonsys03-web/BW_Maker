@@ -51,6 +51,35 @@ def write_psd(path, layers_top_first, width=CANVAS_W, height=CANVAS_H, clipping=
     return str(path)
 
 
+def attach_mask(psd, name, mask_array, left, top, default_color=0,
+                user_mask_density=None):
+    """
+    변환이 끝난 레코드에 사용자 마스크를 붙인다.
+
+    nested_layers.Image에 마스크 인자가 없어서 write_psd의 clipping과 같은 방식으로
+    레코드를 직접 고친다. 채널 -2가 PSD의 사용자 레이어 마스크다.
+
+    default_color는 psd-tools 쪽에서 mask.background_color로 읽히고, 마스크 bbox
+    **밖**을 그 값으로 채운다 — 그 조합이 실납품 데이터에서 값싼 경로와 어긋난
+    자리라 픽스처가 반드시 덮어야 한다.
+    """
+    import pytoshop.layers as pl
+    from pytoshop import enums as pe
+
+    h, w = mask_array.shape
+    for record in psd.layer_and_mask_info.layer_info.layer_records:
+        if record.name != name:
+            continue
+        record.mask = pl.LayerMask(
+            top=top, left=left, bottom=top + h, right=left + w,
+            default_color=default_color, user_mask_density=user_mask_density,
+        )
+        record.channels[-2] = pl.ChannelImageData(
+            image=mask_array, compression=pe.Compression.raw)
+        return
+    raise AssertionError(f"layer {name!r} not found")
+
+
 @pytest.fixture
 def fixture_psd(tmp_path):
     # 리스트는 index 0 = 최상단. 문서 아래→위 = *ART(fill, hidden line, line, lines), -REF(line)
@@ -260,3 +289,62 @@ def fixture_psd16(tmp_path):
     with open(path, "wb") as f:
         psd.write(f)
     return str(path)
+
+
+@pytest.fixture
+def masked_psd(tmp_path):
+    """
+    값싼 마스크 경로가 psd-tools와 같은 픽셀을 내는지 겨루는 픽스처.
+
+    네 장은 각각 실측에서 어긋난 원인을 하나씩 짚는다:
+      plain_mask         마스크 bbox == 레이어 bbox, 배경 0 — 가장 쉬운 경우
+      bg255_mask         배경 255 + 마스크 bbox < 레이어 bbox — 실납품에서 어긋난 조합
+      dense_mask         user_mask_density — _get_mask가 shape에 거는 항
+      half_opacity_mask  opacity != 255 — composite는 걸고 topil()은 안 건다
+    """
+    layers = [
+        make_image("plain_mask", 200, 0, 0, 32, 24),
+        make_image("bg255_mask", 180, 0, 0, 32, 24),
+        make_image("dense_mask", 160, 0, 0, 32, 24),
+        make_image("half_opacity_mask", 140, 0, 0, 32, 24),
+    ]
+    for lyr in layers:
+        lyr.opacity = 128 if lyr.name == "half_opacity_mask" else 255
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd(
+        layers, color_mode=enums.ColorMode.rgb, size=(CANVAS_W, CANVAS_H))
+
+    gradient = np.tile(np.linspace(0, 255, 32, dtype=np.uint8), (24, 1))
+    attach_mask(psd, "plain_mask", gradient, left=0, top=0, default_color=0)
+    # 마스크가 레이어보다 좁고 배경이 255 — 덮이지 않은 오른쪽 절반이 불투명해진다.
+    attach_mask(psd, "bg255_mask", gradient[:, :16], left=0, top=0, default_color=255)
+    attach_mask(psd, "dense_mask", gradient, left=0, top=0, default_color=0,
+                user_mask_density=128)
+    attach_mask(psd, "half_opacity_mask", gradient, left=0, top=0, default_color=0)
+
+    path = tmp_path / "masked.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
+def blend_group_psd(tmp_path):
+    """
+    그룹 안에서 blend가 재현되는지 가르는 픽스처.
+
+    값을 고른 이유가 전부다. base 64 위에 shade 192를 multiply로 얹으면
+    겹치는 자리가 64*192/255 = 48이 되고, 블렌드를 버리고 알파 오버로 겹치면
+    192가 된다 — **차이가 144**라 테스트가 실수를 놓칠 수 없다.
+
+    blend_mode_psd로는 이것을 못 한다. 그쪽은 그룹이 없고, base가 흰색(255)이라
+    255*64/255 = 64로 곱연산과 알파 오버의 결과가 같다.
+    """
+    p = tmp_path / "blend_group.psd"
+    write_psd(p, [
+        nested_layers.Group(name="BLEND", layers=[
+            make_image("shade", 192, 0, 0, 16, 16, blend=enums.BlendMode.multiply),
+            make_image("base", 64, 0, 0, 32, 32),
+        ]),
+    ], width=32, height=32)
+    return str(p)

@@ -31,6 +31,25 @@ def test_extract_rgba_empty_layer_raises():
         extract_rgba(layer)
 
 
+def test_masked_fixture_really_carries_masks(masked_psd):
+    """
+    픽스처가 무엇을 확인하는지부터 확인한다. 마스크가 안 붙으면 아래 동등성
+    테스트가 전부 마스크 없는 경로를 재고도 통과한다 — 0fbbeef에서 타일 수를
+    안 세서 공허해졌던 테스트와 같은 함정이다.
+    """
+    psd = PSDImage.open(masked_psd)
+    by_name = {l.name: l for l in psd.descendants()}
+    assert set(by_name) >= {"plain_mask", "bg255_mask", "dense_mask",
+                            "half_opacity_mask"}
+    for name in ("plain_mask", "bg255_mask", "dense_mask", "half_opacity_mask"):
+        m = by_name[name].mask
+        assert m is not None and not m.disabled, f"{name}에 마스크가 없다"
+    assert by_name["bg255_mask"].mask.background_color == 255
+    assert by_name["bg255_mask"].mask.bbox != by_name["bg255_mask"].bbox
+    assert by_name["dense_mask"].mask.parameters is not None
+    assert by_name["half_opacity_mask"].opacity == 128
+
+
 def test_merge_rgba_overlap(fixture_psd):
     s = _session(fixture_psd)
     # 'fill'(128, 전체) 위에 'lines'(200, (10,10)-(30,20))
