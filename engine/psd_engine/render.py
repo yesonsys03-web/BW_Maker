@@ -115,8 +115,143 @@ def apply_line_color(rgba, rgb):
     return out
 
 
+def _mask_fast_ok(layer):
+    """
+    값싼 마스크 경로가 psd.composite와 같은 그림을 내는 것이 보장되는 형태인가.
+
+    _plain과 같은 규율이다 — 하나라도 걸리면 예전 경로로 떨어진다. 빠르게 하려다
+    그림을 바꾸는 것보다 느린 편이 낫다. 판단 근거는 Compositor.apply가 실제로
+    읽는 값들이고, 그쪽이 바뀌면 여기도 같이 봐야 한다.
+    """
+    from psd_tools.composite import utils
+    from psd_tools.constants import BlendMode, ColorMode, Tag
+
+    # _get_mask(621행)는 마스크가 없거나 꺼져 있으면 아무것도 걸지 않는다. 값싼
+    # 경로는 반대로 무조건 거는 식이라, 그 두 경우를 여기서 빼야 꺼진 마스크를
+    # 실수로 적용하지 않는다. extract_rgba는 어차피 이 조건에서만 부르지만,
+    # 이 함수만 직접 부르는 호출자(테스트·계측)가 조용히 틀리지 않게 막아 둔다.
+    if layer.mask is None or layer.mask.disabled:
+        return False
+    # composite()는 layer_filter를 안 주면 Layer.is_visible로 채운다(composite.py
+    # 206행). 그래서 숨은 레이어는 apply가 첫 줄에서 되돌아가고(321행) 결과가
+    # 손대지 않은 배경, 즉 전부 [255,255,255,0]이 된다 — 자기 visible이 켜져
+    # 있어도 조상 그룹이 꺼져 있으면 그렇다. 값싼 경로는 가시성을 모르므로 실제
+    # 픽셀을 그려 낸다. 실납품에서 이것 하나가 어긋난 유일한 원인이었다
+    # ('Shelf light 2', visible=True인데 부모 'light wardrobe'가 꺼져 있다.
+    # 필터를 끄고 대조하면 최대차 0으로 같다).
+    if not layer.is_visible():
+        return False
+    # 마무리 양자화가 "RGBA"로 고정이다. 회색조·CMYK 문서는 채널 수가 달라 같은
+    # 그림을 만들 수 없으므로 예전 경로에 둔다(_fast_mergeable도 같은 이유로 막는다).
+    if layer._psd.color_mode != ColorMode.RGB:
+        return False
+    # 효과·획·칠·벡터마스크는 composite가 그린다. 값싼 경로는 그리지 않는다.
+    if any(getattr(e, "enabled", True) for e in layer.effects):
+        return False
+    if layer.stroke is not None and layer.stroke.enabled:
+        return False
+    if utils.has_fill(layer) or layer.has_vector_mask():
+        return False
+    # 픽셀이 없으면 numpy("color")가 None이고 composite는 다른 것을 그린다.
+    if not layer.has_pixels():
+        return False
+    # 블렌드는 이 함수의 관심사가 아니다 — extract_rgba는 배경 없이 한 장만 뽑고,
+    # 투명한 배경 위에서는 어떤 블렌드도 normal과 결과가 같다. 그래도 knockout은
+    # 식을 바꾸므로 막는다.
+    if layer.blend_mode == BlendMode.PASS_THROUGH:
+        return False
+    if layer.tagged_blocks.get_data(Tag.KNOCKOUT_SETTING, 0):
+        return False
+    # real mask(사용자+벡터 결합)는 별도의 배열이다. force=False인 composite가
+    # 그쪽을 읽으므로, 있으면 값싼 경로가 다른 마스크를 보게 된다.
+    if layer.mask is not None and layer.mask.has_real():
+        return False
+    return True
+
+
+def _extract_rgba_masked(layer):
+    """
+    마스크 달린 레이어를 layer.composite 없이 읽는다. 가드를 못 넘으면 None.
+
+    **왜 있는가.** composite는 psd-tools의 float32 전체 경로다. 실측(2026-08-05,
+    HH03_BG-RosieEmporiumINTShop017_CO_v01.psd의 BG 그룹, 잎 140장):
+
+        마스크 없는 잎  ~50 Mpx/s   29.9Mpx 0.52초, 메모리 미미
+        마스크 있는 잎   ~4 Mpx/s   39.6Mpx 10.07초, +5.06GB
+
+    잎 139장 중 마스크 달린 2장이 디코딩 시간의 63%와 peak 13.4GB 전부를 만들었다.
+    이 함수는 export.py와 verify.py, 미리보기, 썸네일이 함께 쓴다.
+
+    **식은 Compositor.apply를 그대로 줄인 것이다.** 배경이 color=1.0, alpha=0.0이라
+    alpha_b가 0이고, 그때 _apply_source는 color_t = alpha*color 로 줄어든다.
+    divide가 0/0을 1.0으로 만들기 때문에 알파 0인 자리의 RGB가 흰색이 된다 —
+    그것이 배경이 드러난 것이고, 값싼 경로도 같은 값을 내야 한다.
+
+    대수적으로 더 줄이지 않는다. _merge_rgba_fast의 docstring이 이유를 적어 두었다.
+    """
+    from psd_tools.composite import utils
+    from psd_tools.composite.composite import paste
+    from psd_tools.constants import Tag
+
+    if not _mask_fast_ok(layer):
+        return None
+
+    color = layer.numpy("color")
+    if color is None:
+        return None
+    shape = layer.numpy("shape")
+    if shape is None:
+        shape = np.ones(color.shape[:2] + (1,), dtype=np.float32)
+
+    # _get_mask(621행)를 그대로 옮긴다. 뷰포트가 레이어 bbox인 경우다.
+    mask_arr = layer.numpy("mask", real_mask=False)
+    shape_mask = 1.0
+    if mask_arr is not None:
+        shape_mask = paste(layer.bbox, layer.mask.bbox, mask_arr,
+                           layer.mask.background_color / 255.0)
+    if layer.mask.parameters:
+        density = layer.mask.parameters.user_mask_density
+        if density is None:
+            density = layer.mask.parameters.vector_mask_density
+        if density is None:
+            density = 255
+        density = float(density) / 255.0
+        shape_mask = density * shape_mask + (1 - density)
+
+    # _get_const(675행).
+    shape_const = layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) / 255.0
+    opacity_const = layer.opacity / 255.0
+
+    # apply(348~372행). 배경이 비어 있으므로 alpha 계산만 남는다.
+    alpha = shape * (shape_mask * opacity_const) * shape_const
+    out_color = utils.clip(utils.divide(alpha * color, alpha))
+
+    merged = np.concatenate((out_color, alpha), axis=2)
+    return _quantize_like_psd_tools(layer._psd, merged)
+
+
+def _quantize_like_psd_tools(psd, merged):
+    """
+    float32 [0,1] 배열을 composite_pil(22행)과 같은 순서로 uint8 RGBA로 만든다.
+
+    절삭이지 반올림이 아니다. 그리고 문서에 ICC 프로파일이 있으면 같은 후처리를
+    태운다 — _merge_rgba_fast의 마무리와 같다.
+    """
+    from psd_tools.api import pil_io
+    from psd_tools.constants import Resource
+
+    img = Image.fromarray((255 * merged).astype(np.uint8), "RGBA")
+    icc = None
+    if Resource.ICC_PROFILE in psd.image_resources:
+        icc = psd.image_resources.get_data(Resource.ICC_PROFILE)
+    return np.array(pil_io.post_process(img, None, icc).convert("RGBA"))
+
+
 def extract_rgba(layer):
     if layer.mask is not None and not layer.mask.disabled:
+        fast = _extract_rgba_masked(layer)
+        if fast is not None:
+            return fast
         img = layer.composite(viewport=layer.bbox)
     else:
         img = layer.topil()

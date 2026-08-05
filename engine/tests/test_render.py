@@ -50,6 +50,29 @@ def test_masked_fixture_really_carries_masks(masked_psd):
     assert by_name["half_opacity_mask"].opacity == 128
 
 
+@pytest.mark.parametrize("name", ["plain_mask", "bg255_mask", "dense_mask",
+                                  "half_opacity_mask"])
+def test_masked_extract_is_byte_identical_to_composite(masked_psd, name):
+    """
+    값싼 경로는 psd-tools의 합성과 **바이트로** 같아야 한다.
+
+    ±1도 실패다. export.py가 이 함수를 쓰므로 계약이 바이트 동일이고, ±1은
+    보통 float32 산술이나 uint8 절삭을 psd-tools와 다르게 했다는 신호다.
+    """
+    psd = PSDImage.open(masked_psd)
+    layer = next(l for l in psd.descendants() if l.name == name)
+    reference = np.array(layer.composite(viewport=layer.bbox).convert("RGBA"))
+
+    fast = render_mod._extract_rgba_masked(layer)
+
+    assert fast is not None, f"{name}이 가드를 못 넘어 값싼 경로를 타지 못했다"
+    assert fast.shape == reference.shape
+    assert np.array_equal(fast, reference), (
+        f"최대차 {np.abs(fast.astype(int) - reference.astype(int)).max()}, "
+        f"다른 성분 {(fast != reference).sum()}/{fast.size}"
+    )
+
+
 def test_merge_rgba_overlap(fixture_psd):
     s = _session(fixture_psd)
     # 'fill'(128, 전체) 위에 'lines'(200, (10,10)-(30,20))
