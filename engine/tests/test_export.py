@@ -4,7 +4,8 @@ from psd_tools import PSDImage
 
 from pathlib import Path
 
-from psd_engine.export import export_psd, export_psd_split, split_output_path
+from psd_engine.export import (export_psd, export_psd_split, output_extension,
+                               split_output_path)
 from psd_engine.ops import build_export_plan, finalize_names
 from psd_engine.session import SessionStore
 from psd_engine.verify import verify_export
@@ -16,9 +17,26 @@ def session(fixture_psd):
     return store.get(store.open(fixture_psd))
 
 
+@pytest.fixture
+def wide_session(wide_psb):
+    store = SessionStore()
+    return store.get(store.open(wide_psb))
+
+
+@pytest.fixture
+def off_canvas_session(off_canvas_psd):
+    store = SessionStore()
+    return store.get(store.open(off_canvas_psd))
+
+
 def _plan(session, included, operations):
     entries = build_export_plan(included, operations)
     return finalize_names(entries, session["nodes_by_id"], "pathPrefix")
+
+
+def _ids(session, *names):
+    by_name = {l.name: lid for lid, l in session["layers_by_id"].items()}
+    return [by_name[n] for n in names]
 
 
 def test_export_copies_and_merge(session, tmp_path):
@@ -232,3 +250,94 @@ def test_verify_without_a_line_color_is_unchanged(session, tmp_path):
     export_psd(session, entries, out_path)
 
     assert verify_export(session, entries, out_path)["ok"] is True
+
+
+# 파일 버전은 확장자를 따르고, 30,000px을 넘는 문서는 그것을 강제한다.
+# 둘이 어긋난 파일은 포토샵이 열지 못하므로 쓰기 전에 갈라야 한다.
+def test_export_writes_version_1_for_an_ordinary_document(session, tmp_path):
+    out_path = tmp_path / "out.psd"
+    export_psd(session, _plan(session, [4], []), out_path)
+    assert PSDImage.open(out_path).version == 1
+
+
+def test_export_follows_a_psb_extension_even_when_the_document_is_small(session, tmp_path):
+    # 산출물 확장자는 원본을 물려받는다. 작다고 안쪽을 version 1로 쓰면 확장자와
+    # 어긋난 파일이 나간다.
+    out_path = tmp_path / "out.psb"
+    export_psd(session, _plan(session, [4], []), out_path)
+    assert PSDImage.open(out_path).version == 2
+
+
+def test_export_writes_version_2_for_a_document_over_30000(wide_session, tmp_path):
+    out_path = tmp_path / "out.psb"
+    export_psd(wide_session, _plan(wide_session, _ids(wide_session, "line"), []), out_path)
+    assert PSDImage.open(out_path).version == 2
+
+
+def test_export_refuses_to_write_an_oversized_document_as_psd(wide_session, tmp_path):
+    # pytoshop도 결국은 막지만("width must be in range 1-30000"), 그 메시지로는
+    # 어느 파일을 무엇으로 저장해야 하는지 알 수 없다.
+    out_path = tmp_path / "out.psd"
+    with pytest.raises(ValueError, match=r"32510x300.*write it as \.psb"):
+        export_psd(wide_session, _plan(wide_session, _ids(wide_session, "line"), []),
+                   out_path)
+    assert not out_path.exists()
+
+
+def test_psb_round_trip_keeps_the_pixels_past_the_30000_mark(wide_session, tmp_path):
+    # 한계 너머의 좌표가 살아남는지는 그 지점 **뒤에** 있는 그림으로만 확인된다.
+    ids = _ids(wide_session, "line", "line far")
+    out_path = tmp_path / "out.psb"
+    export_psd(wide_session, _plan(wide_session, ids, []), out_path)
+
+    out = PSDImage.open(out_path)
+    assert out.version == 2
+    assert (out.width, out.height) == (32510, 300)
+    far = next(l for l in out if l.name.endswith("line far"))
+    assert far.bbox == (30010, 40, 32510, 140)
+    arr = np.array(far.topil().convert("RGBA"))
+    assert (arr[..., :3] == 200).all() and (arr[..., 3] == 255).all()
+
+
+def test_export_keeps_off_canvas_merge_coordinates_in_a_psd(off_canvas_session, tmp_path):
+    # 캔버스 밖까지 뻗은 레이어를 병합해도 좌표를 자르지 않는다 — 그 좌표는 나중에
+    # 합성할 때 그대로 맞아야 하고(export_psd_split의 docstring 참고), 기준선 25장
+    # 195엔트리 중 37개가 이미 이 모양으로 나가 있다.
+    ids = _ids(off_canvas_session, "spills left", "spills right")
+    entries = _plan(off_canvas_session, ids,
+                    [{"op": "merge", "layerIds": ids, "name": "M"}])
+    out_path = tmp_path / "out.psd"
+    export_psd(off_canvas_session, entries, out_path)
+
+    out = PSDImage.open(out_path)
+    assert out.version == 1
+    merged = next(l for l in out if l.name == "M")
+    assert merged.bbox == (-12, -9, 89, 38)
+
+
+# 산출물 확장자는 원본을 따른다. 이 규칙은 프런트엔드 src/lib/exportFlow.ts의
+# outputExtension과 글자 그대로 같아야 한다 — 그쪽이 계산한 경로가 덮어쓰기 사전
+# 검사와 UI에 쓰이고, 실제로 파일이 나가는 경로는 batch.py라, 둘이 갈라지면
+# 검사한 적 없는 경로에 파일을 쓰게 된다.
+@pytest.mark.parametrize("src, want", [
+    ("/a/b/shot.psd", ".psd"),
+    ("/a/b/shot.psb", ".psb"),
+    ("/a/b/shot.PSB", ".psb"),          # 대소문자 무시, 결과는 소문자로 정규화
+    ("/a/b/shot.PsB", ".psb"),
+    ("/a/b/shot.PSD", ".psd"),
+    ("/a/b/shot.tiff", ".psd"),         # 무관한 확장자
+    ("/a/b/shot", ".psd"),              # 확장자 없음
+    ("/a/b/shot.", ".psd"),             # 점만 있고 비어 있음
+    ("/a.psb/shot", ".psd"),            # 점이 디렉터리 쪽에만 있음
+    ("/a/b/archive.tar.psb", ".psb"),   # 마지막 점만 본다
+    ("/a/b/.psb", ".psd"),              # 점으로 시작하는 이름은 확장자가 아니다
+])
+def test_output_extension_matches_the_frontend_rule(src, want):
+    assert output_extension(src) == want
+
+
+def test_split_output_path_inherits_a_psb_extension():
+    # 레이어별 내보내기는 건네받은 경로의 확장자를 그대로 물려받아야 한다 —
+    # .psb 원본이 레이어마다 .psd로 쪼개지면 안쪽 버전과 확장자가 어긋난다.
+    assert Path(split_output_path("/tmp/a_LINE.psb", "BG")).name == "a_LINE_BG.psb"
+    assert Path(split_output_path("/tmp/a_LINE.psd", "BG")).name == "a_LINE_BG.psd"

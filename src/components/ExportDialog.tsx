@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { defaultExportPath, reorderArgs, resolveEntryName } from "../lib/exportFlow";
+import { defaultExportPath, outputExtension, reorderArgs, resolveEntryName } from "../lib/exportFlow";
 import { exportPsd, onEngineEvent } from "../lib/engine";
 import { DEFAULT_LINE_COLOR } from "../lib/presets";
 import { toEngineError } from "../lib/preview";
@@ -165,7 +165,7 @@ export function ExportDialog({
       const defaultPath = defaultExportPath(srcPath, outputSuffix);
       const outputPath = await save({
         defaultPath,
-        filters: [{ name: "Photoshop", extensions: ["psd"] }],
+        filters: [{ name: "Photoshop", extensions: [outputExtension(srcPath)] }],
       });
       if (!outputPath) return;
 

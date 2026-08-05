@@ -7,7 +7,32 @@ import numpy as np
 from PIL import Image
 
 from .patches import apply_pytoshop_patches
-from .render import apply_line_color, extract_rgba, merge_rgba, parse_line_color
+from .render import (PSD_MAX_DIMENSION, apply_line_color, extract_rgba, merge_rgba,
+                     parse_line_color)
+
+
+def _output_version(output_path, width, height):
+    """
+    pytoshop에 넘길 파일 버전. 확장자가 형식을 정하고, 문서 크기가 그것을 강제한다.
+
+    확장자를 따르는 이유는 산출물 경로가 원본 확장자를 물려받기 때문이다. 경로는
+    `.psb`인데 안쪽을 version 1로 쓰면 포토샵이 열지 못하므로, 둘은 항상 같이
+    간다.
+
+    30,000을 넘는 문서에 `.psd` 경로가 오면 여기서 막는다. 그대로 넘기면 pytoshop이
+    "width must be in range 1-30000"으로 죽는데(파일을 만들기 전이라 망가진 산출물이
+    남지는 않는다), 그 메시지만으로는 어느 파일을 무엇으로 저장해야 하는지 알 수 없다.
+    """
+    from pytoshop import enums
+
+    if os.path.splitext(output_path)[1].lower() == ".psb":
+        return enums.Version.psb
+    if width > PSD_MAX_DIMENSION or height > PSD_MAX_DIMENSION:
+        raise ValueError(
+            f"{output_path}: document is {width}x{height}, over the PSD limit of "
+            f"{PSD_MAX_DIMENSION} px per axis — write it as .psb"
+        )
+    return enums.Version.version_1
 
 
 def _entry_pixels(session, entry, line_rgb=None):
@@ -39,6 +64,7 @@ def export_psd(session, entries, output_path, embed_preview=True,
 
     psd = session["psd"]
     W, H = psd.width, psd.height
+    version = _output_version(output_path, W, H)
     total = len(entries) + 2
     images_bottom_to_top = []
     canvas = Image.new("RGBA", (W, H), (255, 255, 255, 255)) if embed_preview else None
@@ -59,6 +85,7 @@ def export_psd(session, entries, output_path, embed_preview=True,
     out = nested_layers.nested_layers_to_psd(
         list(reversed(images_bottom_to_top)),   # index 0 = 최상단
         color_mode=enums.ColorMode.rgb,
+        version=version,
         size=(W, H),
     )
     if canvas is not None:
@@ -74,6 +101,19 @@ def export_psd(session, entries, output_path, embed_preview=True,
     if progress:
         progress("done", total, total)
     return {"outputPath": output_path, "layerCount": len(entries)}
+
+
+def output_extension(src_path):
+    """
+    원본 경로에 대응하는 산출물 확장자. `.psb`만 `.psb`로 가고 나머지는 전부 `.psd`다.
+
+    프런트엔드 `src/lib/exportFlow.ts`의 `outputExtension`과 글자 그대로 같은 규칙이어야
+    한다. 그쪽이 계산한 경로는 덮어쓰기 사전 검사와 UI에 쓰이고 실제로 파일이 나가는
+    경로는 이쪽이라, 둘이 갈라지면 검사한 적 없는 경로에 파일을 쓰게 된다.
+
+    `Path.suffix`는 대소문자를 보존하므로 명시적으로 낮춘다 — `FOO.PSB`는 `FOO….psb`다.
+    """
+    return ".psb" if Path(src_path).suffix.lower() == ".psb" else ".psd"
 
 
 #: 파일명에 쓸 수 없는 문자. 레이어 이름이 그대로 파일명이 되므로 정리한다.

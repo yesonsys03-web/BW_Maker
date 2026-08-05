@@ -17,6 +17,15 @@ test("planBatchOutputs with an outputDir places every output there, keyed by sou
   ]);
 });
 
+test("planBatchOutputs preserves a .psb source extension, with or without an outputDir", () => {
+  expect(planBatchOutputs(["/a/b/one.psb"], null, "_LINE")).toEqual([
+    { path: "/a/b/one.psb", outputPath: "/a/b/one_LINE.psb" },
+  ]);
+  expect(planBatchOutputs(["/a/b/one.psb"], "/out/dir", "_LINE")).toEqual([
+    { path: "/a/b/one.psb", outputPath: "/out/dir/one_LINE.psb" },
+  ]);
+});
+
 test("planBatchOutputs handles an outputDir with a trailing separator", () => {
   const result = planBatchOutputs(["/a/one.psd"], "/out/dir/", "_LINE");
   expect(result).toEqual([{ path: "/a/one.psd", outputPath: "/out/dir/one_LINE.psd" }]);

@@ -213,7 +213,7 @@ export function FilePanel({
     try {
       const selection = await open({
         multiple: true,
-        filters: [{ name: "Photoshop", extensions: ["psd"] }],
+        filters: [{ name: "Photoshop", extensions: ["psd", "psb"] }],
       });
       if (!selection) return;
       const paths = Array.isArray(selection) ? selection : [selection];

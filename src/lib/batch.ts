@@ -1,4 +1,4 @@
-import { defaultExportPath } from "./exportFlow";
+import { defaultExportPath, outputExtension } from "./exportFlow";
 
 export interface PlannedBatchOutput {
   path: string;
@@ -25,7 +25,8 @@ function joinDir(dir: string, name: string): string {
 /**
  * Plans each input file's export output path: next to the source when
  * `outputDir` is null (same semantics as `defaultExportPath`), or under
- * `outputDir` (source stem + suffix + ".psd") when given.
+ * `outputDir` (source stem + suffix + the source's extension, see
+ * `outputExtension`) when given.
  */
 export function planBatchOutputs(
   paths: string[],
@@ -34,7 +35,9 @@ export function planBatchOutputs(
 ): PlannedBatchOutput[] {
   return paths.map((path) => {
     const outputPath =
-      outputDir === null ? defaultExportPath(path, suffix) : joinDir(outputDir, `${stemOf(baseName(path))}${suffix}.psd`);
+      outputDir === null
+        ? defaultExportPath(path, suffix)
+        : joinDir(outputDir, `${stemOf(baseName(path))}${suffix}.${outputExtension(path)}`);
     return { path, outputPath };
   });
 }

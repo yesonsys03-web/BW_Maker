@@ -2,7 +2,7 @@
 import traceback
 from pathlib import Path
 
-from .export import export_psd, export_psd_split
+from .export import export_psd, export_psd_split, output_extension
 from .matching import match_preset, preset_operations
 from .ops import build_export_plan, finalize_names
 from .session import SessionStore
@@ -24,7 +24,7 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
         )
         src = Path(path)
         out_dir = Path(output_dir) if output_dir else src.parent
-        out_path = out_dir / f"{src.stem}{preset['outputSuffix']}.psd"
+        out_path = out_dir / f"{src.stem}{preset['outputSuffix']}{output_extension(src)}"
 
         def cb(stage, current, total):
             if progress:

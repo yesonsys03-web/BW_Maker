@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-/// 한 번의 스캔에서 담을 수 있는 .psd 상한. 아티스트가 홈 디렉터리나 드라이브
-/// 루트를 잘못 고르면 재귀 순회가 창을 붙잡은 채 끝나지 않는다.
+/// 한 번의 스캔에서 담을 수 있는 .psd/.psb 상한. 아티스트가 홈 디렉터리나
+/// 드라이브 루트를 잘못 고르면 재귀 순회가 창을 붙잡은 채 끝나지 않는다.
 const MAX_FILES: usize = 5000;
 
 /// 재귀 깊이 상한. 디렉터리로 걸린 심볼릭 링크는 따라가지 않으므로 순환은
@@ -15,7 +15,7 @@ const MAX_DEPTH: usize = 32;
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PsdScan {
-    /// 사전순으로 정렬·중복 제거된 .psd 절대 경로.
+    /// 사전순으로 정렬·중복 제거된 .psd/.psb 절대 경로.
     pub files: Vec<String>,
     /// MAX_FILES 또는 MAX_DEPTH에 걸려 순회를 도중에 접었는지.
     pub truncated: bool,
@@ -26,7 +26,7 @@ pub struct PsdScan {
 
 fn is_psd(path: &Path) -> bool {
     path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("psd"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("psd") || ext.eq_ignore_ascii_case("psb"))
 }
 
 #[derive(Default)]
@@ -97,9 +97,9 @@ fn walk(dir: &Path, depth: usize, scan: &mut ScanState) {
     }
 }
 
-/// 섞여 들어온 경로 목록을 .psd 파일 목록으로 펼친다. 폴더는 하위까지
-/// 재귀적으로 훑고, .psd 파일은 그대로 통과시키며, 나머지는 버린다. 폴더 추가
-/// 버튼과 드래그&드롭이 같은 함수를 쓰므로 "폴더 하나", "파일 여러 개",
+/// 섞여 들어온 경로 목록을 .psd/.psb 파일 목록으로 펼친다. 폴더는 하위까지
+/// 재귀적으로 훑고, .psd/.psb 파일은 그대로 통과시키며, 나머지는 버린다. 폴더
+/// 추가 버튼과 드래그&드롭이 같은 함수를 쓰므로 "폴더 하나", "파일 여러 개",
 /// "폴더와 파일을 섞어 떨어뜨린 경우"가 모두 같은 규칙으로 처리된다.
 ///
 /// plugin-fs의 read_dir이 아니라 Rust 커맨드인 이유는 paths_exist와 같다:
@@ -189,6 +189,24 @@ mod tests {
         assert_eq!(scan.skipped_dirs, 0);
     }
 
+    /// .psb(Large Document Format)는 .psd와 같은 규칙으로 폴더 순회에 잡혀야
+    /// 한다 — 대소문자 무관, 관계없는 확장자는 여전히 걸러진다.
+    #[test]
+    fn collects_psb_recursively_and_skips_other_files() {
+        let dir = TempDir::new("recursive_psb");
+        dir.touch("a.psb");
+        dir.touch("notes.txt");
+        dir.touch("cuts/b.psb");
+        dir.touch("cuts/deep/c.PSB");
+        dir.touch("cuts/deep/thumb.png");
+
+        let scan = collect_psd_files(vec![dir.str()]).unwrap();
+
+        assert_eq!(names(&scan, &dir), vec!["a.psb", "cuts/b.psb", "cuts/deep/c.PSB"]);
+        assert!(!scan.truncated);
+        assert_eq!(scan.skipped_dirs, 0);
+    }
+
     #[test]
     fn passes_through_psd_files_and_drops_non_psd_paths() {
         let dir = TempDir::new("passthrough");
@@ -202,6 +220,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(names(&scan, &dir), vec!["a.psd"]);
+    }
+
+    #[test]
+    fn passes_through_psb_files_directly() {
+        let dir = TempDir::new("passthrough_psb");
+        let psb = dir.touch("a.psb");
+        let txt = dir.touch("b.txt");
+
+        let scan = collect_psd_files(vec![
+            psb.to_string_lossy().into_owned(),
+            txt.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(names(&scan, &dir), vec!["a.psb"]);
     }
 
     #[test]

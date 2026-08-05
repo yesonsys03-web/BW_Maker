@@ -2,10 +2,24 @@ import type { Entry } from "./opsReducer";
 import type { TreeNode } from "./types";
 
 /**
+ * Output extension for a source path: preserves ".psd"/".psb" from the
+ * source (case-insensitively, normalized to lowercase), else falls back to
+ * ".psd" for an unrelated or absent extension.
+ */
+export function outputExtension(srcPath: string): "psd" | "psb" {
+  const lastSlash = Math.max(srcPath.lastIndexOf("/"), srcPath.lastIndexOf("\\"));
+  const fileName = lastSlash === -1 ? srcPath : srcPath.slice(lastSlash + 1);
+  const dotIdx = fileName.lastIndexOf(".");
+  if (dotIdx <= 0) return "psd";
+  const ext = fileName.slice(dotIdx + 1).toLowerCase();
+  return ext === "psb" ? "psb" : "psd";
+}
+
+/**
  * Suggested export path for the save dialog's defaultPath: same directory as
  * the source (separator preserved verbatim, "/" or "\\"), source stem plus
- * the given suffix, extension always forced to ".psd" regardless of the
- * source's original extension.
+ * the given suffix, extension preserved from the source (.psd → .psd,
+ * .psb → .psb, see outputExtension) instead of forced to a fixed one.
  */
 export function defaultExportPath(srcPath: string, suffix: string): string {
   const lastSlash = Math.max(srcPath.lastIndexOf("/"), srcPath.lastIndexOf("\\"));
@@ -13,7 +27,7 @@ export function defaultExportPath(srcPath: string, suffix: string): string {
   const fileName = lastSlash === -1 ? srcPath : srcPath.slice(lastSlash + 1);
   const dotIdx = fileName.lastIndexOf(".");
   const stem = dotIdx <= 0 ? fileName : fileName.slice(0, dotIdx);
-  return `${dir}${stem}${suffix}.psd`;
+  return `${dir}${stem}${suffix}.${outputExtension(srcPath)}`;
 }
 
 /**
