@@ -172,7 +172,34 @@ def masked_psd(tmp_path):
     return str(path)
 ```
 
-- [ ] **Step 3: 픽스처가 psd-tools에서 마스크로 읽히는지 확인하는 테스트**
+- [ ] **Step 3: `blend_group_psd` 픽스처를 쓴다**
+
+Task 8이 쓴다. 기존 `blend_mode_psd`는 못 쓴다 — **그룹이 없고**, 흰 base(255) 위의 multiply(64)라 곱연산 결과(64)와 평탄화 결과(64)가 **같아서 판별을 못 한다**.
+
+```python
+@pytest.fixture
+def blend_group_psd(tmp_path):
+    """
+    그룹 안에서 blend가 재현되는지 가르는 픽스처.
+
+    값을 고른 이유가 전부다. base 64 위에 shade 192를 multiply로 얹으면
+    겹치는 자리가 64*192/255 = 48이 되고, 블렌드를 버리고 알파 오버로 겹치면
+    192가 된다 — **차이가 144**라 테스트가 실수를 놓칠 수 없다.
+
+    blend_mode_psd로는 이것을 못 한다. 그쪽은 그룹이 없고, base가 흰색(255)이라
+    255*64/255 = 64로 곱연산과 알파 오버의 결과가 같다.
+    """
+    p = tmp_path / "blend_group.psd"
+    write_psd(p, [
+        nested_layers.Group(name="BLEND", layers=[
+            make_image("shade", 192, 0, 0, 16, 16, blend=enums.BlendMode.multiply),
+            make_image("base", 64, 0, 0, 32, 32),
+        ]),
+    ], width=32, height=32)
+    return str(p)
+```
+
+- [ ] **Step 4: 픽스처가 psd-tools에서 마스크로 읽히는지 확인하는 테스트**
 
 `test_render.py`의 `test_extract_rgba_empty_layer_raises` 아래에 넣는다.
 
@@ -196,7 +223,7 @@ def test_masked_fixture_really_carries_masks(masked_psd):
     assert by_name["half_opacity_mask"].opacity == 128
 ```
 
-- [ ] **Step 4: 실행해서 통과하는지 본다**
+- [ ] **Step 5: 실행해서 통과하는지 본다**
 
 ```bash
 cd engine && .venv/bin/python -m pytest tests/test_render.py::test_masked_fixture_really_carries_masks -v
@@ -204,19 +231,55 @@ cd engine && .venv/bin/python -m pytest tests/test_render.py::test_masked_fixtur
 
 Expected: PASS. 실패하면 `attach_mask`가 psd-tools가 읽는 형태를 못 만든 것이므로 여기서 멈추고 고친다 — 뒤 태스크가 전부 이 픽스처에 얹힌다.
 
-- [ ] **Step 5: 커밋**
+- [ ] **Step 6: `blend_group_psd`가 판별력을 갖는지 확인한다**
+
+픽스처가 확인하려던 것을 실제로 확인하는지 먼저 본다. 숫자가 예상과 다르면 Task 8의 테스트가 통과해도 아무 의미가 없다.
+
+```bash
+cd engine && .venv/bin/python - <<'PY'
+import sys, glob, os, tempfile
+sys.path.insert(0, "."); sys.path.insert(0, "tests")
+import numpy as np
+from pytoshop.user import nested_layers
+from pytoshop import enums
+from conftest import write_psd, make_image
+from psd_tools import PSDImage
+
+p = os.path.join(tempfile.mkdtemp(), "blend_group.psd")
+write_psd(p, [nested_layers.Group(name="BLEND", layers=[
+    make_image("shade", 192, 0, 0, 16, 16, blend=enums.BlendMode.multiply),
+    make_image("base", 64, 0, 0, 32, 32),
+])], width=32, height=32)
+psd = PSDImage.open(p)
+g = next(l for l in psd.descendants() if l.is_group())
+arr = np.array(g.composite(force=True, color=1.0, alpha=0.0).convert("RGBA"))
+print("겹치는 자리(정확):", arr[4, 4, :3], " 기대 48 근처")
+print("안 겹치는 자리   :", arr[28, 28, :3], " 기대 64")
+print("평탄화라면 겹치는 자리는 192 — 차이 144")
+PY
+```
+
+Expected: 겹치는 자리가 48 근처, 안 겹치는 자리가 64. 겹치는 자리가 192로 나오면 psd-tools가 그룹 안에서 multiply를 적용하지 않는 것이므로 **여기서 멈추고 보고한다** — 그러면 Task 8의 전제가 무너진다.
+
+- [ ] **Step 7: 커밋**
 
 ```bash
 git add engine/tests/conftest.py engine/tests/test_render.py
 git commit -m "$(cat <<'EOF'
-test: give the suite a masked-layer fixture it never had
+test: give the suite fixtures for the two cases it could not express
 
 extract_rgba branches on layer.mask and the suite only ever exercised the
-branch without one. The four layers here are not decoration: each is a case
-where a hand-written mask path measurably diverged from psd-tools on real
-delivery data — mask bbox smaller than the layer with background_color 255,
-a user mask density, and a layer opacity that composite() applies and
+branch without one. The four masked layers here are not decoration: each is
+a case where a hand-written mask path measurably diverged from psd-tools on
+real delivery data — mask bbox smaller than the layer with background_color
+255, a user mask density, and a layer opacity that composite() applies and
 topil() does not.
+
+blend_group_psd exists because blend_mode_psd cannot do the job it looks
+like it does: it has no group, and its multiply sits on a white base, where
+255*64/255 is 64 — exactly what dropping the blend would also produce. The
+new fixture puts 192 multiply over 64, so the correct answer is 48 and the
+flattened one is 192, and a test written against it cannot quietly pass.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Ltm3qkFkyb9oANqu3A2HRc
@@ -698,7 +761,7 @@ Expected: PASS.
 - [ ] **Step 1: 블렌드가 평탄화되지 않는다는 실패 테스트를 쓴다**
 
 ```python
-def test_scaled_group_reproduces_blend_modes(blend_mode_psd, tmp_path, monkeypatch):
+def test_scaled_group_reproduces_blend_modes(blend_group_psd):
     """
     축소 합성기는 평탄화가 아니다.
 
@@ -707,8 +770,12 @@ def test_scaled_group_reproduces_blend_modes(blend_mode_psd, tmp_path, monkeypat
     그룹의 그림이 전부 틀린다 — 이 테스트가 그 회귀를 잡는다.
 
     48px 캔버스 합성은 시간이 0에 가까우므로 이 충실도는 공짜다.
+
+    픽스처가 판별력을 갖는 것을 확인해 두었다: base 64에 shade 192를 multiply로
+    얹으면 겹치는 자리가 **48**, 알파 오버로 겹치면 **192**다(실측). 그래서 이
+    테스트는 평탄화 구현에서 반드시 실패한다.
     """
-    s = _session(blend_mode_psd)
+    s = _session(blend_group_psd)
     gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
     group = s["layers_by_id"][gid]
 
@@ -720,8 +787,11 @@ def test_scaled_group_reproduces_blend_modes(blend_mode_psd, tmp_path, monkeypat
 
     assert scaled.shape == exact_small.shape
     diff = np.abs(scaled.astype(int) - exact_small.astype(int)).max()
-    # 평탄화했다면 블렌드가 통째로 빠져 이보다 훨씬 크게 벌어진다.
-    assert diff <= 24, f"블렌드가 재현되지 않았다 — 최대차 {diff}"
+    assert diff <= 24, f"블렌드가 재현되지 않았다 — 최대차 {diff} (평탄화면 144 근처)"
+    # 막대가 실제로 판별하는지 여기서 함께 못박는다 — 겹치는 자리가 곱연산 값이어야
+    # 한다. 위 최대차만 보면 축소 때문에 우연히 통과하는 구현을 놓칠 수 있다.
+    assert scaled[2, 2, 0] < 120, (
+        f"겹치는 자리가 {scaled[2, 2, 0]} — 곱연산(48)이 아니라 알파 오버(192)다")
 ```
 
 - [ ] **Step 2: 실행해서 실패를 본다**
