@@ -31,90 +31,6 @@ def test_extract_rgba_empty_layer_raises():
         extract_rgba(layer)
 
 
-def test_masked_fixture_really_carries_masks(masked_psd):
-    """
-    픽스처가 무엇을 확인하는지부터 확인한다. 마스크가 안 붙으면 아래 동등성
-    테스트가 전부 마스크 없는 경로를 재고도 통과한다 — 0fbbeef에서 타일 수를
-    안 세서 공허해졌던 테스트와 같은 함정이다.
-    """
-    psd = PSDImage.open(masked_psd)
-    by_name = {l.name: l for l in psd.descendants()}
-    assert set(by_name) >= {"plain_mask", "bg255_mask", "dense_mask",
-                            "half_opacity_mask"}
-    for name in ("plain_mask", "bg255_mask", "dense_mask", "half_opacity_mask"):
-        m = by_name[name].mask
-        assert m is not None and not m.disabled, f"{name}에 마스크가 없다"
-    assert by_name["bg255_mask"].mask.background_color == 255
-    assert by_name["bg255_mask"].mask.bbox != by_name["bg255_mask"].bbox
-    assert by_name["dense_mask"].mask.parameters is not None
-    assert by_name["half_opacity_mask"].opacity == 128
-
-
-@pytest.mark.parametrize("name", ["plain_mask", "bg255_mask", "dense_mask",
-                                  "half_opacity_mask"])
-def test_masked_extract_is_byte_identical_to_composite(masked_psd, name):
-    """
-    값싼 경로는 psd-tools의 합성과 **바이트로** 같아야 한다.
-
-    ±1도 실패다. export.py가 이 함수를 쓰므로 계약이 바이트 동일이고, ±1은
-    보통 float32 산술이나 uint8 절삭을 psd-tools와 다르게 했다는 신호다.
-    """
-    psd = PSDImage.open(masked_psd)
-    layer = next(l for l in psd.descendants() if l.name == name)
-    reference = np.array(layer.composite(viewport=layer.bbox).convert("RGBA"))
-
-    fast = render_mod._extract_rgba_masked(layer)
-
-    assert fast is not None, f"{name}이 가드를 못 넘어 값싼 경로를 타지 못했다"
-    assert fast.shape == reference.shape
-    assert np.array_equal(fast, reference), (
-        f"최대차 {np.abs(fast.astype(int) - reference.astype(int)).max()}, "
-        f"다른 성분 {(fast != reference).sum()}/{fast.size}"
-    )
-
-
-def test_masked_clip_fixture_really_clips_and_masks(masked_clip_psd):
-    """
-    아래 거부 테스트가 공허하지 않은지부터 확인한다. 마스크가 없으면 값싼 경로는
-    클리핑과 무관하게 거부하고, 클리핑이 안 걸리면 잴 것이 없다.
-    """
-    psd = PSDImage.open(masked_clip_psd)
-    by_name = {l.name: l for l in psd.descendants()}
-    assert set(by_name) >= {"shade", "base"}
-    for name in ("shade", "base"):
-        m = by_name[name].mask
-        assert m is not None and not m.disabled, f"{name}에 마스크가 없다"
-        assert by_name[name].is_visible(), f"{name}이 숨어 있다"
-    assert by_name["shade"].clipping
-    assert by_name["base"].has_clip_layers()
-
-
-@pytest.mark.parametrize("name", ["shade", "base"])
-def test_clipping_shapes_fall_back_instead_of_taking_the_fast_path(
-        masked_clip_psd, name, monkeypatch):
-    """
-    클리핑이 낀 두 모양은 값싼 경로가 거부하고 예전 경로로 떨어져야 한다.
-
-    shade(clipping=True)는 composite가 통째로 건너뛰어 배경만 남고, base는
-    composite가 shade를 위에 합성해 준다. 값싼 경로는 둘 다 재현하지 않는다.
-    """
-    psd = PSDImage.open(masked_clip_psd)
-    layer = next(l for l in psd.descendants() if l.name == name)
-    reference = np.array(layer.composite(viewport=layer.bbox).convert("RGBA"))
-
-    assert render_mod._extract_rgba_masked(layer) is None, "가드가 걸러야 한다"
-    assert np.array_equal(extract_rgba(layer), reference), \
-        "fallback이 예전과 같은 그림을 내야 한다"
-
-    # 가드를 빼면 실제로 그림이 달라진다 — 이 테스트가 무언가를 지키고 있다는 증거다.
-    # 이것이 없으면 값싼 경로가 우연히 같은 값을 내는 경우와 구별되지 않는다.
-    monkeypatch.setattr(render_mod, "_mask_fast_ok", lambda l: True)
-    unguarded = render_mod._extract_rgba_masked(layer)
-    assert unguarded is not None
-    assert not np.array_equal(unguarded, reference), \
-        "가드를 빼도 같다면 이 가드는 아무것도 지키지 않는 것이다"
-
-
 def test_merge_rgba_overlap(fixture_psd):
     s = _session(fixture_psd)
     # 'fill'(128, 전체) 위에 'lines'(200, (10,10)-(30,20))
@@ -456,286 +372,97 @@ def test_merge_rgba_rejects_a_clamped_merge_with_nothing_left(all_outside_union_
         merge_rgba(s["psd"], layers)
 
 
-def test_scaled_leaf_premultiplies_before_resizing(fixture_psd):
-    """
-    축소는 프리멀티플라이드 알파에서 해야 한다.
+def _thumb_png(s, gid, max_size, out_dir):
+    out_dir.mkdir()
+    paths = render_thumbnails(s, [gid], max_size=max_size, out_dir=out_dir)
+    return np.array(Image.open(paths[str(gid)]).convert("RGBA"))
 
-    스트레이트 알파로 R/G/B/A를 따로 줄이면 알파가 0인 자리에 남아 있는 색이
-    가장자리로 번진다. 라인아트는 안티에일리어싱이 전부 알파에 들어 있어서 그
-    번짐이 그대로 보인다 — apply_line_color의 주석이 같은 이유를 적고 있다.
+
+def _count_tiled_calls(monkeypatch):
+    """
+    타일 경로를 실제로 탔는지, 그리고 타일이 **몇 장**이었는지 기록한다.
+
+    호출 여부만 세면 부족하다 — 타일이 한 장이면 이어붙이기가 일어나지 않아
+    "타일로 나눠도 같다"는 비교가 공허해진다. 실제로 그런 적이 있다: 헬퍼가
+    THUMBNAIL_TILE_SIZE를 쓰게 바꾼 뒤에도 테스트는 MERGE_TILE_SIZE를 낮추고
+    있어서, 64x48 픽스처가 2048 타일 한 장으로 처리되고 있었다.
+    """
+    calls = []
+    real = render_mod._group_rgba_tiled
+
+    def counted(psd, group, bbox, leaves, always_wanted):
+        step = render_mod.THUMBNAIL_TILE_SIZE
+        nx = -(-(bbox[2] - bbox[0]) // step)
+        ny = -(-(bbox[3] - bbox[1]) // step)
+        calls.append(nx * ny)
+        return real(psd, group, bbox, leaves, always_wanted)
+
+    monkeypatch.setattr(render_mod, "_group_rgba_tiled", counted)
+    return calls
+
+
+def test_large_group_thumbnail_matches_the_single_composite(fixture_psd, tmp_path, monkeypatch):
+    """
+    타일 경로가 내는 썸네일은 예전 한 번 합성과 **픽셀로** 같아야 한다.
+
+    이 경로의 약속은 "같은 그림을 싸게"이지 "다른 그림"이 아니다. 전해상도로 이어
+    붙인 뒤 축소를 마지막에 한 번만 하는 이유가 그것이다 — 타일마다 축소하면
+    리샘플링이 갈리고, 그 차이가 여기서 걸린다.
+
+    임계값을 낮춰 작은 픽스처로 타일 경로를 태운다. 여기서 확인하는 성질(결과가
+    같다)은 임계값이 얼마든 성립해야 하는 것이므로, 임계값 자체가 쟁점이던 클램프
+    테스트와 달리 상수를 낮춰도 확인하려는 것을 잃지 않는다.
     """
     s = _session(fixture_psd)
-    leaf = s["layers_by_id"][4]          # 'line' value=50, 32x24, 알파 255
-    out = render_mod._scaled_leaf(leaf, 0.25, (0, 0))
-    assert out is not None
-    rgba, x0, y0 = out
-    assert rgba.dtype == np.float32
-    assert rgba.shape == (6, 8, 4)
-    assert (x0, y0) == (0, 0)
-    # 알파가 전부 1이므로 프리멀티플라이드 색은 원본과 같다: 50/255
-    assert np.allclose(rgba[..., 3], 1.0, atol=1e-3)
-    assert np.allclose(rgba[..., :3], 50 / 255, atol=2e-3)
+    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
 
+    plain = _thumb_png(s, gid, 16, tmp_path / "plain")
 
-def _exact_group_thumbnail(psd, group):
-    """
-    render_thumbnails가 '비싼 그룹' 갈래에서 정확 기준으로 실제로 쓰는 것과 같은
-    layer_filter로 그룹을 합성한다(render.py의 render_thumbnails 참고: 조상은
-    강제로 통과시키고 — 숨은 그룹 오버라이드 — 보이는 자손만 넣는다).
+    calls = _count_tiled_calls(monkeypatch)
+    monkeypatch.setattr(render_mod, "THUMBNAIL_TILE_PX", 0)     # 타일 경로 강제
+    monkeypatch.setattr(render_mod, "THUMBNAIL_TILE_SIZE", 8)   # 64x48 -> 8x6 = 48장
+    tiled = _thumb_png(s, gid, 16, tmp_path / "tiled")
 
-    필터 없이 group.composite(force=True, color=1.0, alpha=0.0)를 부르면 다른
-    그림이 나온다 — 실측(설계 문서 §4.3)에서 두 기준이 LINES 33.9, wall2 53.5만큼
-    달랐고, 그 차이를 축소 합성기의 오차로 잘못 읽을 뻔했다. 이 테스트 스위트의
-    두 기존 테스트가 그 실수를 그대로 물려받고 있었다 — 여기로 옮겨 한 곳에서
-    고친다.
-    """
-    ancestors_and_self = set()
-    cur = group
-    while cur is not psd:
-        ancestors_and_self.add(id(cur))
-        cur = cur.parent
-    descendant_ids = {id(d) for d in group.descendants() if d.visible}
-    return group.composite(
-        force=True, color=1.0, alpha=0.0,
-        layer_filter=lambda l: id(l) in ancestors_and_self or id(l) in descendant_ids,
+    assert calls, "타일 경로를 타지 않아 비교가 공허하다"
+    assert calls[0] > 1, f"타일이 {calls[0]}장뿐이라 이어붙이기를 확인하지 못한다"
+    assert tiled.shape == plain.shape
+    assert np.array_equal(tiled, plain), (
+        f"최대차 {np.abs(tiled.astype(int) - plain.astype(int)).max()}, "
+        f"다른 성분 {(tiled != plain).sum()}/{tiled.size}"
     )
 
 
-def test_scaled_group_reproduces_blend_modes(blend_group_psd):
-    """
-    축소 합성기는 평탄화가 아니다.
-
-    실납품에서 8Mpx 넘는 그룹의 80%가 블렌드나 클리핑을 갖고 있고, 비용 상위
-    30개 중 29개가 클리핑을 갖는다. 알파 오버로 겹쳐 버리면 정작 사람이 기다리는
-    그룹의 그림이 전부 틀린다 — 이 테스트가 그 회귀를 잡는다.
-
-    48px 캔버스 합성은 시간이 0에 가까우므로 이 충실도는 공짜다.
-
-    픽스처가 판별력을 갖는 것을 확인해 두었다: base 64에 shade 192를 multiply로
-    얹으면 겹치는 자리가 **48**, 알파 오버로 겹치면 **192**다(실측). 그래서 이
-    테스트는 평탄화 구현에서 반드시 실패한다.
-    """
-    s = _session(blend_group_psd)
-    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
-    group = s["layers_by_id"][gid]
-
-    exact_img = _exact_group_thumbnail(s["psd"], group).convert("RGBA")
-    exact_img.thumbnail((16, 16))
-    exact_small = np.array(exact_img)
-
-    # production과 같은 순서로 줄인다 — _group_rgba_scaled는 중간 해상도로
-    # 돌려주고, 축소는 render_thumbnails의 img.thumbnail 한 번뿐이다.
-    scaled_img = Image.fromarray(
-        render_mod._group_rgba_scaled(s["psd"], group, group.bbox), "RGBA")
-    scaled_img.thumbnail((16, 16))
-    scaled = np.array(scaled_img)
-
-    assert scaled.shape == exact_small.shape
-    diff = np.abs(scaled.astype(int) - exact_small.astype(int)).max()
-    assert diff <= 24, f"블렌드가 재현되지 않았다 — 최대차 {diff} (평탄화면 144 근처)"
-    # 막대가 실제로 판별하는지 여기서 함께 못박는다 — 겹치는 자리가 곱연산 값이어야
-    # 한다. 위 최대차만 보면 축소 때문에 우연히 통과하는 구현을 놓칠 수 있다.
-    assert scaled[2, 2, 0] < 120, (
-        f"겹치는 자리가 {scaled[2, 2, 0]} — 곱연산(48)이 아니라 알파 오버(192)다")
-
-
-def test_scaled_group_reproduces_clipping(clip_layer_psd, tmp_path):
-    """
-    클리핑 레이어는 베이스의 **색만** 바꾸고 알파는 바꾸지 않는다 —
-    _apply_clip_layers가 하위 Compositor의 _color만 돌려주기 때문이다.
-
-    평탄화 구현은 클리핑 레이어를 베이스 밖에까지 그려서 알파가 넓어진다.
-    그래서 알파를 비교하면 그 실수가 잡힌다.
-    """
-    s = _session(clip_layer_psd)
-    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
-    group = s["layers_by_id"][gid]
-
-    exact_img = _exact_group_thumbnail(s["psd"], group).convert("RGBA")
-    exact_img.thumbnail((16, 16))
-    exact_small = np.array(exact_img)
-
-    scaled_img = Image.fromarray(
-        render_mod._group_rgba_scaled(s["psd"], group, group.bbox), "RGBA")
-    scaled_img.thumbnail((16, 16))
-    scaled = np.array(scaled_img)
-
-    assert scaled.shape == exact_small.shape
-    alpha_diff = np.abs(scaled[..., 3].astype(int) - exact_small[..., 3].astype(int)).max()
-    assert alpha_diff <= 24, f"클리핑이 알파를 넓혔다 — 최대차 {alpha_diff}"
-
-
-def test_scaled_group_reproduces_its_own_mask_and_opacity(masked_group_psd):
-    """
-    그룹 **자신**의 마스크·불투명도가 최상위/중첩 어느 자리에서도 반영돼야 한다.
-
-    _group_rgba_scaled는 한동안 own_alpha_factor 없이 draw()의 for-루프 안에서
-    불투명도만(그것도 자식으로 방문될 때만) 곱했다 — 그룹 자신의 마스크는 어디서도
-    읽지 않았고, 최상위 그룹은 어느 부모의 for-루프에도 안 걸리므로 자기
-    불투명도조차 반영되지 않았다. 알파를 비교하면 그 둘 다 잡힌다 — 마스크가
-    걸린 자리는 완전히 다른 값이 나온다(실측: 옛 코드에서 이 픽스처의 알파
-    최대차 180).
-    """
-    s = _session(masked_group_psd)
-    outer = next(l for l in s["layers_by_id"].values()
-                if l.is_group() and l.name == "OUTER")
-
-    exact = np.array(outer.composite(force=True, color=1.0, alpha=0.0).convert("RGBA"))
-    scaled = render_mod._group_rgba_scaled(s["psd"], outer, outer.bbox)
-
-    assert scaled.shape == exact.shape
-    alpha_diff = np.abs(scaled[..., 3].astype(int) - exact[..., 3].astype(int)).max()
-    assert alpha_diff <= 4, (
-        f"그룹 자신의 마스크·불투명도가 반영되지 않았다 — 최대차 {alpha_diff}")
-
-
-def test_scaled_leaf_opacity_is_not_double_applied_when_masked(masked_leaf_group_psd):
-    """
-    마스크 달린 잎의 불투명도를 두 번 곱하지 않는다.
-
-    extract_rgba는 마스크 달린 잎의 불투명도·fill 불투명도를 이미 반영해 돌려준다
-    (_extract_rgba_masked 또는 layer.composite 경유). own_alpha_factor가 무조건 또
-    곱하면 128/255가 아니라 (128/255)^2이 되어, 캔버스 전체 알파가 낮게 나온다
-    (실측: 옛 코드에서 이 픽스처의 알파 최대차 64).
-    """
-    s = _session(masked_leaf_group_psd)
-    group = next(l for l in s["layers_by_id"].values() if l.is_group())
-
-    exact = np.array(group.composite(force=True, color=1.0, alpha=0.0).convert("RGBA"))
-    scaled = render_mod._group_rgba_scaled(s["psd"], group, group.bbox)
-
-    assert scaled.shape == exact.shape
-    alpha_diff = np.abs(scaled[..., 3].astype(int) - exact[..., 3].astype(int)).max()
-    assert alpha_diff <= 4, (
-        f"불투명도가 두 번 적용된 것으로 보인다 — 최대차 {alpha_diff} "
-        f"(두 번 곱하면 128/255가 아니라 (128/255)^2, 즉 128 대신 64 근처가 된다)")
-
-
-def test_scaled_group_does_not_double_apply_a_masked_clip_layer(masked_clip_multiply_psd):
-    """
-    마스크 달린 베이스에 곱연산 클리핑 레이어가 붙은 경우도 두 번 합성하지 않는다.
-
-    extract_rgba는 클리핑 있는 마스크 레이어를 항상 layer.composite()로 떨어뜨려
-    (has_clip_layers 가드) 클리핑까지 이미 합성해 돌려준다. draw()가 클리핑 루프를
-    또 태우면 곱연산이 두 번 걸린다 — 곱연산은 멱등이 아니라서(normal과 달리) 두
-    번째로 갈수록 값이 계속 준다(실측: 옛 코드에서 정확 50, 옛 코드 12; 시각적
-    RGB 최대차 38).
-    """
-    s = _session(masked_clip_multiply_psd)
-    group = next(l for l in s["layers_by_id"].values() if l.is_group())
-
-    exact = np.array(group.composite(force=True, color=1.0, alpha=0.0).convert("RGBA")).astype(int)
-    scaled = render_mod._group_rgba_scaled(s["psd"], group, group.bbox).astype(int)
-
-    assert scaled.shape == exact.shape
-    both_visible = (exact[..., 3] > 0) & (scaled[..., 3] > 0)
-    assert both_visible.any(), "픽스처에 겹치는 자리가 없다 — 판별력을 잃었다"
-    rgb_diff = np.abs(scaled[..., :3] - exact[..., :3]).max(axis=2)
-    visible_diff = rgb_diff[both_visible].max()
-    assert visible_diff <= 4, (
-        f"클리핑 레이어가 두 번 합성된 것으로 보인다 — 시각적 RGB 최대차 "
-        f"{visible_diff}(두 번 곱하면 38 근처가 된다)")
-
-
-def test_scaled_group_ignores_a_clip_layer_that_lives_outside_it(sibling_clip_group_psd):
-    """
-    썸네일 대상 그룹 **자신**에게, 그 그룹의 부모 컨테이너 안에서 붙은 클리핑
-    레이어는 무시해야 한다 — 실납품에서 실제로 걸린 회귀다(HH0306 02_Color의
-    'LINES' 그룹에 형제 'Layer 621'이 클리핑돼 있었다).
-
-    render_thumbnails의 layer_filter(조상+자손만 통과)는 GROUP의 부모에 속한 그
-    클리핑 레이어를 걸러 no-op으로 만든다. `_group_rgba_scaled`가 최상위 그룹을
-    draw()의 일반 자식 루프에 태워 자기 clip_layers를 필터 없이 처리하면, 이
-    자리에서만 그 클리핑이 새 나간다 — 실측: 이 회귀로 평범한 그룹 108개 기준
-    최악 premultiplied 차이가 10.0에서 103.7로 뛰었다.
-
-    같은 그룹 **안쪽**의 클리핑('inner_clip'이 'inner_base'에 곱연산으로 클리핑)은
-    자손끼리라 필터 안에 들어오므로 그대로 반영돼야 한다 — 이 테스트는 "그룹 밖
-    클리핑은 무시, 그룹 안 클리핑은 반영"을 한 번에 가른다.
-    """
-    s = _session(sibling_clip_group_psd)
-    lines = next(l for l in s["layers_by_id"].values() if l.is_group() and l.name == "LINES")
-
-    exact = np.array(_exact_group_thumbnail(s["psd"], lines).convert("RGBA")).astype(int)
-    scaled = render_mod._group_rgba_scaled(s["psd"], lines, lines.bbox).astype(int)
-
-    assert scaled.shape == exact.shape
-    diff = np.abs(scaled.astype(int) - exact.astype(int)).max()
-    assert diff <= 4, (
-        f"그룹 밖 클리핑이 새 나간 것으로 보인다 — 최대차 {diff}")
-
-    # 픽스처가 실제로 판별력을 갖는지 — sibling_clip을 걸렀을 때와 안 걸렀을 때가
-    # 달라야 한다. 안 그러면 위 assert가 우연히 통과했을 뿐일 수 있다.
-    unfiltered = np.array(lines.composite(force=True, color=1.0, alpha=0.0).convert("RGBA"))
-    unfiltered_diff = np.abs(exact.astype(int) - unfiltered.astype(int)).max()
-    assert unfiltered_diff > 4, (
-        "필터를 걸고 안 걸고가 그림에서 차이가 안 난다 — 이 픽스처가 sibling_clip "
-        "제외를 판별하지 못한다")
-
-    # 안쪽 클리핑(inner_clip)은 여전히 반영돼야 한다 — 곱연산이라 겹치는 자리가
-    # 200이 아니라 200*64/255=50 근처여야 한다.
-    assert scaled[16, 16, 0] < 120, (
-        f"안쪽 클리핑이 반영되지 않았다 — {scaled[16, 16, 0]} (반영되면 50 근처, "
-        f"안 되면 200)")
-
-
-def test_scaled_group_gives_a_passthrough_subgroup_the_real_backdrop(passthrough_subgroup_psd):
-    """
-    pass-through 하위그룹은 격리해서 그린 뒤 얹으면 안 된다 — 그 안의 블렌드가
-    부모(형제 base)가 아니라 자기만의 빈 캔버스를 배경으로 계산돼 버린다.
-
-    이 픽스처는 판별력이 crisp하다: base 64 위에 pass-through 하위그룹 안의
-    mult(곱연산) 192가 곱해지면 겹치는 자리가 **48 근처**(64*192/255)여야 한다.
-    격리해서 그리면 mult가 흰 배경 위에서 곱해져 그대로 **192**가 남는다 — 차이 144.
-
-    review 실측(2026-08-05)과 같은 모양: exact 50 vs 격리 64.
-    """
-    s = _session(passthrough_subgroup_psd)
-    outer = next(l for l in s["layers_by_id"].values() if l.is_group() and l.name == "OUTER")
-
-    exact = np.array(_exact_group_thumbnail(s["psd"], outer).convert("RGBA"))
-    scaled = render_mod._group_rgba_scaled(s["psd"], outer, outer.bbox)
-
-    assert scaled.shape == exact.shape
-    diff = np.abs(scaled.astype(int) - exact.astype(int)).max()
-    assert diff <= 4, f"pass-through 하위그룹이 부모 배경을 못 받았다 — 최대차 {diff}"
-    # 막대가 실제로 판별하는지 여기서 못박는다 — 겹치는 자리가 곱연산 값이어야 한다.
-    assert scaled[16, 16, 0] < 120, (
-        f"겹치는 자리가 {scaled[16, 16, 0]} — 곱연산(48 근처)이 아니라 격리해서 그린 "
-        f"값(192)이다")
-
-
-def test_a_cheap_group_keeps_the_exact_composite(fixture_psd, tmp_path, monkeypatch):
-    """
-    축소 합성기는 비싼 그룹만 위한 것이다. 잘 나오고 있는 썸네일은 결과만 같으면
-    되는 것이 아니라 들르지도 말아야 한다 — 근사 경로가 조용히 기본이 되면
-    바이트 동일이라는 성질을 잃고도 아무도 모른다.
-    """
-    calls = []
-    real = render_mod._group_rgba_scaled
-    monkeypatch.setattr(render_mod, "_group_rgba_scaled",
-                        lambda *a, **k: calls.append(1) or real(*a, **k))
+def test_a_small_group_thumbnail_keeps_the_old_single_composite(fixture_psd, tmp_path, monkeypatch):
+    # 타일 경로는 큰 그룹만 위한 것이다. 잘 나오고 있는 썸네일은 코드 경로까지
+    # 예전 그대로여야 한다 — 결과만 같으면 되는 것이 아니라, 들르지도 말아야 한다.
     s = _session(fixture_psd)
     gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+    calls = _count_tiled_calls(monkeypatch)
 
-    render_thumbnails(s, [gid], max_size=16, out_dir=tmp_path)
+    assert _thumb_png(s, gid, 16, tmp_path / "small").size
 
-    assert calls == [], "싼 그룹인데 축소 합성기로 갔다"
+    assert calls == [], "작은 그룹인데 타일 경로로 갔다"
 
 
-def test_an_expensive_group_uses_the_scaled_compositor(fixture_psd, tmp_path, monkeypatch):
-    calls = []
-    real = render_mod._group_rgba_scaled
-    monkeypatch.setattr(render_mod, "_group_rgba_scaled",
-                        lambda *a, **k: calls.append(1) or real(*a, **k))
-    monkeypatch.setattr(render_mod, "THUMBNAIL_EXACT_BUDGET", 0)
+def test_a_large_group_tiles_even_when_merge_would_refuse_to(
+        fixture_psd, tmp_path, monkeypatch):
+    """
+    썸네일은 _tileable에 걸리지 않는다 — 병합과 달리 그 가드를 쓰지 않기 때문이다.
+
+    이 구분이 이 변경의 요점이다. Bar027의 *ART는 잎 559장 중 1장에 효과가 있다는
+    이유로 _tileable이 False가 되는데, 그 한 장 때문에 예전 경로로 떨어지면 290Mpx가
+    통째로 부풀어 24GB를 넘긴다. 근거는 _group_rgba_tiled의 docstring에 실측으로
+    적어 두었다(효과가 있는 그룹 5건, 타일을 4배로 잘게 썰어도 최대차 0).
+    """
     s = _session(fixture_psd)
     gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+    calls = _count_tiled_calls(monkeypatch)
+    monkeypatch.setattr(render_mod, "THUMBNAIL_TILE_PX", 0)
+    monkeypatch.setattr(render_mod, "_tileable", lambda psd, layers: False)
 
-    paths = render_thumbnails(s, [gid], max_size=16, out_dir=tmp_path)
+    assert _thumb_png(s, gid, 16, tmp_path / "fx").size
 
-    assert calls, "예산을 0으로 낮췄는데도 축소 합성기를 타지 않았다"
-    assert Image.open(paths[str(gid)]).size[0] <= 16
+    assert calls, "_tileable이 썸네일 타일 경로를 막았다"
 
 
 def test_render_thumbnails_and_preview(fixture_psd, tmp_path):
