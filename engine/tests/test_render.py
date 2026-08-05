@@ -372,6 +372,99 @@ def test_merge_rgba_rejects_a_clamped_merge_with_nothing_left(all_outside_union_
         merge_rgba(s["psd"], layers)
 
 
+def _thumb_png(s, gid, max_size, out_dir):
+    out_dir.mkdir()
+    paths = render_thumbnails(s, [gid], max_size=max_size, out_dir=out_dir)
+    return np.array(Image.open(paths[str(gid)]).convert("RGBA"))
+
+
+def _count_tiled_calls(monkeypatch):
+    """
+    타일 경로를 실제로 탔는지, 그리고 타일이 **몇 장**이었는지 기록한다.
+
+    호출 여부만 세면 부족하다 — 타일이 한 장이면 이어붙이기가 일어나지 않아
+    "타일로 나눠도 같다"는 비교가 공허해진다. 실제로 그런 적이 있다: 헬퍼가
+    THUMBNAIL_TILE_SIZE를 쓰게 바꾼 뒤에도 테스트는 MERGE_TILE_SIZE를 낮추고
+    있어서, 64x48 픽스처가 2048 타일 한 장으로 처리되고 있었다.
+    """
+    calls = []
+    real = render_mod._group_rgba_tiled
+
+    def counted(psd, group, bbox, leaves, always_wanted):
+        step = render_mod.THUMBNAIL_TILE_SIZE
+        nx = -(-(bbox[2] - bbox[0]) // step)
+        ny = -(-(bbox[3] - bbox[1]) // step)
+        calls.append(nx * ny)
+        return real(psd, group, bbox, leaves, always_wanted)
+
+    monkeypatch.setattr(render_mod, "_group_rgba_tiled", counted)
+    return calls
+
+
+def test_large_group_thumbnail_matches_the_single_composite(fixture_psd, tmp_path, monkeypatch):
+    """
+    타일 경로가 내는 썸네일은 예전 한 번 합성과 **픽셀로** 같아야 한다.
+
+    이 경로의 약속은 "같은 그림을 싸게"이지 "다른 그림"이 아니다. 전해상도로 이어
+    붙인 뒤 축소를 마지막에 한 번만 하는 이유가 그것이다 — 타일마다 축소하면
+    리샘플링이 갈리고, 그 차이가 여기서 걸린다.
+
+    임계값을 낮춰 작은 픽스처로 타일 경로를 태운다. 여기서 확인하는 성질(결과가
+    같다)은 임계값이 얼마든 성립해야 하는 것이므로, 임계값 자체가 쟁점이던 클램프
+    테스트와 달리 상수를 낮춰도 확인하려는 것을 잃지 않는다.
+    """
+    s = _session(fixture_psd)
+    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+
+    plain = _thumb_png(s, gid, 16, tmp_path / "plain")
+
+    calls = _count_tiled_calls(monkeypatch)
+    monkeypatch.setattr(render_mod, "THUMBNAIL_TILE_PX", 0)     # 타일 경로 강제
+    monkeypatch.setattr(render_mod, "THUMBNAIL_TILE_SIZE", 8)   # 64x48 -> 8x6 = 48장
+    tiled = _thumb_png(s, gid, 16, tmp_path / "tiled")
+
+    assert calls, "타일 경로를 타지 않아 비교가 공허하다"
+    assert calls[0] > 1, f"타일이 {calls[0]}장뿐이라 이어붙이기를 확인하지 못한다"
+    assert tiled.shape == plain.shape
+    assert np.array_equal(tiled, plain), (
+        f"최대차 {np.abs(tiled.astype(int) - plain.astype(int)).max()}, "
+        f"다른 성분 {(tiled != plain).sum()}/{tiled.size}"
+    )
+
+
+def test_a_small_group_thumbnail_keeps_the_old_single_composite(fixture_psd, tmp_path, monkeypatch):
+    # 타일 경로는 큰 그룹만 위한 것이다. 잘 나오고 있는 썸네일은 코드 경로까지
+    # 예전 그대로여야 한다 — 결과만 같으면 되는 것이 아니라, 들르지도 말아야 한다.
+    s = _session(fixture_psd)
+    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+    calls = _count_tiled_calls(monkeypatch)
+
+    assert _thumb_png(s, gid, 16, tmp_path / "small").size
+
+    assert calls == [], "작은 그룹인데 타일 경로로 갔다"
+
+
+def test_a_large_group_tiles_even_when_merge_would_refuse_to(
+        fixture_psd, tmp_path, monkeypatch):
+    """
+    썸네일은 _tileable에 걸리지 않는다 — 병합과 달리 그 가드를 쓰지 않기 때문이다.
+
+    이 구분이 이 변경의 요점이다. Bar027의 *ART는 잎 559장 중 1장에 효과가 있다는
+    이유로 _tileable이 False가 되는데, 그 한 장 때문에 예전 경로로 떨어지면 290Mpx가
+    통째로 부풀어 24GB를 넘긴다. 근거는 _group_rgba_tiled의 docstring에 실측으로
+    적어 두었다(효과가 있는 그룹 5건, 타일을 4배로 잘게 썰어도 최대차 0).
+    """
+    s = _session(fixture_psd)
+    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+    calls = _count_tiled_calls(monkeypatch)
+    monkeypatch.setattr(render_mod, "THUMBNAIL_TILE_PX", 0)
+    monkeypatch.setattr(render_mod, "_tileable", lambda psd, layers: False)
+
+    assert _thumb_png(s, gid, 16, tmp_path / "fx").size
+
+    assert calls, "_tileable이 썸네일 타일 경로를 막았다"
+
+
 def test_render_thumbnails_and_preview(fixture_psd, tmp_path):
     s = _session(fixture_psd)
     thumbs = render_thumbnails(s, [4, 5], max_size=16, out_dir=tmp_path)

@@ -44,6 +44,42 @@ MERGE_TILE_SIZE = 2048
 #: 상황이라 무제한 캐싱은 곧 메모리 압박이 된다. 초과하면 LRU로 버린다.
 PREVIEW_TILE_BUDGET_BYTES = 192 * 1024 * 1024
 
+#: 그룹 썸네일을 타일로 나눠 합성하기 시작하는 넓이(픽셀 수).
+#:
+#: **이 값이 묶는 것은 메모리다. 시간을 예측하는 값이 아니다.** 시간은 잎의 수와
+#: 겹침이 정하고 넓이는 버퍼 크기를 정한다 — 실측에서 13.4Mpx가 29.4초인데 그보다
+#: 큰 38.3Mpx는 27.8초였다. 우리가 사전에 알 수 있는 것은 넓이뿐이므로 넓이로 자른다.
+#: 다음 사람이 이 값을 성능 손잡이로 읽고 옮기지 않도록 적어 둔다.
+#:
+#: 예산에서 끌어낸 값이다. 썸네일 한 장이 세션 위에 얹는 임시 메모리를 **4GiB**로
+#: 잡는다 — 16GB 기계에서 앱이 세션 2개(약 3GB)와 UI/OS(약 4GB)를 들고도 한 장을
+#: 만들 수 있어야 한다는 뜻이다. 실측한 최악 단가는 488B/px(8.8Mpx에서 임시
+#: 4.29GB, float32 뷰포트 버퍼 30장어치)이므로 4GiB / 488B ≈ 8.8Mpx, 8Mpx로 끊는다.
+#:
+#: Bar027, 그룹당 별도 프로세스, 48px 썸네일 한 장, 예전 경로 → 타일 경로:
+#:
+#:     8.8Mpx  stair 1      15.0s →  25.2s    5.84GB → 5.51GB
+#:    13.4Mpx  front        29.4s →  40.0s    7.54GB → 6.95GB
+#:    16.3Mpx  gold trim     5.9s →   6.6s    4.80GB → 2.88GB
+#:    24.8Mpx  booth        95.9s →  75.0s   11.50GB → 7.34GB
+#:    38.3Mpx  sconces      27.8s →   8.1s    8.07GB → 2.75GB
+#:    73.4Mpx  gold trim    91.2s → 158.4s   15.01GB → 6.68GB
+#:    81.7Mpx  upper wall   24.1GB에서 죽음  →   7.5GB로 살아남음
+#:
+#: 메모리는 어느 크기에서도 타일 쪽이 낫고, 시간은 갈린다. 선을 넘은 뒤 15초가
+#: 25초가 되는 것은 실수가 아니라 일부러 치르는 값이다 — 느린 썸네일은 견딜 수
+#: 있고 OOM은 못 견딘다.
+#:
+#: 단가(488B/px)는 잎이 얼마나 겹치느냐에 달렸고 그건 합성해 보기 전에는 모른다.
+#: 그래서 이 임계값은 흔한 경우를 묶는 것이지 상한을 보장하지는 않는다.
+THUMBNAIL_TILE_PX = 8 * 1024 * 1024
+
+#: 썸네일 타일 한 변. 병합과 따로 두는 이유는 최적점이 다르기 때문이다 — 병합은
+#: 뷰포트가 병합 대상들의 합집합이라 타일마다 걸치는 레이어가 적지만, 그룹 썸네일은
+#: 큰 잎이 여러 타일에 걸쳐 psd-tools가 같은 레이어를 타일마다 다시 디코딩한다
+#: (numpy()가 캐싱하지 않는다 — MERGE_TILE_SIZE 주석의 디코딩 열이 그것이다).
+THUMBNAIL_TILE_SIZE = MERGE_TILE_SIZE
+
 #: PSD(version 1)가 한 축에 담을 수 있는 최대 크기. pytoshop core.py의
 #: max_size_mapping, psd-tools api/utils.py의 MAX_DIMENSION_PSD와 같은 값이다.
 PSD_MAX_DIMENSION = 30000
@@ -368,6 +404,73 @@ def _save_png(img, out_dir, stem):
     return path
 
 
+def _group_rgba_tiled(psd, group, bbox, leaves, always_wanted):
+    """
+    그룹 bbox를 타일로 나눠 합성하고 **전해상도** RGBA로 이어붙인다.
+
+    수법도 이유도 _merge_rgba_tiled와 같다 — 타일마다 그 타일에 걸치는 자손만
+    통과시키는 것이 요점이다. 뷰포트만 자르고 필터를 그대로 두면 거의 빨라지지
+    않는다(Compositor.apply의 뷰포트 밖 건너뛰기가 그룹을 면제하므로 중첩 그룹이
+    타일마다 다시 합성된다).
+
+    다른 점이 둘 있다. 합성을 psd가 아니라 group에서 시작한다 — 예전 코드가 그렇고,
+    그래야 그룹 자신의 불투명도·마스크·블렌드가 똑같이 걸린다. 그리고 축소하지 않고
+    전해상도로 모은다. 축소는 호출자가 예전처럼 마지막에 thumbnail() 한 번으로 한다.
+    타일마다 축소하면 리샘플링이 달라져 나오는 썸네일이 바뀐다 — 그러면 이 경로는
+    "같은 그림을 싸게"가 아니라 "다른 그림"이 된다.
+
+    캔버스로 자르지 않는다. 캔버스 밖에 있는 그림도 그 그룹의 내용이고 썸네일에
+    보이는 것이 맞다. 여기서 묶는 것은 크기가 아니라 메모리다.
+
+    **_tileable을 쓰지 않는다.** 병합 쪽은 그 가드로 효과(그림자·글로우)가 있는
+    문서를 걸러 낸다 — 레이어 bbox 밖에 그려지는 효과는 그 레이어를 건너뛴 타일에서
+    사라져 이음매가 남기 때문이다. 여기서 쓰지 않는 근거는 둘 다 실측이다.
+
+    하나. 그 가드는 정작 필요한 곳을 못 지킨다. Bar027의 *ART는 잎 559장짜리
+    290Mpx 그룹인데 그 안의 1Mpx짜리 'neon' 한 장에 효과가 있다는 이유로 _tileable이
+    False가 되고, 그룹 전체가 예전 경로로 떨어진다 — 24GB를 넘겨 끝나지 않는 바로
+    그 경우다. 559장 중 1장 때문에 나머지 558장의 부풀림을 그대로 떠안는다.
+
+    둘. **이 psd-tools 버전은 그 효과를 bbox 밖에 그리지 않는다.** 즉 이음매가 생길
+    원인 자체가 없다. 효과가 켜진 잎을 bbox보다 400px 넉넉한 뷰포트로 합성해 보면:
+
+        'neon' OuterGlow 865x1103 → bbox 밖 알파 최대 0 (0 px)
+        'neon' OuterGlow 564x718  → bbox 밖 알파 최대 0 (0 px)
+        'neon' OuterGlow 574x791  → bbox 밖 알파 최대 0 (0 px)
+
+    그래서 타일로 썰어도 그림이 같다. 실제로 효과 때문에 _tileable이 False가 되는
+    그룹들을 실제 타일(2048)보다 잘게 512로 썰어(=이음매를 일부러 4배로 늘려) 만든
+    썸네일과 한 번에 합성한 썸네일을 대조하면 전부 최대차 0이었다:
+
+        neon 1.0Mpx/1장, light 4.1Mpx/1장, web 9.9Mpx/8장,
+        spider neon 9.9Mpx/8장, spider neon 9.9Mpx/7장
+
+    범위를 분명히 해 둔다. 확인한 효과는 이 납품 데이터에 있는 OuterGlow뿐이고,
+    확인한 것은 "psd-tools가 bbox 밖에 안 그린다"는 사실이지 "이음매가 나도 썸네일
+    배율이라 안 보인다"가 아니다. psd-tools가 언젠가 효과를 bbox 밖까지 그리게 되면
+    이 근거는 사라진다 — 그때는 여기와 _tileable을 같이 다시 봐야 한다.
+    """
+    # bbox는 호출자가 이미 구한 것을 받는다 — Group.bbox는 부를 때마다 자손을 다시
+    # 훑는 계산 속성이라, 559장짜리 그룹에서 두 번 부를 이유가 없다.
+    left, top, right, bottom = bbox
+    step = THUMBNAIL_TILE_SIZE
+    out = np.empty((bottom - top, right - left, 4), dtype=np.uint8)
+    for y in range(top, bottom, step):
+        for x in range(left, right, step):
+            tile = (x, y, min(x + step, right), min(y + step, bottom))
+            here = [l for l in leaves if _overlaps(l.bbox, tile)]
+            # here가 비어도 always_wanted(그룹과 그 조상)는 남긴다 — 그룹 자신이
+            # 걸러지면 빈 타일에서 합성기가 돌려주는 것이 달라진다.
+            wanted = _wanted_ids(psd, here) | always_wanted
+            img = group.composite(
+                viewport=tile, force=True, color=1.0, alpha=0.0,
+                layer_filter=lambda l: id(l) in wanted,
+            )
+            out[y - top:tile[3] - top, x - left:tile[2] - left] = \
+                np.array(img.convert("RGBA"))
+    return out
+
+
 def render_thumbnails(session, layer_ids, max_size, out_dir):
     psd = session["psd"]
     result = {}
@@ -383,12 +486,24 @@ def render_thumbnails(session, layer_ids, max_size, out_dir):
                 cur = cur.parent
             # Collect visible descendants
             descendant_ids = {id(desc) for desc in layer.descendants() if desc.visible}
-            img = layer.composite(
-                force=True,
-                color=1.0,
-                alpha=0.0,
-                layer_filter=lambda l: id(l) in ancestors_and_self or id(l) in descendant_ids,
-            )
+            # 큰 그룹만 타일 경로로 보낸다. 48px 그림 한 장을 만들자고 그룹 bbox
+            # 전체를 한 번에 합성하면 실측에서 73Mpx 그룹 하나가 91초/15GB였고
+            # 291Mpx짜리는 24GB를 넘겨 끝나지 않았다. 작은 그룹은 예전 호출 그대로
+            # 둔다 — 잘 나오고 있는 것을 건드리지 않는다.
+            bbox = layer.bbox
+            if (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) > THUMBNAIL_TILE_PX:
+                leaves = [d for d in layer.descendants()
+                          if d.visible and not d.is_group()]
+                img = Image.fromarray(
+                    _group_rgba_tiled(psd, layer, bbox, leaves, ancestors_and_self),
+                    "RGBA")
+            else:
+                img = layer.composite(
+                    force=True,
+                    color=1.0,
+                    alpha=0.0,
+                    layer_filter=lambda l: id(l) in ancestors_and_self or id(l) in descendant_ids,
+                )
             if img is None or img.width <= 0 or img.height <= 0:
                 # Group has no visible pixel content (e.g. all descendants are
                 # themselves empty/hidden) — not a thumbnail target.
