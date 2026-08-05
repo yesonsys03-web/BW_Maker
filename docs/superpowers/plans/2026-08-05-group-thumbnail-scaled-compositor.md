@@ -837,7 +837,22 @@ def _group_rgba_scaled(psd, group, bbox, max_size):
     from psd_tools.constants import Tag
 
     left, top, right, bottom = bbox
-    scale = min(max_size / (right - left), max_size / (bottom - top), 1.0)
+    # 48px가 아니라 **메모리 예산이 허락하는 만큼 큰 중간 캔버스**에서 합성하고,
+    # 줄이는 것은 호출자가 마지막에 한 번만 한다.
+    #
+    # 처음에는 곧바로 48px 격자에서 합성했다가 사전 선언한 막대(≤4)를 크게
+    # 넘겼다 — 평범한 그룹 42개 중 39개, 최악 255. 원인은 합성식이 아니라
+    # 표본화였다. 잎마다 따로 줄여 **정수 썸네일 격자에 스냅**하면, 5343x1008을
+    # 48x9로 넣는 111배 축소에서 잎 위치가 썸네일 픽셀 절반(원본 55px)까지 밀리고
+    # 크기가 9px 높이에서 ±1px 흔들린다. 흐려지는 것이 아니라 다른 그림이 된다.
+    # 내부 해상도를 K배로 올리면 오차가 단조로 줄고 한 그룹은 K=16에서 최대차 0에
+    # 닿았다 — 블렌드·클리핑·불투명도·중첩 그룹이 전부 맞다는 증거다.
+    #
+    # 고정 K로는 안 된다. 스냅 오차를 정하는 것은 썸네일 대비가 아니라 **원본 대비**
+    # 중간 해상도의 비율이라, 13배 축소 그룹에서 충분한 K가 111배에서는 어림없다.
+    # 예산으로 묶으면 원본이 예산보다 작은 그룹은 저절로 전해상도에서 합성된다.
+    src_px = (right - left) * (bottom - top)
+    scale = min(1.0, (THUMBNAIL_SUPERSAMPLE_PX / src_px) ** 0.5)
     pw = max(1, round((right - left) * scale))
     ph = max(1, round((bottom - top) * scale))
 
@@ -1120,51 +1135,116 @@ Expected: 커밋 1을 유지했다면 **207 passed** (200 - 타일 테스트 3 +
 
 - [ ] **Step 6: 평범한 그룹의 오차 한계를 실납품 데이터에서 잰다 — 사전 선언된 막대로 판정**
 
+기준은 **`render_thumbnails`가 실제로 만들던 썸네일**이어야 한다. 필터 없이
+`g.composite(force=True, ...)`를 부르면 다른 그림이 나온다 — 첫 시도에서 그렇게 재고
+`LINES` 33.9, `wall2` 53.5만큼의 차이를 축소 합성기의 오차로 잘못 읽을 뻔했다. 그리고
+비교는 스트레이트 RGB가 아니라 **프리멀티플라이드**(색 × 알파)로 한다 — §4.3이 적은 대로
+알파가 0에 가까운 자리의 스트레이트 RGB는 `utils.divide`가 0/0을 1.0으로 만들어 채운 값이라
+그림에 없는 색이다.
+
 ```bash
 engine/.venv/bin/python - <<'PY'
-import sys, tempfile, pathlib
+"""
+Task 9 Step 6 — 사전 선언한 오차 막대로 축소 합성기를 판정한다.
+
+지표는 선언한 그대로다: 48px 썸네일의 RGBA 최대 성분차, 단 **양쪽 알파가 다 0인
+픽셀의 RGB는 뺀다**. 프리멀티플라이드 차이는 원인 파악용으로 함께 찍되 판정에는
+쓰지 않는다.
+
+    <= 4     통과
+    5 ~ 24   원인을 밝혀야 통과
+    > 24     정지
+"""
+import sys
+from pathlib import Path
+
 sys.path.insert(0, "engine")
 import numpy as np
 from PIL import Image
 from psd_tools import PSDImage
+
 from psd_engine import render
 
-D = "/Volumes/bgfinal/colordata/Hazbin_Hotel/HH03_시즌_자료/HH0306/Design/COLOR/BG/02_Color"
-import os
-worst = 0
-for fname in sorted(os.listdir(D)):
-    if not fname.lower().endswith((".psd", ".psb")):
-        continue
-    psd = PSDImage.open(f"{D}/{fname}")
-    for g in psd.descendants():
-        if not g.is_group():
-            continue
-        leaves = [d for d in g.descendants() if d.visible and not d.is_group()]
-        if not leaves or len(leaves) > 40:      # 정확 경로가 끝나야 비교가 된다
-            continue
-        # 평범한 그룹만: _plain이 그룹과 모든 자손에 대해 참
-        if not all(render._plain(d, allow_passthrough=d.is_group())
-                   for d in g.descendants()):
-            continue
-        if not render._plain(g, allow_passthrough=True):
-            continue
-        bbox = g.bbox
-        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-            continue
-        exact = g.composite(force=True, color=1.0, alpha=0.0).convert("RGBA")
-        exact.thumbnail((48, 48))
-        a = np.array(exact)
-        b = render._group_rgba_scaled(psd, g, bbox, 48)
-        if a.shape != b.shape:
-            print(f"  SHAPE {fname} {g.name!r} {a.shape} vs {b.shape}")
-            continue
-        vis = (a[..., 3] > 0) | (b[..., 3] > 0)
-        d = np.abs(a.astype(int) - b.astype(int))
-        m = max(d[..., 3].max(), d[..., :3][vis].max() if vis.any() else 0)
-        worst = max(worst, m)
-        if m > 4:
-            print(f"  {m:3d}  {g.name[:24]!r} {fname[:40]}")
-print(f"\n평범한 그룹 최대 성분차: {worst}")
+D = ("/Volumes/bgfinal/colordata/Hazbin_Hotel/HH03_시즌_자료/HH0306/"
+     "Design/COLOR/BG/02_Color")
+
+
+def plain_group(g):
+    """그룹 자신과 모든 자손이 _plain — 오차 원인이 리샘플 순서 하나뿐인 경우."""
+    if not render._plain(g, allow_passthrough=True):
+        return False
+    for d in g.descendants():
+        if not render._plain(d, allow_passthrough=d.is_group()):
+            return False
+    return True
+
+
+def main():
+    worst = 0
+    worst_name = ""
+    worst_premul = 0.0
+    n = 0
+    files = sorted(p for p in Path(D).iterdir()
+                   if p.suffix.lower() in (".psd", ".psb") and not p.name.startswith("."))
+    for path in files:
+        psd = PSDImage.open(path)
+        for g in psd.descendants():
+            if not g.is_group():
+                continue
+            leaves = [d for d in g.descendants() if d.visible and not d.is_group()]
+            if not leaves or len(leaves) > 40:      # 정확 경로가 끝나야 비교가 된다
+                continue
+            if not plain_group(g):
+                continue
+            bbox = g.bbox
+            if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                continue
+            # 기준은 **render_thumbnails가 실제로 만들던 썸네일**이다. 필터 없이
+            # g.composite를 부르면 다른 그림이 나온다 — production은 조상을 강제로
+            # 통과시키고(숨은 그룹 오버라이드) 보이는 자손만 넣는다.
+            wanted = set()
+            cur = g
+            while cur is not psd:
+                wanted.add(id(cur))
+                cur = cur.parent
+            desc = {id(d) for d in g.descendants() if d.visible}
+            exact = g.composite(
+                force=True, color=1.0, alpha=0.0,
+                layer_filter=lambda l: id(l) in wanted or id(l) in desc,
+            ).convert("RGBA")
+            exact.thumbnail((48, 48))
+            a = np.array(exact)
+            # render_thumbnails와 같은 순서: 수퍼샘플 배열을 받아 마지막에 한 번 줄인다.
+            bimg = Image.fromarray(render._group_rgba_scaled(psd, g, bbox), "RGBA")
+            bimg.thumbnail((48, 48))
+            b = np.array(bimg)
+            if a.shape != b.shape:
+                print(f"    SHAPE {g.name!r} {a.shape} vs {b.shape}")
+                continue
+            ai, bi = a.astype(np.int32), b.astype(np.int32)
+            d_all = np.abs(ai - bi)
+            # 선언한 지표: 양쪽 알파가 0인 픽셀의 RGB는 제외
+            both_zero = (ai[..., 3] == 0) & (bi[..., 3] == 0)
+            rgb = d_all[..., :3].copy()
+            rgb[both_zero] = 0
+            m = int(max(rgb.max(), d_all[..., 3].max()))
+            # 원인 파악용(판정 아님): 실제로 보이는 색 차이는 프리멀티플라이드로 잰다
+            pa = ai[..., :3] * ai[..., 3:4] / 255.0
+            pb = bi[..., :3] * bi[..., 3:4] / 255.0
+            premul = float(np.abs(pa - pb).max())
+            n += 1
+            if m > worst:
+                worst, worst_name, worst_premul = m, f"{g.name!r} {path.name}", premul
+            if m > 4:
+                print(f"  {m:3d}  premul={premul:6.1f}  {g.name[:26]!r}")
+
+    band = "통과" if worst <= 4 else ("원인 규명 필요" if worst <= 24 else "정지")
+    print(f"\n평범한 그룹 {n}개. 최대 성분차 **{worst}** → {band}")
+    print(f"  최악: {worst_name}  (premul {worst_premul:.1f})")
+
+
+if __name__ == "__main__":
+    main()
 PY
 ```
 
@@ -1173,6 +1253,16 @@ PY
 - `≤ 4` → 통과. 다음 스텝으로.
 - `5 ~ 24` → **원인을 밝혀야 통과한다.** 가장 먼저 볼 곳: `_scaled_leaf`의 LANCZOS는 프리멀티플라이드에서 줄이는데 예전 경로는 합성이 끝난 그림(알파 0인 자리가 흰색)을 줄이므로, 가장자리에 흰색이 번지는 정도가 다르다. 원인을 밝히지 못하면 정지하고 사용자에게 보고한다.
 - `> 24` → **정지.** 설계 재검토다. 숫자를 올리지 않는다.
+
+**결과 (2026-08-05, 실행됨)**:
+
+```
+평범한 그룹 108개, 최악 10.0 → 5~24 구간, 원인 규명됨.
+최악은 SKY(45.5Mpx, 잎 3장, 전부 캔버스 전체·normal·255). 수퍼샘플 예산만 바꿔 재면
+8Mpx → 10.00, 32Mpx → 10.00, 128Mpx → 0.00 (45.5Mpx가 예산 안에 들어가 scale 1.0).
+남은 차이는 전부 수퍼샘플 축소이고 예산을 넘는 그룹에서만 나타난다. 2위가 4.0,
+나머지 106개는 2.7 이하.
+```
 
 - [ ] **Step 7: 실납품 그룹에서 속도를 확인한다**
 

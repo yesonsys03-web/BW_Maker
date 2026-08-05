@@ -44,41 +44,53 @@ MERGE_TILE_SIZE = 2048
 #: 상황이라 무제한 캐싱은 곧 메모리 압박이 된다. 초과하면 LRU로 버린다.
 PREVIEW_TILE_BUDGET_BYTES = 192 * 1024 * 1024
 
-#: 그룹 썸네일을 타일로 나눠 합성하기 시작하는 넓이(픽셀 수).
+#: 예전 경로(psd.composite 한 번)를 포기하고 축소 합성기로 넘어가는 지점.
+#: 단위는 **Mpx·leaf** — 그룹 bbox 넓이 × 보이는 잎 수다.
 #:
-#: **이 값이 묶는 것은 메모리다. 시간을 예측하는 값이 아니다.** 시간은 잎의 수와
-#: 겹침이 정하고 넓이는 버퍼 크기를 정한다 — 실측에서 13.4Mpx가 29.4초인데 그보다
-#: 큰 38.3Mpx는 27.8초였다. 우리가 사전에 알 수 있는 것은 넓이뿐이므로 넓이로 자른다.
-#: 다음 사람이 이 값을 성능 손잡이로 읽고 옮기지 않도록 적어 둔다.
+#: **넓이가 아니라 비용 모델인 이유.** 넓이는 시간을 예측하지 못한다 — 실측에서
+#: 13.4Mpx가 29.4초인데 더 큰 38.3Mpx는 27.8초였다. 시간을 정하는 것은 잎의 수다.
+#: 예전 경로는 잎마다 그룹 bbox 크기의 float32 버퍼를 훑으므로 비용이 넓이 × 잎
+#: 수에 붙는다. 0fbbeef의 8Mpx는 메모리 예산에서 나온 값이라 성질이 다르다.
 #:
-#: 예산에서 끌어낸 값이다. 썸네일 한 장이 세션 위에 얹는 임시 메모리를 **4GiB**로
-#: 잡는다 — 16GB 기계에서 앱이 세션 2개(약 3GB)와 UI/OS(약 4GB)를 들고도 한 장을
-#: 만들 수 있어야 한다는 뜻이다. 실측한 최악 단가는 488B/px(8.8Mpx에서 임시
-#: 4.29GB, float32 뷰포트 버퍼 30장어치)이므로 4GiB / 488B ≈ 8.8Mpx, 8Mpx로 끊는다.
+#: 시간 예산 5초에서 역산한다. 썸네일은 보이는 행만 청크로 만들고 엔진은 stdin을
+#: 순서대로 처리하므로, 썸네일 한 장이 도는 동안 사람이 누른 것이 전부 뒤에 선다.
 #:
-#: Bar027, 그룹당 별도 프로세스, 48px 썸네일 한 장, 예전 경로 → 타일 경로:
+#: 실측 처리율(HH0306 02_Color, 2026-08-05): 그룹당 별도 프로세스, 48px 한 장.
 #:
-#:     8.8Mpx  stair 1      15.0s →  25.2s    5.84GB → 5.51GB
-#:    13.4Mpx  front        29.4s →  40.0s    7.54GB → 6.95GB
-#:    16.3Mpx  gold trim     5.9s →   6.6s    4.80GB → 2.88GB
-#:    24.8Mpx  booth        95.9s →  75.0s   11.50GB → 7.34GB
-#:    38.3Mpx  sconces      27.8s →   8.1s    8.07GB → 2.75GB
-#:    73.4Mpx  gold trim    91.2s → 158.4s   15.01GB → 6.68GB
-#:    81.7Mpx  upper wall   24.1GB에서 죽음  →   7.5GB로 살아남음
+#:     Hallway    15.9Mpx x   5 =   80 Mpx·leaf    12.0초   6.6 Mpx·leaf/s
+#:     Group 5     2.3Mpx x 165 =  375 Mpx·leaf    30.0초  12.5 Mpx·leaf/s
+#:     WARDROBE    6.9Mpx x  64 =  440 Mpx·leaf    42.0초  10.5 Mpx·leaf/s
+#:     WALLPAPER  97.9Mpx x   6 =  587 Mpx·leaf   105.3초   5.6 Mpx·leaf/s
+#:     LT         24.4Mpx x  64 = 1562 Mpx·leaf   149.0초  10.5 Mpx·leaf/s
+#:     BG         47.4Mpx x 140 = 6630 Mpx·leaf  1004.9초   6.6 Mpx·leaf/s
 #:
-#: 메모리는 어느 크기에서도 타일 쪽이 낫고, 시간은 갈린다. 선을 넘은 뒤 15초가
-#: 25초가 되는 것은 실수가 아니라 일부러 치르는 값이다 — 느린 썸네일은 견딜 수
-#: 있고 OOM은 못 견딘다.
+#: 비용이 83배 퍼진 구간에서 처리율은 5.6~12.5로 2.2배 안에 든다. 비용 모델이
+#: 시간을 정확히 맞히지는 않지만 자릿수를 맞히고, 임계값에 필요한 것은 그것이다.
 #:
-#: 단가(488B/px)는 잎이 얼마나 겹치느냐에 달렸고 그건 합성해 보기 전에는 모른다.
-#: 그래서 이 임계값은 흔한 경우를 묶는 것이지 상한을 보장하지는 않는다.
-THUMBNAIL_TILE_PX = 8 * 1024 * 1024
+#: **가장 느린 점으로 역산한다.** 예산은 시간의 상한이므로 평균으로 잡으면 절반이
+#: 예산을 넘는다. 5.6 × 5초 = 28. 잎이 적고 큰 쪽(WALLPAPER: 97.9Mpx에 6장)이 가장
+#: 느린데, 그쪽이 잎마다 그룹 크기 버퍼를 훑는 비용을 가장 크게 치르기 때문이다.
+#:
+#: 값이 작을수록 축소 합성기로 더 많이 보낸다. 틀리는 방향은 그쪽이 안전하다 —
+#: 축소 합성기는 어떤 그룹이든 빠르고, 예전 경로는 큰 그룹에서 분 단위로 간다.
+THUMBNAIL_EXACT_BUDGET = 28   # Mpx·leaf
 
-#: 썸네일 타일 한 변. 병합과 따로 두는 이유는 최적점이 다르기 때문이다 — 병합은
-#: 뷰포트가 병합 대상들의 합집합이라 타일마다 걸치는 레이어가 적지만, 그룹 썸네일은
-#: 큰 잎이 여러 타일에 걸쳐 psd-tools가 같은 레이어를 타일마다 다시 디코딩한다
-#: (numpy()가 캐싱하지 않는다 — MERGE_TILE_SIZE 주석의 디코딩 열이 그것이다).
-THUMBNAIL_TILE_SIZE = MERGE_TILE_SIZE
+#: 축소 합성기가 쓰는 중간 캔버스의 상한(픽셀 수).
+#:
+#: **처음 적어 둔 "다섯 장, 픽셀당 80B"는 재귀를 세지 않은 값이라 너무 작다.**
+#: `draw`는 중첩 그룹마다 자기 몫의 (색+알파) 캔버스를 스택에 쌓아 둔 채 재귀하고
+#: (그룹 하나가 부모에 얹히기 전까지 자식 결과가 살아 있어야 한다), 잎을 그리는
+#: 동안에는 거기에 잎용 (색+알파), 클리핑이 있으면 클리핑용 (색+알파), 그리고
+#: `_over`가 만드는 몇 개의 임시 배열까지 겹친다. 대략 픽셀당 16B짜리 캔버스가
+#: 중첩 깊이만큼 쌓이고 거기에 그 순간의 작업분(수십~100B대)이 더해지므로, 깊이
+#: 3에서 대략 픽셀당 200B, 8Mpx면 약 1.6GB 안팎이다(정확한 재귀 깊이·클리핑 유무에
+#: 따라 흔들리는 어림값이지, 측정해 못박은 숫자는 아니다). 잎은 한 번에 한 장만
+#: 살아 있으므로 여기 안 든다.
+#:
+#: **이 값이 묶는 것은 메모리이고, 화질은 그 부산물로 따라온다.** 원본 bbox가 이
+#: 예산보다 작은 그룹은 배율이 1.0이 되어 전해상도에서 합성된다 — 그때 이 경로는
+#: "잎을 그룹 bbox로 부풀리지 않는 _merge_rgba_fast"와 같은 일을 한다.
+THUMBNAIL_SUPERSAMPLE_PX = 8 * 1024 * 1024
 
 #: PSD(version 1)가 한 축에 담을 수 있는 최대 크기. pytoshop core.py의
 #: max_size_mapping, psd-tools api/utils.py의 MAX_DIMENSION_PSD와 같은 값이다.
@@ -557,71 +569,422 @@ def _save_png(img, out_dir, stem):
     return path
 
 
-def _group_rgba_tiled(psd, group, bbox, leaves, always_wanted):
+def _scaled_leaf(layer, scale, origin):
     """
-    그룹 bbox를 타일로 나눠 합성하고 **전해상도** RGBA로 이어붙인다.
+    잎 하나를 그룹 배율로 줄여 프리멀티플라이드 float32 RGBA로 돌려준다.
 
-    수법도 이유도 _merge_rgba_tiled와 같다 — 타일마다 그 타일에 걸치는 자손만
-    통과시키는 것이 요점이다. 뷰포트만 자르고 필터를 그대로 두면 거의 빨라지지
-    않는다(Compositor.apply의 뷰포트 밖 건너뛰기가 그룹을 면제하므로 중첩 그룹이
-    타일마다 다시 합성된다).
+    비싼 것은 여기다 — 실측에서 그룹 썸네일 시간의 89%가 이 디코딩이었다. 그래서
+    잎마다 **한 번만** 디코딩하고 곧바로 줄인 뒤 전해상도 배열을 버린다. peak
+    메모리가 가장 큰 잎 한 장에 묶이는 이유가 그것이다.
 
-    다른 점이 둘 있다. 합성을 psd가 아니라 group에서 시작한다 — 예전 코드가 그렇고,
-    그래야 그룹 자신의 불투명도·마스크·블렌드가 똑같이 걸린다. 그리고 축소하지 않고
-    전해상도로 모은다. 축소는 호출자가 예전처럼 마지막에 thumbnail() 한 번으로 한다.
-    타일마다 축소하면 리샘플링이 달라져 나오는 썸네일이 바뀐다 — 그러면 이 경로는
-    "같은 그림을 싸게"가 아니라 "다른 그림"이 된다.
-
-    캔버스로 자르지 않는다. 캔버스 밖에 있는 그림도 그 그룹의 내용이고 썸네일에
-    보이는 것이 맞다. 여기서 묶는 것은 크기가 아니라 메모리다.
-
-    **_tileable을 쓰지 않는다.** 병합 쪽은 그 가드로 효과(그림자·글로우)가 있는
-    문서를 걸러 낸다 — 레이어 bbox 밖에 그려지는 효과는 그 레이어를 건너뛴 타일에서
-    사라져 이음매가 남기 때문이다. 여기서 쓰지 않는 근거는 둘 다 실측이다.
-
-    하나. 그 가드는 정작 필요한 곳을 못 지킨다. Bar027의 *ART는 잎 559장짜리
-    290Mpx 그룹인데 그 안의 1Mpx짜리 'neon' 한 장에 효과가 있다는 이유로 _tileable이
-    False가 되고, 그룹 전체가 예전 경로로 떨어진다 — 24GB를 넘겨 끝나지 않는 바로
-    그 경우다. 559장 중 1장 때문에 나머지 558장의 부풀림을 그대로 떠안는다.
-
-    둘. **이 psd-tools 버전은 그 효과를 bbox 밖에 그리지 않는다.** 즉 이음매가 생길
-    원인 자체가 없다. 효과가 켜진 잎을 bbox보다 400px 넉넉한 뷰포트로 합성해 보면:
-
-        'neon' OuterGlow 865x1103 → bbox 밖 알파 최대 0 (0 px)
-        'neon' OuterGlow 564x718  → bbox 밖 알파 최대 0 (0 px)
-        'neon' OuterGlow 574x791  → bbox 밖 알파 최대 0 (0 px)
-
-    그래서 타일로 썰어도 그림이 같다. 실제로 효과 때문에 _tileable이 False가 되는
-    그룹들을 실제 타일(2048)보다 잘게 512로 썰어(=이음매를 일부러 4배로 늘려) 만든
-    썸네일과 한 번에 합성한 썸네일을 대조하면 전부 최대차 0이었다:
-
-        neon 1.0Mpx/1장, light 4.1Mpx/1장, web 9.9Mpx/8장,
-        spider neon 9.9Mpx/8장, spider neon 9.9Mpx/7장
-
-    범위를 분명히 해 둔다. 확인한 효과는 이 납품 데이터에 있는 OuterGlow뿐이고,
-    확인한 것은 "psd-tools가 bbox 밖에 안 그린다"는 사실이지 "이음매가 나도 썸네일
-    배율이라 안 보인다"가 아니다. psd-tools가 언젠가 효과를 bbox 밖까지 그리게 되면
-    이 근거는 사라진다 — 그때는 여기와 _tileable을 같이 다시 봐야 한다.
+    프리멀티플라이드로 바꾼 뒤에 줄인다. 스트레이트 알파로 채널을 따로 줄이면
+    알파 0인 자리의 색이 가장자리로 번진다.
     """
-    # bbox는 호출자가 이미 구한 것을 받는다 — Group.bbox는 부를 때마다 자손을 다시
-    # 훑는 계산 속성이라, 559장짜리 그룹에서 두 번 부를 이유가 없다.
+    if layer.width <= 0 or layer.height <= 0:
+        return None
+    rgba = extract_rgba(layer).astype(np.float32) / 255.0
+    h, w = rgba.shape[:2]
+    x0 = round((layer.left - origin[0]) * scale)
+    y0 = round((layer.top - origin[1]) * scale)
+    tw = max(1, round((layer.left - origin[0] + w) * scale) - x0)
+    th = max(1, round((layer.top - origin[1] + h) * scale) - y0)
+
+    alpha = rgba[..., 3:4]
+    premul = np.concatenate((rgba[..., :3] * alpha, alpha), axis=2)
+    if (tw, th) != (w, h):
+        img = Image.fromarray((255 * premul).astype(np.uint8), "RGBA")
+        img = img.resize((tw, th), Image.LANCZOS)
+        premul = np.asarray(img).astype(np.float32) / 255.0
+    return premul, x0, y0
+
+
+def _group_rgba_scaled(psd, group, bbox):
+    """
+    그룹을 **메모리 예산이 허락하는 해상도에서** 합성한다. 잎을 그룹 bbox 크기로
+    부풀리지 않는 것이 요점이고, 최종 축소는 호출자가 마지막에 한 번만 한다.
+
+    **왜 이 모양인가.** 실측(2026-08-05, HH0306 02_Color): 47.4Mpx / 잎 140장짜리
+    그룹이 예전 경로로 1004.9초다. 잎마다 그룹 bbox 크기의 float32 버퍼를 훑기
+    때문이고, 여기서는 각 잎을 자기 bbox 안에서 한 번만 디코딩해 곧바로 줄인다.
+    디코딩이 시간의 대부분이라(실측 89%) 잎당 한 번이라는 성질이 이 경로의 전부다.
+
+    블렌드·불투명도·클리핑·중첩 그룹·**레이어/그룹 자신의 (래스터) 마스크**·
+    **pass-through 그룹의 부모-배경 상속**을 전부 재현한다. 합성은 잎 디코딩에
+    비하면 싸고, 근사해서 얻을 것이 없다.
+
+    그리고 그것이 필요하다. 8Mpx 넘는 그룹 322개 중 평범한 것은 20%뿐이고, 비용
+    상위 30개 중 29개가 클리핑을 갖는다. 평탄화했다면 사람이 기다리는 거의 모든
+    그룹의 그림이 틀렸을 것이다. pass-through는 예외가 아니라 기본값이다 —
+    실측(2026-08-05, 레코드만, 픽셀 디코딩 없음): 보이는 중첩 그룹 1367개 중
+    1318개(96%)가 pass-through이고, 748개(55%)가 non-normal 자손을 가져 실제로
+    그림이 갈린다.
+
+    **pass-through 그룹은 격리해서 그린 뒤 얹지 않는다.** `Compositor._get_group`
+    (composite.py 516~563행)은 pass-through 그룹의 하위 컴포지터를 부모의 **현재**
+    색·알파를 배경으로 만든다(`isolated=False`) — 그래서 그 안의 첫 레이어부터 진짜
+    부모 배경과 블렌드된다. `own_mask_and_opacity`(아래)로 얻은 그룹 자신의
+    마스크·불투명도는 `_apply_passthrough_source`(387~408행)로 그 결과를 부모
+    누적치에 되접는다. `draw()`가 `(color_0, alpha_0)`를 받는 것이 이 때문이다 —
+    격리된 자손은 빈 캔버스(`blank_color(), 0`)를, pass-through 자손은 부모의
+    지금 상태를 그대로 물려받는다.
+
+    **재현하지 않는 것은 효과(그림자·글로우·획)·벡터마스크·`isolate_adjustments`
+    보정·최상위 그룹 자신에게 붙은 클리핑 레이어뿐이다.** extract_rgba가 잎을
+    topil()로 읽으므로 잎의 효과는 구조적으로 빠지고(8Mpx 초과 그룹에서 261건),
+    `own_mask_and_opacity`는 레이어/그룹 자신의 **래스터** 마스크만 옮긴다 —
+    벡터마스크는 force=True에서 매번 다시 그려야 하는 별도 경로라
+    (vector.draw_vector_mask) 옮기지 않았다. `Compositor._get_group`의
+    `isolate_adjustments`(자신의 fill<255거나 자기 클리핑 레이어가 있는 그룹이
+    `.color` 프로퍼티의 보정항을 타는 경우, 534행)도 옮기지 않았다 — 이 보정은
+    `alpha_0=0`인 격리 경로에서는 대수적으로 no-op이라(divide(0,alpha_g)-0=0) 순수
+    isolated 그룹에는 영향이 없고, pass-through 그룹 **자신**이 fill<255거나 자기
+    클리핑 레이어를 가진, 더 좁은 교집합에서만 남는다. 그리고 최상위 `group` 자신에게
+    (그 부모 컨테이너 안에서) 붙은 클리핑 레이어는 **의도적으로 건너뛴다** — 아래
+    최상위 병합 자리의 주석 참고. 넷 다 render_thumbnails의 layer_filter가 배제하는
+    것과 같은 자리이거나, 4.3의 "평범한 그룹" 정의(마스크·클리핑·효과·획 없음) 밖의
+    손실이다.
+
+    식은 Compositor._apply_source/_apply_passthrough_source를 프리멀티플라이드
+    좌표로 옮긴 것이다. 클리핑 레이어가 베이스의 **색만** 바꾸고 알파는 바꾸지
+    않는 것도 psd-tools와 같다(_apply_clip_layers가 하위 Compositor의 _color만
+    돌려준다).
+
+    캔버스로 자르지 않는다. 캔버스 밖의 그림도 그 그룹의 내용이고 썸네일에 보이는
+    것이 맞다.
+    """
+    from psd_tools.composite import utils
+    from psd_tools.composite.composite import paste
+    from psd_tools.constants import BlendMode, Tag
+
     left, top, right, bottom = bbox
-    step = THUMBNAIL_TILE_SIZE
-    out = np.empty((bottom - top, right - left, 4), dtype=np.uint8)
-    for y in range(top, bottom, step):
-        for x in range(left, right, step):
-            tile = (x, y, min(x + step, right), min(y + step, bottom))
-            here = [l for l in leaves if _overlaps(l.bbox, tile)]
-            # here가 비어도 always_wanted(그룹과 그 조상)는 남긴다 — 그룹 자신이
-            # 걸러지면 빈 타일에서 합성기가 돌려주는 것이 달라진다.
-            wanted = _wanted_ids(psd, here) | always_wanted
-            img = group.composite(
-                viewport=tile, force=True, color=1.0, alpha=0.0,
-                layer_filter=lambda l: id(l) in wanted,
-            )
-            out[y - top:tile[3] - top, x - left:tile[2] - left] = \
-                np.array(img.convert("RGBA"))
-    return out
+    # 48px가 아니라 **메모리 예산이 허락하는 만큼 큰 중간 캔버스**에서 합성하고,
+    # 줄이는 것은 호출자가 마지막에 한 번만 한다.
+    #
+    # 처음에는 곧바로 48px 격자에서 합성했다가 사전 선언한 막대(≤4)를 크게
+    # 넘겼다 — 평범한 그룹 42개 중 39개, 최악 255. 원인은 합성식이 아니라
+    # 표본화였다. 잎마다 따로 줄여 **정수 썸네일 격자에 스냅**하면, 5343x1008을
+    # 48x9로 넣는 111배 축소에서 잎 위치가 썸네일 픽셀 절반(원본 55px)까지 밀리고
+    # 크기가 9px 높이에서 ±1px 흔들린다. 흐려지는 것이 아니라 다른 그림이 된다.
+    # 내부 해상도를 K배로 올리면 오차가 단조로 줄고 한 그룹은 K=16에서 최대차 0에
+    # 닿았다 — 블렌드·클리핑·불투명도·중첩 그룹이 전부 맞다는 증거다.
+    #
+    # 고정 K로는 안 된다. 스냅 오차를 정하는 것은 썸네일 대비가 아니라 **원본 대비**
+    # 중간 해상도의 비율이라, 13배 축소 그룹에서 충분한 K가 111배에서는 어림없다.
+    # 예산으로 묶으면 원본이 예산보다 작은 그룹은 저절로 전해상도에서 합성된다.
+    src_px = (right - left) * (bottom - top)
+    if src_px <= 0:
+        # 빈 그룹. render_thumbnails는 cost가 0이라 여기까지 오지 않지만, 직접
+        # 부르는 쪽(측정 스크립트가 그랬다)이 0으로 나누고 죽지 않게 막는다.
+        # 호출자는 크기가 0인 결과를 "썸네일 대상 아님"으로 이미 걸러낸다.
+        return np.zeros((1, 1, 4), dtype=np.uint8)
+    scale = min(1.0, (THUMBNAIL_SUPERSAMPLE_PX / src_px) ** 0.5)
+    pw = max(1, round((right - left) * scale))
+    ph = max(1, round((bottom - top) * scale))
+
+    def blank_color():
+        return np.ones((ph, pw, 3), dtype=np.float32)
+
+    def blank_scalar():
+        return np.zeros((ph, pw, 1), dtype=np.float32)
+
+    def own_mask_and_opacity(layer):
+        """
+        레이어/그룹 **자신**의 마스크(공간, (ph,pw,1) 배열이거나 마스크가 없으면
+        스칼라 1.0) · 불투명도 · fill 불투명도(둘 다 스칼라).
+
+        세 값을 따로 돌려주는 이유는 `Compositor.apply`(349~353, 361~372행)가
+        `shape`와 `alpha`에 서로 다른 계수를 곱하기 때문이다 — `shape *= shape_mask`
+        (fill은 나중에 shape_const로 별도로 곱한다), `alpha *= shape_mask *
+        opacity_const`(그리고 마찬가지로 shape_const). pass-through 그룹을 부모에
+        되접는 `_apply_passthrough_source`는 이 shape/alpha 몫을 각각 다른 자리에
+        쓰므로(아래 `_apply_passthrough` 참고), 합쳐서 하나의 계수로 주면 안 된다.
+        격리 경로(`_over`)는 shape가 대수적으로 지워지므로(_over의 docstring) 호출자가
+        `mask_shape * opacity_const * shape_const`를 alpha에만 곱하면 된다.
+
+        `Compositor.apply`가 `_get_mask`/`_get_const`로 얻는 값과 같다. 이 계산은
+        `layer`가 잎이든 그룹이든 똑같이 적용된다 — `Group.composite`가 기본으로
+        `as_layer=True`라(api/layers.py:1447) `render_thumbnails`가 부르는
+        `layer.composite(force=True, ...)`는 최상위 그룹도 "마스크·불투명도가 있는
+        하나의 레이어"로 다룬다(그 부모의 배경이 비어 있을 뿐이다). 그래서 이
+        함수는 draw()의 자식 루프와 최상위 그룹(`[group]`로 감싼 합성 루프) 양쪽에서
+        같은 모양으로 불린다.
+
+        마스크 tile은 `layer.bbox` 범위에서만 값을 갖고 그 밖은 1.0으로 둔다 — 그
+        밖에서는 이 레이어 자신의 shape/alpha가 이미 0이다(잎은 `_place`가, 그룹은
+        재귀적인 `draw`가 자기 bbox 밖에 아무것도 놓지 않는다), 그러니 거기서 무엇을
+        곱하든 결과가 같다. `_extract_rgba_masked`(237행)와 같은 트릭이다 — 진짜
+        컴포지터의 뷰포트(보통 훨씬 큰 조상 그룹 bbox)로 폈다 잘라내나 처음부터
+        `layer.bbox`로 붓나, 우리가 실제로 쓰는 자리에서는 같은 값이 나온다.
+
+        `_extract_rgba_masked`와 정확히 같은 이유로 `real_mask=False`를 쓴다 —
+        `render_thumbnails`의 기준은 항상 `force=True`이고, `_get_mask`(composite.py
+        627행)는 그때 `real_mask=not force=False`를 쓴다. `_mask_fast_ok`가 잎 쪽에서
+        `mask.has_real()`를 막는 이유(extract_rgba가 force=False로도 불릴 수 있어서)는
+        여기엔 적용되지 않는다 — 이 함수는 오직 이 force=True 경로에서만 불린다.
+
+        벡터마스크는 옮기지 않는다(함수 docstring 참고) — 여기서는 `layer.mask`
+        (래스터)만 본다.
+        """
+        opacity_const = layer.opacity / 255.0
+        shape_const = layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) / 255.0
+        if layer.mask is None or layer.mask.disabled or layer.bbox == (0, 0, 0, 0):
+            return 1.0, opacity_const, shape_const
+
+        # _extract_rgba_masked(237~249행)의 마스크 계산을 그대로 옮긴다.
+        mask_arr = layer.numpy("mask", real_mask=False)
+        shape_mask = 1.0
+        if mask_arr is not None:
+            shape_mask = paste(layer.bbox, layer.mask.bbox, mask_arr,
+                               layer.mask.background_color / 255.0)
+        if layer.mask.parameters:
+            density = layer.mask.parameters.user_mask_density
+            if density is None:
+                density = layer.mask.parameters.vector_mask_density
+            if density is None:
+                density = 255
+            density = float(density) / 255.0
+            shape_mask = density * shape_mask + (1 - density)
+        if isinstance(shape_mask, float):
+            # 마스크 배열이 없었다 — density만으로는 실질적으로 1.0.
+            return 1.0, opacity_const, shape_const
+
+        h, w = shape_mask.shape[:2]
+        x0 = round((layer.left - left) * scale)
+        y0 = round((layer.top - top) * scale)
+        tw = max(1, round((layer.left - left + w) * scale) - x0)
+        th = max(1, round((layer.top - top + h) * scale) - y0)
+        if (tw, th) != (w, h):
+            img = Image.fromarray((255 * shape_mask[..., 0]).astype(np.uint8), "L")
+            img = img.resize((tw, th), Image.LANCZOS)
+            shape_mask = (np.asarray(img).astype(np.float32) / 255.0)[..., None]
+
+        mask_shape = np.ones((ph, pw, 1), dtype=np.float32)
+        sx0, sy0 = max(0, -x0), max(0, -y0)
+        sx1 = tw - max(0, x0 + tw - pw)
+        sy1 = th - max(0, y0 + th - ph)
+        if sx1 > sx0 and sy1 > sy0:
+            dy, dx = y0 + sy0, x0 + sx0
+            mask_shape[dy:dy + (sy1 - sy0), dx:dx + (sx1 - sx0)] = shape_mask[sy0:sy1, sx0:sx1]
+        return mask_shape, opacity_const, shape_const
+
+    def draw(container, color_0, alpha_0):
+        """
+        container의 자손을 아래→위로, (color_0, alpha_0) 배경 위에 합성한다.
+
+        돌려주는 것은 이 container **자신의 몫**이다: `color`는 배경과 이미 블렌드된
+        실제 값이지만, `shape_g`/`alpha_g`는 항상 0에서 시작하는 누적치다
+        (`Compositor.__init__`의 `_shape_g`/`_alpha_g`가 isolated 여부와 무관하게
+        항상 0인 것과 같다 — "부모에 얼마나 더 보탰는가"를 재는 것이지 "배경까지
+        합친 최종 그림"이 아니다).
+
+        격리된(pass-through가 아닌) 자손은 `blank_color(), 0`을 배경으로 받는다 —
+        `Compositor`의 `isolated=True`와 같다, 자기 안에서는 부모의 내용이 보이지
+        않는다. pass-through 그룹은 **호출한 쪽의 현재 (color, alpha_0∪alpha_g)**를
+        그대로 받는다 — `_get_group`의 `is_passthrough` 분기(`isolated=False`,
+        `viewport=self._viewport`)와 같다. 그래서 그 안의 첫 레이어부터 진짜 부모
+        배경과 블렌드된다.
+        """
+        color = color_0
+        shape_g = blank_scalar()
+        alpha_g = blank_scalar()
+
+        for layer in container:                      # psd-tools는 아래→위로 준다
+            if not layer.visible:
+                continue
+            if layer.clipping:
+                continue                             # 베이스를 그릴 때 함께 처리한다
+            is_pass = layer.is_group() and layer.blend_mode == BlendMode.PASS_THROUGH
+
+            # extract_rgba는 마스크 달린 잎을 _extract_rgba_masked나
+            # layer.composite()로 이미 완전히 합성해 둔다 — 마스크·불투명도·fill
+            # 불투명도뿐 아니라, 클리핑 레이어가 붙어 있으면 그것까지도.
+            # _mask_fast_ok가 클리핑 있는 레이어는 항상 후자(layer.composite)로
+            # 떨어뜨리므로(has_clip_layers 가드), "마스크가 있다"는 것 자체가
+            # "클리핑까지 이미 반영됐다"는 뜻이다. 아래서 own_mask_and_opacity나
+            # 클리핑 루프를 또 태우면 두 번 적용하는 것이 된다 — 그래서 잎만 이
+            # 플래그로 건너뛴다. 그룹은 이런 사전 합성이 없으므로 매번 그대로 태운다.
+            leaf_baked = False
+            if layer.is_group():
+                if is_pass:
+                    raw_color, raw_shape, raw_alpha = draw(
+                        layer, color, utils.union(alpha_0, alpha_g))
+                else:
+                    raw_color, raw_shape, raw_alpha = draw(
+                        layer, blank_color(), blank_scalar())
+            else:
+                got = _scaled_leaf(layer, scale, (left, top))
+                if got is None:
+                    continue
+                premul, x0, y0 = got
+                raw_color, raw_alpha = blank_color(), blank_scalar()
+                _place(raw_color, raw_alpha, premul, x0, y0)
+                leaf_baked = layer.mask is not None and not layer.mask.disabled
+                # 마스크 없는 잎: extract_rgba가 topil()이라 shape==alpha(자기
+                # 불투명도를 아직 안 곱한 raw 값)다.
+                raw_shape = raw_alpha
+
+            if leaf_baked:
+                # own_mask_and_opacity를 부르면 안 된다 — 마스크·불투명도·fill이
+                # extract_rgba에서 이미 alpha에 반영됐다. shape는 거기서 opacity_const만
+                # 나눠 되돌린다 — psd-tools의 shape는 fill(shape_const)은 포함하되
+                # opacity(opacity_const)는 포함하지 않기 때문이다(Compositor.apply
+                # 349~353행). opacity_const가 0이면(레이어가 완전히 투명) alpha도 이미
+                # 0이므로 shape를 0으로 둬도 결과에 영향이 없다.
+                opacity_const = layer.opacity / 255.0
+                if opacity_const > 0:
+                    shape_s = raw_alpha / opacity_const
+                else:
+                    shape_s = np.zeros_like(raw_alpha)
+                alpha_s = raw_alpha
+                own_mask = 1.0    # is_pass는 항상 False다(마스크 소진은 잎만 해당).
+            else:
+                # 클리핑 레이어들은 베이스의 색만 바꾼다.
+                for clip in layer.clip_layers:
+                    if not clip.visible:
+                        continue
+                    got = _scaled_leaf(clip, scale, (left, top))
+                    if got is None:
+                        continue
+                    c_premul, cx, cy = got
+                    c_color, c_alpha = blank_color(), blank_scalar()
+                    _place(c_color, c_alpha, c_premul, cx, cy)
+                    raw_color = _over(raw_color, raw_alpha, c_color, c_alpha,
+                                      clip.blend_mode)[0]
+                mask_shape, opacity_const, shape_const = own_mask_and_opacity(layer)
+                shape_s = raw_shape * mask_shape * shape_const
+                alpha_s = raw_alpha * mask_shape * (opacity_const * shape_const)
+                own_mask = mask_shape * (opacity_const * shape_const)
+
+            if is_pass:
+                color, shape_g, alpha_g = _apply_passthrough(
+                    color, shape_g, alpha_g, raw_color, shape_s, alpha_s, own_mask)
+            else:
+                color, _ = _over(color, utils.union(alpha_0, alpha_g),
+                                 raw_color, alpha_s, layer.blend_mode)
+                shape_g = utils.union(shape_g, shape_s)
+                alpha_g = utils.union(alpha_g, alpha_s)
+        return color, shape_g, alpha_g
+
+    # 최상위 그룹도 부모 배경이 빈 컨테이너의 자식 하나처럼 돈다 — render_thumbnails가
+    # 부르는 layer.composite(force=True, ...)의 as_layer=True와 같은 모양이다. 자기
+    # 마스크·불투명도·(그리고 자신이 pass-through면 그 처리까지) 그대로 적용한다.
+    # 배경이 항상 비어 있으므로(호출자가 color=1.0, alpha=0.0으로 부른다) 최상위
+    # 그룹 자신의 blend_mode는 결과에 영향이 없다 — own_mask_and_opacity의
+    # docstring이 같은 근거를 쓴다.
+    #
+    # **draw()의 일반 루프를 그대로 재사용하지 않는다.** 그 루프는 layer.clip_layers를
+    # 무조건 처리하는데, 최상위 그룹 **자신**에게 클리핑된 레이어(있다면)는 이 그룹의
+    # **부모** 컨테이너에 속해 있다 — render_thumbnails의 layer_filter(조상+자손만
+    # 통과)가 애초에 걸러내는 자리다. 실측(2026-08-05, HH0306 02_Color): 'LINES'
+    # 그룹 자신에게(그 부모 'TV' 안에서) 클리핑된 형제 'Layer 621' 하나가 이 경로로
+    # 새 나가 플레인 그룹 108개 기준 premultiplied 최대가 10.0에서 103.7로 뛰었다.
+    # psd-tools의 정확 기준(Compositor._apply_clip_layers)은 같은 필터를 그 클리핑
+    # 레이어에도 물려주므로 필터 밖이면 그 레이어를 걸러 no-op이 되는데, 여기는
+    # `_group_rgba_scaled`에 애초에 그런 필터가 없다 — 그래서 처리 자체를 하지
+    # 않는다(이 자리에서만). 자손 쪽 레이어는 이 문제가 없다 — 클리핑 레이어는
+    # 항상 자기 베이스와 같은 컨테이너의 형제이므로, 베이스가 이 그룹의 자손이면
+    # 그 클리핑 레이어도 같은 부모를 통해 이 그룹의 자손이다.
+    raw_color, raw_shape, raw_alpha = draw(group, blank_color(), blank_scalar())
+    mask_shape, opacity_const, shape_const = own_mask_and_opacity(group)
+    shape_s = raw_shape * mask_shape * shape_const
+    alpha_s = raw_alpha * mask_shape * (opacity_const * shape_const)
+    own_mask = mask_shape * (opacity_const * shape_const)
+    if group.is_group() and group.blend_mode == BlendMode.PASS_THROUGH:
+        color, _, alpha_g = _apply_passthrough(
+            blank_color(), blank_scalar(), blank_scalar(),
+            raw_color, shape_s, alpha_s, own_mask)
+    else:
+        color, alpha_g = _over(blank_color(), blank_scalar(), raw_color, alpha_s,
+                               group.blend_mode)
+    merged = np.concatenate((color, alpha_g), axis=2)
+    return _quantize_like_psd_tools(psd, merged)
+
+
+def _place(color, alpha_g, premul, x0, y0):
+    """프리멀티플라이드 타일을 캔버스 좌표에 놓는다. 넘치는 부분은 잘라낸다."""
+    ph, pw = color.shape[:2]
+    h, w = premul.shape[:2]
+    sx0, sy0 = max(0, -x0), max(0, -y0)
+    sx1 = w - max(0, x0 + w - pw)
+    sy1 = h - max(0, y0 + h - ph)
+    if sx1 <= sx0 or sy1 <= sy0:
+        return
+    tile = premul[sy0:sy1, sx0:sx1]
+    dy, dx = y0 + sy0, x0 + sx0
+    box = (slice(dy, dy + tile.shape[0]), slice(dx, dx + tile.shape[1]))
+    a = tile[..., 3:4]
+    # 프리멀티플라이드를 스트레이트 색으로 되돌려 놓는다 — 합성식이 스트레이트를
+    # 받는다. 알파 0인 자리는 divide 규약대로 1.0(흰색)이 된다.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        straight = np.true_divide(tile[..., :3], a)
+    straight[~np.isfinite(straight)] = 1.0
+    color[box] = np.clip(straight, 0.0, 1.0)
+    alpha_g[box] = a
+
+
+def _over(color_b, alpha_b, color_s, alpha_s, blend_mode):
+    """
+    _apply_source(410행)의 배경 있는 경우. shape 인자를 따로 받지 않고 shape ==
+    alpha_s로 다룬다 — `(shape - alpha) * alpha_b * color_b` 항이 늘 0이 되도록
+    적어 뒀다는 뜻이다(437행 참고).
+
+    **호출자는 이 가정을 실제로 깬다.** `own_mask_and_opacity`가 alpha에 자기 마스크·
+    불투명도를 곱한 뒤에도 `shape`는 따로 줄지 않으므로 `shape != alpha_s`인 채로
+    이 함수에 들어온다. 그런데도 결과는 여전히 정확하다 — psd-tools의 원식에서
+    `shape`가 나타나는 두 항, `(1-shape)*alpha_previous*color_prev`(440행)와
+    `(shape-alpha)*alpha_b*color_b`(437행)를 더하면 `shape`가 대수적으로 지워진다:
+    `(1-shape)*A + (shape-alpha)*A = A*(1-alpha)`. 이 함수가 `(1-alpha_s)*alpha_b*
+    color_b`로 적은 항이 바로 그 결과이므로, `shape`가 실제로 무엇이든(knockout이
+    아닌 한) 최종 색이 같다. 그래서 shape를 별도로 옮겨 받을 필요가 없다 — knockout은
+    `_group_rgba_scaled`가 다루지 않는 별도의 경우다. **이 지워짐은 pass-through로는
+    이어지지 않는다** — `_apply_passthrough`가 옮기는 `_apply_passthrough_source`는
+    `shape_b`를 `color_support` 계산에 직접 쓰고, 거기엔 상쇄되는 짝이 없다. 그래서
+    `draw()`는 pass-through 그룹을 만날 자리를 위해 `shape_g`를 이 함수와 별도로
+    누적해 둔다.
+
+    대수적으로 줄이지 않는다 — 줄이면 float32에서 마지막 비트가 달라진다.
+    """
+    from psd_tools.composite import utils
+    from psd_tools.composite.blend import BLEND_FUNC, normal
+
+    alpha_new = utils.union(alpha_b, alpha_s)
+    blend_fn = BLEND_FUNC.get(blend_mode, normal)
+    color_t = (alpha_s - alpha_s) * alpha_b * color_b + alpha_s * (
+        (1.0 - alpha_b) * color_s + alpha_b * blend_fn(color_b, color_s)
+    )
+    out = utils.clip(utils.divide(
+        (1.0 - alpha_s) * alpha_b * color_b + color_t, alpha_new))
+    return out, alpha_new
+
+
+def _apply_passthrough(color_b, shape_b, alpha_b, color_s, shape_s, alpha_s, own_mask):
+    """
+    `Compositor._apply_passthrough_source`(387~408행)를 그대로 옮긴다. pass-through
+    그룹이 자기 몫을 부모의 누적 상태에 얹을 때 `_over` 대신 쓴다.
+
+    `_over`와의 차이가 이 함수의 존재 이유다. `_over`는 격리해서 그린 그림을 배경
+    위에 "덮는" 연산이지만, `color_s`(pass-through 재귀 `draw()`가 돌려준 색)는 이미
+    **부모 배경(`color_b`) 위에서 블렌드된 채로** 돌아온다 — 재귀 자체가 `color_b`를
+    시드로 받기 때문이다(`_group_rgba_scaled`의 `draw()` docstring 참고). 그래서 여기서
+    또 `_over`로 덮으면 배경을 두 번 반영하게 된다. 대신 `own_mask`(이 그룹 자신의
+    마스크×불투명도×fill)만큼 `color_s`를 취하고, 나머지는 `color_support`로
+    정규화한 값(부모가 이미 덮인 자리는 부모 색을, 아직 안 덮인 자리는 그룹 자신의
+    색을 우선하는 가중 평균)을 취한다. `own_mask=1`(그룹 자신에 마스크·불투명도
+    감쇠가 없음)이면 `color_support` 항이 통째로 사라져 `color_s`가 곧 결과가 된다 —
+    이미 배경을 반영해 왔으니 그것으로 충분하다는 뜻이다.
+
+    `shape_b`가 상쇄되지 않는 이유는 `_over`의 docstring에 적어 두었다.
+
+    대수적으로 줄이지 않는다.
+    """
+    from psd_tools.composite import utils
+
+    new_shape = utils.union(shape_b, shape_s)
+    color_support = utils.clip(utils.divide(
+        color_s * own_mask * (1.0 - shape_b) + color_b * shape_b, new_shape))
+    color_new = utils.clip(color_s * own_mask + (1.0 - own_mask) * color_support)
+    alpha_new = utils.union(alpha_b, alpha_s)
+    return color_new, new_shape, alpha_new
 
 
 def render_thumbnails(session, layer_ids, max_size, out_dir):
@@ -639,17 +1002,16 @@ def render_thumbnails(session, layer_ids, max_size, out_dir):
                 cur = cur.parent
             # Collect visible descendants
             descendant_ids = {id(desc) for desc in layer.descendants() if desc.visible}
-            # 큰 그룹만 타일 경로로 보낸다. 48px 그림 한 장을 만들자고 그룹 bbox
-            # 전체를 한 번에 합성하면 실측에서 73Mpx 그룹 하나가 91초/15GB였고
-            # 291Mpx짜리는 24GB를 넘겨 끝나지 않았다. 작은 그룹은 예전 호출 그대로
-            # 둔다 — 잘 나오고 있는 것을 건드리지 않는다.
             bbox = layer.bbox
-            if (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) > THUMBNAIL_TILE_PX:
-                leaves = [d for d in layer.descendants()
-                          if d.visible and not d.is_group()]
+            leaves = [d for d in layer.descendants()
+                      if d.visible and not d.is_group()]
+            cost = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) * len(leaves) \
+                / (1024 * 1024)
+            if cost > THUMBNAIL_EXACT_BUDGET:
+                # 아래의 img.thumbnail이 이 경로의 **유일한** 축소가 된다 —
+                # _group_rgba_scaled는 중간 해상도로 돌려주므로 no-op이 아니다.
                 img = Image.fromarray(
-                    _group_rgba_tiled(psd, layer, bbox, leaves, ancestors_and_self),
-                    "RGBA")
+                    _group_rgba_scaled(psd, layer, bbox), "RGBA")
             else:
                 img = layer.composite(
                     force=True,

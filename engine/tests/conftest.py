@@ -384,3 +384,173 @@ def blend_group_psd(tmp_path):
         ]),
     ], width=32, height=32)
     return str(p)
+
+
+#: masked_group_psd/masked_leaf_group_psd/masked_clip_multiply_psd가 공유하는 잎 크기.
+_MG_W, _MG_H = 24, 20
+
+
+@pytest.fixture
+def masked_group_psd(tmp_path):
+    """
+    그룹 자신에 마스크·불투명도가 걸린 문서 — 최상위(OUTER)와 중첩(INNER) 두 자리
+    모두에서.
+
+    _group_rgba_scaled는 한동안 그룹 자신의 마스크를 어디서도 읽지 않았고(값은
+    불투명도만, 그것도 draw()의 for-루프 안에서 **자식으로 방문될 때만** 곱했다),
+    최상위 그룹은 어느 부모의 for-루프에도 안 걸리므로 자기 불투명도조차 반영되지
+    않았다. 실측(2026-08-05): 이 픽스처에서 옛 코드는 알파 최대차 180이었다.
+
+    OUTER·INNER 둘 다 blend_mode를 명시적으로 normal로 둔다 — pytoshop Group의
+    기본값은 pass_through라, 그룹 자신에 마스크·불투명도(<255)가 걸린 채로
+    pass_through를 남겨두면 psd-tools가 `_apply_source` 대신
+    `_apply_passthrough_source`(부분 커버리지를 "color_support"로 섞는 별도 식)를
+    타 이 픽스처가 재려는 것과는 다른, 별개의(문서화되고 이번 라운드에서 다루지
+    않는 — pass-through 하위그룹의 blend) 오차를 보탠다.
+
+    마스크는 OUTER·INNER의 bbox와 정확히 같은 크기·위치로 붙인다 — 패딩·
+    background_color 조합은 masked_psd가 이미 재고 있으므로 여기서는 "그룹 자신의
+    마스크가 아예 안 걸린다"는 것 하나만 가른다.
+    """
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd([
+        nested_layers.Group(name="OUTER", opacity=200,
+                            blend_mode=enums.BlendMode.normal, layers=[
+            nested_layers.Group(name="INNER", opacity=180,
+                                blend_mode=enums.BlendMode.normal, layers=[
+                make_image("base", 90, 4, 4, _MG_W, _MG_H),
+            ]),
+        ]),
+    ], color_mode=enums.ColorMode.rgb, size=(CANVAS_W, CANVAS_H))
+    grad = np.tile(np.linspace(0, 255, _MG_W, dtype=np.uint8), (_MG_H, 1))
+    attach_mask(psd, "OUTER", grad, left=4, top=4, default_color=0)
+    attach_mask(psd, "INNER", grad, left=4, top=4, default_color=0)
+    path = tmp_path / "masked_group.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
+def masked_leaf_group_psd(tmp_path):
+    """
+    마스크 달린 잎이 그룹 안에 있고, 그 잎 자신의 불투명도도 128인 문서(클리핑 없음).
+
+    extract_rgba는 마스크 달린 잎의 불투명도·fill 불투명도를 이미 반영해 돌려준다
+    (_extract_rgba_masked 또는 layer.composite 경유 — 둘 다). draw()가 그 위에
+    own_alpha_factor를 무조건 또 곱하면 128/255가 아니라 (128/255)^2이 되어버린다
+    (실측: 이 픽스처에서 옛 코드는 알파 최대차 64 — 128 대신 64 근처가 나왔다).
+
+    클리핑이 없는 것이 요점이다 — 클리핑까지 낀 이중 적용은
+    masked_clip_multiply_psd가 따로 잰다.
+    """
+    leaf = make_image("masked_leaf", 200, 4, 4, _MG_W, _MG_H)
+    leaf.opacity = 128
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd(
+        [nested_layers.Group(name="G", blend_mode=enums.BlendMode.normal, layers=[leaf])],
+        color_mode=enums.ColorMode.rgb, size=(CANVAS_W, CANVAS_H))
+    grad = np.tile(np.linspace(0, 255, _MG_W, dtype=np.uint8), (_MG_H, 1))
+    attach_mask(psd, "masked_leaf", grad, left=4, top=4, default_color=0)
+    path = tmp_path / "masked_leaf_group.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
+def masked_clip_multiply_psd(tmp_path):
+    """
+    마스크 달린 베이스에 **곱연산** 클리핑 레이어가 붙은 문서.
+
+    masked_clip_psd로는 이 이중 적용을 못 잡는다 — 그쪽 클리핑 레이어(shade)가
+    normal 블렌드에 완전 불투명이라, 한 번 덮으나 두 번 덮으나 결과가 같다(완전
+    불투명한 normal 오버레이는 몇 번을 다시 그려도 멱등이다). 곱연산은 멱등이 아니다
+    — 64/255를 두 번 곱하면 값이 계속 준다.
+
+    extract_rgba는 클리핑 있는 마스크 레이어를 항상 layer.composite()로 떨어뜨려
+    (has_clip_layers 가드) 클리핑까지 이미 합성해 돌려준다. draw()가 클리핑 루프를
+    또 태우면 곱연산이 두 번 걸린다: 200(base) -> 50(1차, 200*64/255) -> 12(2차,
+    50*64/255). 실측: 이 픽스처에서 옛 코드는 시각적 RGB 최대차 38(정확 50 vs
+    옛 코드 12), 고친 코드는 1(반올림 수준).
+    """
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd([
+        nested_layers.Group(name="G", blend_mode=enums.BlendMode.normal, layers=[
+            make_image("clip_shade", 64, 4, 4, _MG_W, _MG_H, blend=enums.BlendMode.multiply),
+            make_image("masked_base", 200, 4, 4, _MG_W, _MG_H),
+        ]),
+    ], color_mode=enums.ColorMode.rgb, size=(CANVAS_W, CANVAS_H))
+    for record in psd.layer_and_mask_info.layer_info.layer_records:
+        if record.name == "clip_shade":
+            record.clipping = True
+    grad = np.tile(np.linspace(0, 255, _MG_W, dtype=np.uint8), (_MG_H, 1))
+    attach_mask(psd, "masked_base", grad, left=4, top=4, default_color=0)
+    path = tmp_path / "masked_clip_multiply.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
+def sibling_clip_group_psd(tmp_path):
+    """
+    썸네일 대상 그룹 **자신**에게, 그 그룹의 부모 컨테이너 안에서 클리핑 레이어가
+    붙은 문서 — 실납품에서 실제로 걸린 모양이다('LINES' 그룹에 형제 'Layer 621'이
+    클리핑되어 있었다, HH0306 02_Color).
+
+    render_thumbnails가 쓰는 layer_filter(조상+자손만 통과)는 GROUP의 **부모**에
+    속한 이 클리핑 레이어를 걸러 no-op으로 만든다(psd-tools의
+    Compositor._apply_clip_layers도 같은 필터를 물려받는다) — 그런데
+    `_group_rgba_scaled`가 최상위 그룹을 draw()의 일반 자식 루프에 태워 자기
+    clip_layers를 무조건 처리하면, 필터가 없는 이 경로가 그 클리핑을 그대로
+    그려버린다. 실측: 이 회귀로 평범한 그룹 108개 기준 최악 premultiplied 차이가
+    10.0에서 103.7로 뛰었다. clip_multiply는 곱연산이라 걸렸을 때와 안 걸렸을 때의
+    차이가 크다 — masked_clip_multiply_psd와 같은 이유로 진하게 고른 값이다.
+
+    GROUP 자신에게 자손 쪽 클리핑도 하나 둔다("inner_base"에 "inner_clip") — 그건
+    GROUP의 자손이라 필터 안에 있으므로 그대로 반영돼야 한다. 이 픽스처는 "그룹
+    바깥의 클리핑은 무시하되 안쪽 클리핑은 반영한다"를 한 번에 가른다.
+    """
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd([
+        nested_layers.Group(name="TV", layers=[
+            make_image("sibling_clip", 64, 0, 0, 32, 32, blend=enums.BlendMode.multiply),
+            nested_layers.Group(name="LINES", blend_mode=enums.BlendMode.normal, layers=[
+                make_image("inner_clip", 64, 0, 0, 32, 32, blend=enums.BlendMode.multiply),
+                make_image("inner_base", 200, 0, 0, 32, 32),
+            ]),
+        ]),
+    ], color_mode=enums.ColorMode.rgb, size=(CANVAS_W, CANVAS_H))
+    for record in psd.layer_and_mask_info.layer_info.layer_records:
+        if record.name in ("sibling_clip", "inner_clip"):
+            record.clipping = True
+    path = tmp_path / "sibling_clip_group.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
+def passthrough_subgroup_psd(tmp_path):
+    """
+    pass-through 하위그룹 안의 곱연산 레이어가 **부모의 형제**와 블렌드돼야 한다.
+
+    OUTER(정상 그룹) 안에 PT(pass-through) 하위그룹과 형제 base가 있다. PT 안의
+    'mult'가 곱연산인데, pass-through는 격리하지 않으므로 mult는 자기만의 빈
+    캔버스가 아니라 base 위에서 곱해져야 한다: base 64 위에 mult 192를 곱하면
+    64*192/255 = 48 근처가 나온다. 격리해서 그리면(예전 방식) mult가 흰 배경
+    위에서 곱해져 그대로 192가 남는다 — **차이가 144**라 판별력이 crisp하다.
+
+    review 실측(2026-08-05)과 같은 모양이다: exact 50 vs 격리 64.
+    """
+    p = tmp_path / "passthrough_subgroup.psd"
+    write_psd(p, [
+        nested_layers.Group(name="OUTER", blend_mode=enums.BlendMode.normal, layers=[
+            nested_layers.Group(name="PT", blend_mode=enums.BlendMode.pass_through, layers=[
+                make_image("mult", 192, 0, 0, 32, 32, blend=enums.BlendMode.multiply),
+            ]),
+            make_image("base", 64, 0, 0, 32, 32),
+        ]),
+    ], width=32, height=32)
+    return str(p)
