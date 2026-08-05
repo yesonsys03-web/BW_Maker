@@ -141,6 +141,24 @@ def _mask_fast_ok(layer):
     # 필터를 끄고 대조하면 최대차 0으로 같다).
     if not layer.is_visible():
         return False
+    # 클리핑 레이어는 composite가 본 패스에서 통째로 건너뛴다(composite.py 329행,
+    # `if not clip_compositing and layer.clipping: return` — Layer.composite는
+    # clip_compositing을 넘기지 않는다). 그래서 결과가 손대지 않은 배경이 되고,
+    # 값싼 경로가 그것을 그리면 없던 그림이 생긴다. _plain(373~388행)이 병합 쪽에서
+    # 이미 같은 이유로 막고 있고, 같은 설명을 적어 두었다.
+    if layer.clipping:
+        return False
+    # 반대쪽. 이 레이어에 클리핑 레이어가 **붙어 있으면** composite가 그것들을 이
+    # 레이어 색 위에 합성해 준다(345~346행의 _apply_clip_layers). 값싼 경로는 자기
+    # 색만 내므로 그 그림이 빠진다.
+    #
+    # _plain은 이것을 일부러 허용하지만(377~386행) 그 근거는 layer_filter에 달려
+    # 있다 — merge_rgba는 병합 대상과 조상만 통과시키는 필터를 주므로, 물려받은
+    # 하위 Compositor가 아무것도 적용하지 못한다. **extract_rgba는 필터를 주지
+    # 않는다.** 그러면 필터가 Layer.is_visible로 채워져(206행) 보이는 클리핑 자식이
+    # 전부 실제로 합성된다. 그래서 _plain의 면제는 여기로 넘어오지 않는다.
+    if layer.has_clip_layers():
+        return False
     # 마무리 양자화가 "RGBA"로 고정이다. 회색조·CMYK 문서는 채널 수가 달라 같은
     # 그림을 만들 수 없으므로 예전 경로에 둔다(_fast_mergeable도 같은 이유로 막는다).
     if layer._psd.color_mode != ColorMode.RGB:

@@ -158,6 +158,42 @@ def clip_layer_psd(tmp_path):
 
 
 @pytest.fixture
+def masked_clip_psd(tmp_path):
+    """
+    클리핑이 걸린 두 모양을 **마스크와 함께** 든 문서. 'shade'가 'base'에 클리핑된다.
+
+    clip_layer_psd로는 이것을 못 한다 — 그쪽은 마스크가 없다. extract_rgba는
+    마스크가 있을 때만 값싼 경로를 부르므로, 마스크 없는 레이어로 "값싼 경로가
+    거부한다"를 확인하면 거부 이유가 클리핑이 아니라 '마스크 없음'이라서 테스트가
+    공허해진다. 그리고 clip_layer_psd에 마스크를 붙일 수도 없다 — 그 픽스처는
+    _plain / merge_rgba 쪽에서 '마스크 없는 클리핑 base'를 재는 데 쓰이고 있다.
+
+    한 장으로 두 가지를 덮는다:
+      shade  clipping=True        — composite가 본 패스에서 통째로 건너뛴다
+      base   has_clip_layers=True — composite가 shade를 이 위에 합성해 준다
+    """
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd([
+        nested_layers.Group(name="ART", layers=[
+            make_image("shade", 180, 4, 4, 24, 20),
+            make_image("base", 120, 4, 4, 24, 20),
+        ]),
+    ], color_mode=enums.ColorMode.rgb, size=(CANVAS_W, CANVAS_H))
+    for record in psd.layer_and_mask_info.layer_info.layer_records:
+        if record.name == "shade":
+            record.clipping = True
+
+    grad = np.tile(np.linspace(0, 255, 24, dtype=np.uint8), (20, 1))
+    attach_mask(psd, "shade", grad, left=4, top=4, default_color=0)
+    attach_mask(psd, "base", grad, left=4, top=4, default_color=0)
+
+    path = tmp_path / "masked_clip.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
 def hidden_group_psd(tmp_path):
     """
     숨겨진 그룹(HIDDEN, pass-through) 안에 보이는 NORMAL 그룹, 그 안에 'line'.

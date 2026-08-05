@@ -73,6 +73,48 @@ def test_masked_extract_is_byte_identical_to_composite(masked_psd, name):
     )
 
 
+def test_masked_clip_fixture_really_clips_and_masks(masked_clip_psd):
+    """
+    아래 거부 테스트가 공허하지 않은지부터 확인한다. 마스크가 없으면 값싼 경로는
+    클리핑과 무관하게 거부하고, 클리핑이 안 걸리면 잴 것이 없다.
+    """
+    psd = PSDImage.open(masked_clip_psd)
+    by_name = {l.name: l for l in psd.descendants()}
+    assert set(by_name) >= {"shade", "base"}
+    for name in ("shade", "base"):
+        m = by_name[name].mask
+        assert m is not None and not m.disabled, f"{name}에 마스크가 없다"
+        assert by_name[name].is_visible(), f"{name}이 숨어 있다"
+    assert by_name["shade"].clipping
+    assert by_name["base"].has_clip_layers()
+
+
+@pytest.mark.parametrize("name", ["shade", "base"])
+def test_clipping_shapes_fall_back_instead_of_taking_the_fast_path(
+        masked_clip_psd, name, monkeypatch):
+    """
+    클리핑이 낀 두 모양은 값싼 경로가 거부하고 예전 경로로 떨어져야 한다.
+
+    shade(clipping=True)는 composite가 통째로 건너뛰어 배경만 남고, base는
+    composite가 shade를 위에 합성해 준다. 값싼 경로는 둘 다 재현하지 않는다.
+    """
+    psd = PSDImage.open(masked_clip_psd)
+    layer = next(l for l in psd.descendants() if l.name == name)
+    reference = np.array(layer.composite(viewport=layer.bbox).convert("RGBA"))
+
+    assert render_mod._extract_rgba_masked(layer) is None, "가드가 걸러야 한다"
+    assert np.array_equal(extract_rgba(layer), reference), \
+        "fallback이 예전과 같은 그림을 내야 한다"
+
+    # 가드를 빼면 실제로 그림이 달라진다 — 이 테스트가 무언가를 지키고 있다는 증거다.
+    # 이것이 없으면 값싼 경로가 우연히 같은 값을 내는 경우와 구별되지 않는다.
+    monkeypatch.setattr(render_mod, "_mask_fast_ok", lambda l: True)
+    unguarded = render_mod._extract_rgba_masked(layer)
+    assert unguarded is not None
+    assert not np.array_equal(unguarded, reference), \
+        "가드를 빼도 같다면 이 가드는 아무것도 지키지 않는 것이다"
+
+
 def test_merge_rgba_overlap(fixture_psd):
     s = _session(fixture_psd)
     # 'fill'(128, 전체) 위에 'lines'(200, (10,10)-(30,20))
