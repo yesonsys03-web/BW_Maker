@@ -86,6 +86,12 @@ export interface Preset {
    */
   splitLayers: boolean;
   /**
+   * 출력 포맷. "psd"는 "원본 따름"이라 .psd/.psb를 원본에서 물려받는다.
+   * "png"는 투명 배경 RGBA, "jpg"는 흰 배경에 구운 불투명 이미지다.
+   * 둘 다 평탄화되며, splitLayers를 켜면 레이어당 이미지 한 장이 된다.
+   */
+  outputFormat: OutputFormat;
+  /**
    * 이름에 검색어가 들어있어도 라인 아트가 아닌 것을 걸러내는 토큰.
    * `line col`, `LINE_COL`, `Line Colour`는 색 지정 레이어지 라인이 아니다.
    * 네 판별 규칙 중 이것만 어휘에 의존해서 편집 가능하게 둔다.

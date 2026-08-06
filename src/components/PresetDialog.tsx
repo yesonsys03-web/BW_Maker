@@ -121,6 +121,10 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       embedPreview,
       lineColor: normalizeColor ? lineColor : null,
       splitLayers,
+      // No form control yet — a later task owns the UI. Carry the incoming
+      // preset's value through unchanged so editing/duplicating a preset
+      // doesn't silently reset its output format to "psd".
+      outputFormat: preset.outputFormat,
     };
   }
 

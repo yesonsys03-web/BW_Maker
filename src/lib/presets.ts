@@ -1,6 +1,6 @@
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { exists, mkdir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
-import type { Preset } from "./types";
+import type { OutputFormat, Preset } from "./types";
 
 const PRESETS_FILENAME = "presets.json";
 
@@ -21,6 +21,7 @@ export const DEFAULT_PRESET: Preset = {
   embedPreview: true,
   lineColor: null,
   splitLayers: false,
+  outputFormat: "psd",
   excludeTokens: [...DEFAULT_EXCLUDE_TOKENS],
 };
 
@@ -43,6 +44,7 @@ const INCLUDE_TYPES = new Set(["contains", "regex"]);
 const MERGE_MODES = new Set(["none", "all", "perGroup", "byElement"]);
 
 const MERGE_RULES = new Set(["role", "group", "plane"]);
+const OUTPUT_FORMATS = new Set<string>(["psd", "png", "jpg"]);
 
 /** byRole 병합의 기본 역할 토큰(아래→위 순서). 엔진 DEFAULT_ROLE_TOKENS와 같다. */
 export const DEFAULT_ROLE_TOKENS = ["UL", "OL_UL", "OL"];
@@ -123,6 +125,12 @@ function validatePreset(value: unknown, index: number): Preset {
       throw new Error(`${prefix}.lineColor: null 또는 "#RRGGBB" 형식이 아닙니다.`);
     }
   }
+  // outputFormat도 나중에 추가된 항목이라 그 이전에 저장된 presets.json에는
+  // 아예 없다. 없는 것은 "원본 따름"(psd)으로 읽는다 — 구버전 파일은 잘못된
+  // 것이 아니기 때문이다. 반대로 들어있는데 모르는 값이면 통과시키지 않는다.
+  if (v.outputFormat !== undefined && !OUTPUT_FORMATS.has(v.outputFormat as string)) {
+    throw new Error(`${prefix}.outputFormat: "psd", "png", "jpg" 중 하나가 아닙니다.`);
+  }
 
   return {
     name: v.name,
@@ -142,6 +150,7 @@ function validatePreset(value: unknown, index: number): Preset {
     embedPreview: v.embedPreview,
     lineColor: (v.lineColor as string | null | undefined) ?? null,
     splitLayers: (v.splitLayers as boolean | undefined) ?? false,
+    outputFormat: (v.outputFormat as OutputFormat | undefined) ?? "psd",
     excludeTokens: (v.excludeTokens as string[] | undefined) ?? [...DEFAULT_EXCLUDE_TOKENS],
   };
 }

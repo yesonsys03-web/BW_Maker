@@ -52,6 +52,7 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     mergeRule: "role",
     splitLayers: false,       // 기본은 한 파일에 모두
     excludeTokens: ["col", "colour", "color"],  // line col 류는 색 지정이다
+    outputFormat: "psd",      // 기본은 원본 따름
   });
 });
 
@@ -119,6 +120,7 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
     embedPreview: false,
     lineColor: "#1A2B3C",
     splitLayers: true,
+    outputFormat: "jpg",
     excludeTokens: ["fx", "temp"],
   };
   existsMock.mockResolvedValue(true);
@@ -323,4 +325,32 @@ test("a malformed excludeTokens is rejected rather than silently defaulted", asy
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, excludeTokens: "col" }]));
 
   await expect(loadPresets()).rejects.toThrow("excludeTokens");
+});
+
+// outputFormat: 나중에 추가된 항목이라 구버전 presets.json에는 아예 없다.
+test("loadPresets reads a preset saved before outputFormat existed as psd", async () => {
+  const withoutField: Record<string, unknown> = { ...DEFAULT_PRESET };
+  delete withoutField.outputFormat;
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([withoutField]));
+
+  const [loaded] = await loadPresets();
+
+  expect(loaded.outputFormat).toBe("psd");
+});
+
+test("loadPresets keeps an explicit outputFormat", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, outputFormat: "jpg" }]));
+
+  const [loaded] = await loadPresets();
+
+  expect(loaded.outputFormat).toBe("jpg");
+});
+
+test("loadPresets rejects an unknown outputFormat rather than silently defaulting", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, outputFormat: "webp" }]));
+
+  await expect(loadPresets()).rejects.toThrow(/outputFormat/);
 });
