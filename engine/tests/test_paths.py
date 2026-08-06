@@ -33,3 +33,15 @@ def test_ensure_writable_path_rejects_an_overlong_filename(tmp_path):
         ensure_writable_path(tmp_path / name)
     assert str(MAX_COMPONENT) in str(e.value)
     assert "파일 이름" in str(e.value)
+
+
+def test_ensure_writable_path_accepts_a_short_filename_under_a_deep_tree(tmp_path):
+    # 전체 경로 길이가 255를 넘어도 파일 이름 자체가 짧으면 통과해야 한다.
+    # 이 테스트는 basename만 재는 올바른 구현과 str(path) 전체를 재는 잘못된
+    # 구현을 가른다 — 앞의 테스트만으로는 둘을 구별할 수 없다.
+    nested = tmp_path
+    for _ in range(10):
+        nested = nested / ("d" * 50)
+    path = nested / "out.png"
+    assert len(str(path)) > MAX_COMPONENT
+    ensure_writable_path(path)
