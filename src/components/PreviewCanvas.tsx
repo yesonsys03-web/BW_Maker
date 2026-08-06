@@ -10,6 +10,7 @@ import {
   nextScale,
   PREVIEW_MAX_SIZE,
   parsePreviewBackground,
+  previewRenderDelay,
   recenterOn,
   scaledBy,
   toEngineError,
@@ -70,20 +71,14 @@ interface PreviewCanvasProps {
 }
 
 /**
- * 연속된 토글을 한 번의 렌더로 묶는 대기 시간. 400ms였던 값인데, 그때는 렌더
- * 한 번이 수십 초라 최대한 묶는 것이 이득이었다. 지금은 캐시된 타일 합성이라
- * 50ms 안에 끝나므로 디바운스가 오히려 체감 지연의 대부분이 된다. 빠르게
- * 연타하는 경우만 묶일 정도로 줄인다.
- */
-const DEBOUNCE_MS = 120;
-
-/**
  * Center preview canvas. Recomputes visibleIds whenever activePath / eye
  * toggle / include toggle changes (via tree, includedIds, previewHiddenIds
- * reference changes), waits DEBOUNCE_MS, then renders via the engine. A
- * monotonically increasing request id guards against a stale response
- * (e.g. from a render superseded by a later toggle) overwriting a newer
- * frame or clobbering a newer request's loading state.
+ * reference changes), waits previewRenderDelay (leading edge: fires
+ * immediately unless a render started within PREVIEW_COALESCE_MS), then
+ * renders via the engine. A monotonically increasing request id guards
+ * against a stale response (e.g. from a render superseded by a later
+ * toggle) overwriting a newer frame or clobbering a newer request's loading
+ * state.
  */
 export function PreviewCanvas({
   sessionId,
@@ -246,6 +241,14 @@ export function PreviewCanvas({
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
+  /**
+   * 직전에 엔진 렌더를 건 시각. previewRenderDelay(leading edge)가 "조용하다가
+   * 눌린 첫 토글"과 "연타 중인 토글"을 가르는 기준이 이 값이다. 타이머가 실제로
+   * 발사되는 지점에서만 갱신한다 — 효과가 스케줄될 때(디바운스를 걸 때)가 아니라
+   * 엔진에 나가는 순간이어야, 다음 토글이 "직전 렌더로부터 얼마나 지났는가"를
+   * 올바르게 잴 수 있다.
+   */
+  const lastRenderStartedAtRef = useRef<number | null>(null);
 
   const visibleIds = useMemo(
     () => (tree ? visibleIdsForPreview(tree, includedIds, previewHiddenIds, soloIds) : []),
@@ -325,12 +328,13 @@ export function PreviewCanvas({
 
     // 문서 보기는 저장된 병합 이미지를 그대로 쓰므로 즉시 끝난다. 파일을 연
     // 직후가 바로 이 경우라, 여기에 디바운스를 걸면 첫 화면만 늦어진다.
-    // 합성 미리보기는 연속 토글을 묶어야 하므로 디바운스를 유지한다.
-    const delay = documentView ? 0 : DEBOUNCE_MS;
+    // 합성 미리보기는 연속 토글을 묶어야 하므로(leading edge) previewRenderDelay를 쓴다.
+    const delay = documentView ? 0 : previewRenderDelay(lastRenderStartedAtRef.current, Date.now());
 
     const timer = window.setTimeout(() => {
       const sid = sessionIdRef.current;
       if (!sid) return;
+      lastRenderStartedAtRef.current = Date.now();
       const requestId = ++requestIdRef.current;
       setLoading(true);
       inFlightRef.current += 1;

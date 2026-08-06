@@ -154,6 +154,45 @@ export function isEvictedSessionError(e: unknown): boolean {
  */
 export const PREVIEW_MAX_SIZE = 1500;
 
+/**
+ * 연속된 토글을 한 번의 렌더로 묶는 창(ms).
+ *
+ * **값이 아니라 언제 세는지가 바뀌었다.** 예전에는 토글이 들어올 때마다 이만큼
+ * 기다렸다가 그렸다(trailing). 그래서 한 번만 눌러도 무조건 이 시간을 냈고,
+ * 실측한 체감 지연에서 가장 큰 몫이 그 대기였다:
+ *
+ *     디바운스 대기        120 ms   ← 클릭 한 번에도 무조건
+ *     보이는 N장 재합성     ~60 ms   (캐시된 타일 20장)
+ *     PNG 인코딩          27.7 ms
+ *     브라우저 PNG 디코딩   17.8 ms
+ *
+ * 지금은 **직전 렌더로부터** 이만큼을 센다(leading edge). 조용하다가 누른 첫
+ * 토글은 기다리지 않고 곧바로 나가고, 그 뒤 이 창 안에 들어온 것들만 묶인다.
+ *
+ * **창 자체를 없애면 안 된다.** 엔진은 stdin을 순서대로 처리하므로 빠르게 열 번
+ * 누르면 전체 렌더 열 개가 큐에 쌓인다. `requestIdRef`가 오래된 *결과*는 버리지만
+ * 엔진은 그 일을 전부 한다 — 사람이 기다리는 것은 그 뒤에 선다. 그래서 값은
+ * 그대로 두고 세는 시점만 옮겼다.
+ */
+export const PREVIEW_COALESCE_MS = 120;
+
+/**
+ * 이번 토글을 얼마나 기다렸다 엔진에 낼지(ms). 0이면 곧바로.
+ *
+ * @param lastRenderStartedAt 직전에 렌더를 건 시각. 아직 없으면 null.
+ * @param now 지금 시각.
+ */
+export function previewRenderDelay(lastRenderStartedAt: number | null, now: number): number {
+  if (lastRenderStartedAt === null) return 0;
+  const since = now - lastRenderStartedAt;
+  // since < 0 이면 시계가 뒤로 간 것이다 — 이 값을 그대로 크기 비교(>=)에 넣으면
+  // "충분히 지났다" 판정을 피해가면서 120 - since가 커다란 양수로 나가버려, 뒤에
+  // 있는 Math.max(0, …)가 음수 클램프로는 잡아내지 못한다. 그래서 부호는 여기,
+  // 가드에서 먼저 걸러낸다.
+  if (since >= PREVIEW_COALESCE_MS || since < 0) return 0;
+  return PREVIEW_COALESCE_MS - since;
+}
+
 export type PreviewBackground = "white" | "checker" | "black";
 
 export const PREVIEW_BACKGROUNDS: readonly PreviewBackground[] = ["white", "checker", "black"];
