@@ -205,7 +205,7 @@ def main():
         response = engine.call("export_psd", sessionId=session_id, includedIds=layer_ids,
                                operations=[], naming="pathPrefix",
                                outputPath=str(long_out), overwrite=True)
-        check(f"긴 경로로 내보내기 ({len(str(long_out))}자)",
+        check(f"긴 경로로 내보내기 ({len(str(long_out))}자, 윈도우에서만 유의미)",
               "result" in response, response.get("error"))
         check("긴 경로 산출 파일 존재", Path(long_out).is_file())
 
