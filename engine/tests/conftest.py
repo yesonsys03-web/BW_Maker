@@ -364,6 +364,25 @@ def masked_psd(tmp_path):
     return str(path)
 
 
+@pytest.fixture
+def session(fixture_psd):
+    from psd_engine.session import SessionStore
+    store = SessionStore()
+    return store.get(store.open(fixture_psd))
+
+
+@pytest.fixture
+def plan(session):
+    """included id 목록과 operations로 엔트리를 만든다."""
+    from psd_engine.ops import build_export_plan, finalize_names
+
+    def make(included, operations=()):
+        entries = build_export_plan(included, list(operations))
+        return finalize_names(entries, session["nodes_by_id"], "pathPrefix")
+
+    return make
+
+
 #: 아래 픽스처가 도는 값들. 왜 이 셋인지는 픽스처 docstring에 적어 두었다.
 FADED_COLOR, FADED_OPACITY = 200, 90
 

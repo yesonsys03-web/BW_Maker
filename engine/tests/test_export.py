@@ -14,12 +14,6 @@ from psd_engine.verify import verify_export
 
 
 @pytest.fixture
-def session(fixture_psd):
-    store = SessionStore()
-    return store.get(store.open(fixture_psd))
-
-
-@pytest.fixture
 def wide_session(wide_psb):
     store = SessionStore()
     return store.get(store.open(wide_psb))
