@@ -72,6 +72,16 @@ interface PreviewCanvasProps {
 /**
  * 엔진에 낼 렌더 한 건. 효과 밖(앞선 렌더가 끝나는 자리)에서도 그대로 낼 수
  * 있도록, 렌더 효과의 본문이 화면 상태에서 읽던 것만 통째로 담아둔다.
+ *
+ * dispatch는 이 스펙에 없는 것도 넷 더 읽는다: cache, onSessionRefreshed,
+ * onError, onRenderingChange. 밀려 있던 스펙은 그것을 만든 효과 세대가 아니라
+ * *원래* 렌더를 낸 효과 세대의 클로저 안에서 나가므로(finally가 dispatch를
+ * 다시 부르는 자리), 이 넷은 스펙에 없어도 안전하려면 각각 ref이거나 빈
+ * 의존성 useCallback이어야 한다 — 어느 세대의 클로저에서 읽든 같은 값이어야
+ * 하기 때문이다. 지금은 cache가 App의 ref(previewCacheRef.current)를 그대로
+ * 받고, 나머지 셋이 빈 의존성 useCallback이라 성립한다. 이 중 하나라도
+ * 깨지면(예: cache가 state가 되거나 onError에 의존성이 붙으면) 밀린 dispatch가
+ * 옛 캐시나 옛 콜백을 tsc도, 테스트도 잡지 못한 채 조용히 계속 쓰게 된다.
  */
 interface RenderSpec {
   path: string;
@@ -141,11 +151,13 @@ export function PreviewCanvas({
 
   const requestIdRef = useRef(0);
   /**
-   * 지금 엔진에 걸려 있는 렌더 수. 정리 함수는 아직 안 터진 디바운스 타이머만
-   * 끊으므로, 이미 시작된 렌더 위로 다음 렌더가 겹칠 수 있다. 그때 먼저 끝난
-   * 쪽이 곧바로 "안 바쁨"을 알리면, 뒤엣것이 도는 동안 미리보기 준비 큐가
-   * 비켜서기를 멈추고 파일을 연다 — onRenderingChange가 막으려던 세션 경합이
-   * 그대로 돌아온다. 그래서 하나라도 남아 있으면 바쁜 것으로 본다.
+   * 지금 엔진에 걸려 있는 렌더 수. 렌더는 한 번에 하나만 나가므로 두 렌더가
+   * 겹치는 일은 이제 구조적으로 일어나지 않는다 — 그런데도 굳이 세는 이유는
+   * finally(아래, dispatch 안)의 순서 때문이다. 밀려 있던 스펙을 dispatch로 낸 *다음에*
+   * 이 값을 내리므로, 인계되는 그 순간에도 값이 0을 거치지 않고 1 → 2 → 1로
+   * 지나간다. 그래서 "안 바쁨" 신호에 틈이 생기지 않고, 그 틈을 타고 미리보기
+   * 준비 큐(App.tsx)가 끼어드는 일도 없다. onRenderingChange(false)는 그래서
+   * 엔진이 정말로 빈 순간에만 나간다.
    *
    * requestIdRef로 대신할 수 없다. 그 값은 렌더가 걸리지 않는 경로(빈 집합,
    * 캐시 적중)에서도 올라가므로, 그걸 신호로 삼으면 진행 중인 렌더가 자기

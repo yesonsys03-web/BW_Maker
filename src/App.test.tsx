@@ -53,6 +53,8 @@ vi.mock("@tauri-apps/api/webview", () => ({
 
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import App from "./App";
+import { PreviewCanvas } from "./components/PreviewCanvas";
+import { PreviewCache } from "./lib/previewCache";
 
 /** 테스트가 원하는 시점에 풀어주는 약속. 큐를 한 걸음씩 몰기 위한 것. */
 function deferred<T>() {
@@ -105,7 +107,7 @@ function treeOf(ids: number[]) {
     visible: true,
     opacity: 255,
     blendMode: "normal",
-    bbox: [0, 0, 10, 10],
+    bbox: [0, 0, 10, 10] as [number, number, number, number],
     hasMask: false,
     hasPixels: true,
     path: [`line ${id}`],
@@ -385,4 +387,92 @@ test("thumbnails are requested only for the rows that are on screen", async () =
   await waitFor(() => expect(engine.renderThumbnails).toHaveBeenCalled());
   const asked = engine.renderThumbnails.mock.calls.flatMap((c) => c[1] as number[]);
   expect(asked).toEqual([2]);
+});
+
+/**
+ * PreviewCanvas의 렌더 효과(pendingRef 한 자리 latch)를 직접 붙잡고 흔든다. App
+ * 전체를 띄우는 위 테스트들과 달리, 여기서 확인하는 것은 두 큐의 조율이 아니라
+ * PreviewCanvas 하나가 스스로 지키는 불변식이다 — 그래서 최소한의 props로 컴포넌트
+ * 하나만 세우고 rerender로 "토글"을 흉내 낸다.
+ *
+ * includedIds=[1,2,3], previewHiddenIds=[1]로 시작한다: 하나를 미리 감춰서
+ * documentView([1,2,3] 전부 보임)를 벗어난 채로 열어야, 세는 엔진 호출이
+ * renderDocumentPreview가 아니라 renderPreview로 고정된다.
+ */
+function previewCanvasProps(overrides: { previewHiddenIds: number[]; onRenderingChange?: (busy: boolean) => void }) {
+  return {
+    sessionId: 1,
+    path: "/cuts/a.psd",
+    mtime: 1,
+    status: "open" as const,
+    tree: treeOf([1, 2, 3]),
+    includedIds: [1, 2, 3],
+    previewHiddenIds: overrides.previewHiddenIds,
+    soloIds: [] as number[],
+    lineColor: null,
+    paused: false,
+    cache: new PreviewCache(),
+    onRenderingChange: overrides.onRenderingChange ?? vi.fn(),
+    onSessionRefreshed: vi.fn(),
+    onError: vi.fn(),
+  };
+}
+
+test("a burst of toggles behind an in-flight render collapses to exactly one more dispatch", async () => {
+  const held: ReturnType<typeof deferred<{ pngPath: string }>>[] = [];
+  engine.renderPreview.mockImplementation(() => {
+    const d = deferred<{ pngPath: string }>();
+    held.push(d);
+    return d.promise;
+  });
+
+  const { rerender } = render(<PreviewCanvas {...previewCanvasProps({ previewHiddenIds: [1] })} />);
+
+  // 엔진이 비어 있었으므로 첫 렌더는 곧바로 나갔다. 이걸 붙잡아 둔다.
+  await waitFor(() => expect(held).toHaveLength(1));
+
+  // 렌더가 걸려 있는 동안 세 번 더 토글한다(매번 previewHiddenIds가 바뀌어 visibleKey가
+  // 달라지므로 렌더 효과가 다시 돈다). inFlightRef가 0이 아니므로 셋 다 pendingRef
+  // 자리만 갈아 끼워야 한다 — 새 렌더가 나가면 안 된다.
+  rerender(<PreviewCanvas {...previewCanvasProps({ previewHiddenIds: [1, 2] })} />);
+  rerender(<PreviewCanvas {...previewCanvasProps({ previewHiddenIds: [1, 3] })} />);
+  rerender(<PreviewCanvas {...previewCanvasProps({ previewHiddenIds: [2, 3] })} />);
+  expect(held).toHaveLength(1);
+
+  // 붙잡아둔 렌더를 풀어준다. finally가 밀려 있던 마지막 스펙 하나만 낸다.
+  held[0].resolve({ pngPath: "/tmp/p.png" });
+  await waitFor(() => expect(engine.renderPreview).toHaveBeenCalledTimes(2));
+
+  // 세 토글이 저마다 렌더를 걸었다면 넷이 됐을 것이다. 잠깐 더 기다려도 늘지 않는다.
+  await new Promise((r) => setTimeout(r, 20));
+  expect(engine.renderPreview).toHaveBeenCalledTimes(2);
+});
+
+test("the hand-off to a latched render never reports the engine idle", async () => {
+  const held: ReturnType<typeof deferred<{ pngPath: string }>>[] = [];
+  engine.renderPreview.mockImplementation(() => {
+    const d = deferred<{ pngPath: string }>();
+    held.push(d);
+    return d.promise;
+  });
+  const onRenderingChange = vi.fn();
+
+  const { rerender } = render(
+    <PreviewCanvas {...previewCanvasProps({ previewHiddenIds: [1], onRenderingChange })} />
+  );
+  await waitFor(() => expect(held).toHaveLength(1));
+
+  // 걸려 있는 동안 한 번 더 토글해 pendingRef에 다음 스펙을 걸어둔다.
+  rerender(<PreviewCanvas {...previewCanvasProps({ previewHiddenIds: [2], onRenderingChange })} />);
+  expect(held).toHaveLength(1);
+
+  // 붙잡아둔 렌더를 풀어준다. finally는 밀린 스펙을 dispatch(inFlightRef 1→2)한
+  // *다음에* 내리므로(2→1), 인계 도중 0을 거치지 않는다 — 두 번째 렌더도 이
+  // mock이 붙잡으므로, onRenderingChange(false)는 이 시점까지 한 번도 나갈 수
+  // 없다. finally의 순서가 뒤집히면(내리고 나서 dispatch) 그 사이에 0을 거치며
+  // false가 한 번 끼어든다.
+  held[0].resolve({ pngPath: "/tmp/p.png" });
+  await waitFor(() => expect(engine.renderPreview).toHaveBeenCalledTimes(2));
+
+  expect(onRenderingChange).not.toHaveBeenCalledWith(false);
 });
