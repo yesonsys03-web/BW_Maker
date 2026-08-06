@@ -364,6 +364,52 @@ def masked_psd(tmp_path):
     return str(path)
 
 
+#: 아래 픽스처가 도는 값들. 왜 이 셋인지는 픽스처 docstring에 적어 두었다.
+FADED_COLOR, FADED_OPACITY = 200, 90
+
+
+@pytest.fixture
+def faded_over_solid_psd(tmp_path):
+    """
+    불투명도가 있는 잎이 **다른 잎 위에** 얹히는 문서. 256x256에 값을 다 깐다.
+
+    _merge_rgba_fast가 _apply_source의 (shape - alpha) 항을 되살린 것이 정말
+    필요한지 가르는 픽스처다. 그 항을 지운 예전 식은 **대수적으로는 같다** —
+    (1-shape)*ab*cb + (shape-alpha)*ab*cb 가 (1-alpha)*ab*cb 이기 때문이다.
+    갈리는 것은 float32 반올림뿐이라, 픽셀 몇 개가 절삭 경계에 정확히 걸려야
+    테스트가 무언가를 지킨다. masked_psd로는 그것을 못 한다 — 거기서 불투명도가
+    다른 한 장이 맨 아래라 alpha_b가 0이고, 그러면 그 항이 어차피 사라진다.
+
+    그래서 값을 다 깐다. 아래 'solid'는 행마다 색이 0..255로, 위 'fade'는 열마다
+    마스크가 0..255로 간다 — (배경색, 마스크) 65,536쌍 전부다. 그 위에서 색 200,
+    불투명도 90을 고른 이유는 실측이다: 두 식의 결과가 절삭 뒤에 갈리는 픽셀이
+    80개로 (색, 불투명도) 후보 중 가장 많았다(0/17에서는 17개, 255/128에서는 0개).
+    """
+    ramp = np.arange(256, dtype=np.uint8)
+    solid_px = np.tile(ramp.reshape(256, 1), (1, 256))
+    fade_px = np.full((256, 256), FADED_COLOR, np.uint8)
+    opaque = np.full((256, 256), 255, np.uint8)
+    fade = nested_layers.Image(
+        name="fade", channels={0: fade_px, 1: fade_px, 2: fade_px, -1: opaque},
+        top=0, left=0, opacity=FADED_OPACITY, visible=True,
+        blend_mode=enums.BlendMode.normal)
+    solid = nested_layers.Image(
+        name="solid", channels={0: solid_px, 1: solid_px, 2: solid_px, -1: opaque},
+        top=0, left=0, opacity=255, visible=True,
+        blend_mode=enums.BlendMode.normal)
+
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd(
+        [fade, solid], color_mode=enums.ColorMode.rgb, size=(256, 256))
+    attach_mask(psd, "fade", np.tile(ramp.reshape(1, 256), (256, 1)),
+                left=0, top=0, default_color=0)
+
+    path = tmp_path / "faded_over_solid.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
 @pytest.fixture
 def blend_group_psd(tmp_path):
     """

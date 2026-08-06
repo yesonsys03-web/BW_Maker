@@ -187,6 +187,133 @@ def test_merge_rgba_fast_matches_slow_on_overlapping_alpha(alpha_overlap_psd, mo
     )
 
 
+def test_merge_rgba_fast_path_takes_masked_and_faded_layers(masked_psd, monkeypatch):
+    """
+    마스크와 불투명도가 붙은 잎끼리의 병합도 빠른 경로를 타야 한다.
+
+    실측 2026-08-06, 납품 25장의 병합 55건 인구조사에서 잎 마스크가 가장 큰
+    가드였다(레이어 19장이 332.3 Mpx를 예전 경로에 묶고 있었다). 풀고 나니
+    빠른 경로가 32건 → 36건이 되고 풀린 4건이 3~6배 빨라졌다.
+    """
+    s = _session(masked_psd)
+    layers = [l for l in s["layers_by_id"].values() if not l.is_group()]
+    assert len(layers) == 4
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    calls = _spy_on_composite(s["psd"])
+    merge_rgba(s["psd"], layers)
+    assert calls == [], "마스크·불투명도만으로 예전 경로에 떨어졌다"
+
+
+def test_merge_rgba_fast_matches_slow_on_masked_and_faded_layers(masked_psd, monkeypatch):
+    """
+    마스크·불투명도가 낀 병합도 psd.composite 경로와 **바이트로** 같아야 한다.
+
+    네 장이 같은 자리에 겹쳐 있어(0,0,32,24) 배경이 빈 경우와 이미 쌓인 경우를
+    한 번에 지나간다. 이 조합이 shape != alpha를 만드는 전부다 — 마스크 bbox가
+    레이어보다 좁고 배경이 255인 것(bg255_mask), 마스크 밀도(dense_mask),
+    opacity 128(half_opacity_mask).
+
+    가드를 넓힌 방향이라 ±1도 실패다. 다만 이 픽스처는 (shape - alpha) 항을
+    지운 예전 식으로도 통과한다 — 불투명도가 다른 한 장이 맨 아래라 alpha_b가
+    0이어서 그 항이 사라지기 때문이다. 그것을 가르는 것은
+    faded_over_solid_psd 쪽이다.
+    """
+    s = _session(masked_psd)
+    layers = [l for l in s["layers_by_id"].values() if not l.is_group()]
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert fast.shape == slow.shape
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_merge_rgba_fast_matches_slow_for_a_masked_layer_inside_a_group(
+        masked_clip_psd, monkeypatch):
+    """
+    마스크 달린 잎이 그룹 안에 있고 거기에 클리핑 레이어까지 붙은 경우.
+
+    빠른 경로는 잎을 평평하게 그리는데 psd.composite는 그룹마다 하위 Compositor를
+    세운다(_get_group, 715행). 그 하위 Compositor는 isolated=True라 _alpha_0가 0이고,
+    그래서 그룹이 도관처럼 투명해지는 것이 빠른 경로가 성립하는 근거다 — 마스크가
+    붙어도 그대로인지 여기서 확인한다.
+    """
+    s = _session(masked_clip_psd)
+    base = next(l for l in s["layers_by_id"].values() if l.name == "base")
+    assert base.mask is not None and base.has_clip_layers()
+    layers = [base]
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    calls = _spy_on_composite(s["psd"])
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert calls == [], "그룹 안의 마스크 달린 잎이 예전 경로로 떨어졌다"
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_merge_rgba_fast_matches_slow_when_a_faded_leaf_sits_on_another(
+        faded_over_solid_psd, monkeypatch):
+    """
+    불투명도가 있는 잎이 다른 잎 **위에** 얹히는 경우. 여기가 shape != alpha의 값이
+    실제로 결과를 바꾸는 유일한 자리다.
+
+    _apply_source의 (shape - alpha) * alpha_b * color_b 항은 alpha_b가 0이면
+    사라진다. 그래서 병합의 첫 장에서는 옛 식과 새 식이 같고, 이미 무언가 쌓인
+    위에 반투명한 장이 올 때만 갈린다. 갈리는 크기는 float32 반올림 한 자리뿐이라
+    (두 식은 대수적으로 같다) 픽스처가 절삭 경계를 실제로 밟아야 한다 —
+    faded_over_solid_psd가 (배경색, 마스크) 65,536쌍을 다 깔아 80픽셀을 밟는다.
+    """
+    s = _session(faded_over_solid_psd)
+    layers = [l for l in s["layers_by_id"].values() if not l.is_group()]
+    assert {l.name for l in layers} == {"solid", "fade"}
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    calls = _spy_on_composite(s["psd"])
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert calls == [], "불투명도만으로 예전 경로에 떨어졌다"
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_mask_and_opacity_are_exempted_for_leaves_only(masked_psd):
+    """
+    마스크·불투명도 면제는 병합 대상 잎에만 준다. 조상 규율은 예전 그대로다.
+
+    그룹의 마스크·불투명도는 자식마다 따로 걸리는 값이 아니라 자식들을 다 합성한
+    결과 한 장에 걸린다(_get_group, 715행). 겹치는 자식이 있으면 두 순서의 결과가
+    다르므로 잎에 준 면제를 조상으로 옮길 수 없다. _fast_mergeable이 두 호출을
+    구분해서 하는지를 여기서 못박는다.
+    """
+    psd = PSDImage.open(masked_psd)
+    faded = next(l for l in psd.descendants() if l.name == "half_opacity_mask")
+    assert faded.mask is not None and faded.opacity == 128
+    assert render_mod._plain(faded, allow_mask_opacity=True), \
+        "잎은 마스크·불투명도가 있어도 통과해야 한다"
+    assert not render_mod._plain(faded, allow_passthrough=True), \
+        "조상 자리에서는 같은 레이어가 걸려야 한다"
+
+
 def test_merge_rgba_fast_path_ignores_clip_layers_outside_the_merge(clip_layer_psd, monkeypatch):
     """
     병합 대상에 클리핑 레이어가 붙어 있어도 빠른 경로를 쓴다.

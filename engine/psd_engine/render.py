@@ -187,6 +187,53 @@ def _mask_fast_ok(layer):
     return True
 
 
+def _mask_shape(layer, viewport):
+    """
+    _get_mask(621행)의 **사용자 마스크** 부분을 그대로 옮긴다. 마스크가 없거나 비면 1.0.
+
+    벡터 마스크 가지는 옮기지 않는다 — 값싼 경로들은 벡터 마스크가 걸린 레이어를
+    아예 받지 않기 때문이다(_mask_fast_ok, _plain 둘 다 막는다).
+
+    real mask를 읽지 않는 것(real_mask=False)이 두 호출자 모두에게 맞다.
+    merge_rgba는 composite를 force=True로 부르고 _get_mask가 `real_mask=not force`를
+    쓰므로 그쪽도 사용자 마스크를 읽는다. _extract_rgba_masked 쪽은 force=False라
+    다를 수 있어 _mask_fast_ok가 has_real()을 아예 막아 둔다.
+
+    호출자가 `layer.mask is not None and not layer.mask.disabled`를 이미 확인했다고
+    본다 — 꺼진 마스크에 이것을 걸면 composite가 걸지 않는 마스크를 거는 셈이 된다.
+    """
+    from psd_tools.composite.composite import paste
+
+    mask_arr = layer.numpy("mask", real_mask=False)
+    shape = 1.0
+    if mask_arr is not None:
+        shape = paste(viewport, layer.mask.bbox, mask_arr,
+                      layer.mask.background_color / 255.0)
+    if layer.mask.parameters:
+        density = layer.mask.parameters.user_mask_density
+        if density is None:
+            density = layer.mask.parameters.vector_mask_density
+        if density is None:
+            density = 255
+        density = float(density) / 255.0
+        shape = density * shape + (1 - density)
+    return shape
+
+
+def _scale(arr, factor):
+    """
+    factor가 정확히 1.0인 float면 곱을 건너뛰고 arr을 **그대로** 돌려준다.
+
+    1.0 곱은 float32에서 무손실이라 값이 같고, bbox 크기 임시 배열 하나를 아낀다.
+    그리고 같은 객체를 돌려주는 것이 _merge_rgba_fast에서 중요하다 — 마스크도
+    불투명도도 없는 레이어는 shape_s와 alpha_s가 같은 배열이 되어 (shape_s -
+    alpha_s)가 정확히 0이 되고, 예전 식과 비트까지 같은 결과가 나온다.
+    """
+    if isinstance(factor, float) and factor == 1.0:
+        return arr
+    return arr * factor
+
+
 def _extract_rgba_masked(layer):
     """
     마스크 달린 레이어를 layer.composite 없이 읽는다. 가드를 못 넘으면 None.
@@ -208,7 +255,6 @@ def _extract_rgba_masked(layer):
     대수적으로 더 줄이지 않는다. _merge_rgba_fast의 docstring이 이유를 적어 두었다.
     """
     from psd_tools.composite import utils
-    from psd_tools.composite.composite import paste
     from psd_tools.constants import Tag
 
     if not _mask_fast_ok(layer):
@@ -221,20 +267,8 @@ def _extract_rgba_masked(layer):
     if shape is None:
         shape = np.ones(color.shape[:2] + (1,), dtype=np.float32)
 
-    # _get_mask(621행)를 그대로 옮긴다. 뷰포트가 레이어 bbox인 경우다.
-    mask_arr = layer.numpy("mask", real_mask=False)
-    shape_mask = 1.0
-    if mask_arr is not None:
-        shape_mask = paste(layer.bbox, layer.mask.bbox, mask_arr,
-                           layer.mask.background_color / 255.0)
-    if layer.mask.parameters:
-        density = layer.mask.parameters.user_mask_density
-        if density is None:
-            density = layer.mask.parameters.vector_mask_density
-        if density is None:
-            density = 255
-        density = float(density) / 255.0
-        shape_mask = density * shape_mask + (1 - density)
+    # _get_mask(621행). 뷰포트가 레이어 bbox인 경우다.
+    shape_mask = _mask_shape(layer, layer.bbox)
 
     # _get_const(675행).
     shape_const = layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) / 255.0
@@ -367,7 +401,7 @@ def _composite_order(psd):
     return order
 
 
-def _plain(layer, allow_passthrough=False):
+def _plain(layer, allow_passthrough=False, allow_mask_opacity=False):
     """
     psd.composite가 이 레이어에 하는 일 중 빠른 경로가 재현하지 않는 것이 하나라도
     있으면 False. 하나라도 걸리면 예전 경로로 떨어진다 — 빠르게 하려다 그림을
@@ -375,6 +409,19 @@ def _plain(layer, allow_passthrough=False):
 
     판단 근거는 psd_tools/composite/composite.py의 Compositor.apply와 _get_mask /
     _get_const가 실제로 읽는 값들이다. 그쪽이 바뀌면 여기도 같이 봐야 한다.
+
+    allow_mask_opacity는 **병합 대상 잎에만** 준다. 마스크·opacity·fill opacity는
+    _merge_rgba_fast가 apply(348~372행)의 식을 그대로 옮겨 재현하기 때문이다.
+
+    그룹(조상)에는 주지 않는다. 그룹의 그 값들은 자식마다 따로 걸리는 값이 아니라
+    **자식들을 다 합성한 결과 한 장에** 걸리고, 그 결과를 만드는 방법이 블렌드에
+    따라 또 갈린다. normal 그룹은 자식을 별도 Compositor에 모은 뒤(_get_group,
+    715행) 거기에 마스크를 건다 — 겹치는 자식이 있으면 자식마다 거는 것과 결과가
+    다르다. pass-through 그룹은 아예 다른 식으로 간다(_apply_passthrough_source,
+    383행: color * mask + (1 - mask) * color_support, 여기서 color_support가
+    _shape_g 이력을 끌고 온다). 지금 빠른 경로가 pass-through 그룹을 그냥 통과
+    시키는 것은 마스크가 없을 때 그 식이 color 그대로가 되기 때문이고, 마스크가
+    붙으면 그 근거가 사라진다.
     """
     from psd_tools.composite import utils
     from psd_tools.constants import BlendMode, Tag
@@ -384,9 +431,17 @@ def _plain(layer, allow_passthrough=False):
     )
     if not blend_ok:
         return False
-    if layer.opacity != 255:
-        return False
-    if layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) != 255:
+    if not allow_mask_opacity:
+        if layer.opacity != 255:
+            return False
+        if layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) != 255:
+            return False
+    # knockout은 _apply_source의 식을 통째로 바꾼다(429~437행): alpha_g가 union이
+    # 아니게 되고 backdrop이 _color_0/_alpha_0로 바뀐다. shape == alpha였을 때는
+    # 그 차이가 대부분 상쇄되어 여기 없이도 버텼지만, 마스크나 opacity가 들어오면
+    # shape != alpha가 되어 (shape - alpha) * alpha_0 * color_0 항이 살아난다.
+    # _mask_fast_ok가 같은 이유로 이미 막고 있다. 납품 25장에는 하나도 없다.
+    if layer.tagged_blocks.get_data(Tag.KNOCKOUT_SETTING, 0):
         return False
     # psd.composite는 본 패스에서 클리핑 레이어를 통째로 건너뛴다(apply의
     # `if not clip_compositing and layer.clipping: return`). 빠른 경로가 그것을
@@ -404,8 +459,11 @@ def _plain(layer, allow_passthrough=False):
     # 탄 병합이 하나도 없었다(1.4배에 그쳤다).
     if layer.clipping:
         return False
-    if layer.mask is not None and not layer.mask.disabled:
+    if layer.mask is not None and not layer.mask.disabled and not allow_mask_opacity:
         return False
+    # 벡터 마스크는 통과시키지 않는다. _get_mask의 두 번째 가지(645행)는 force면
+    # 무조건 도형을 그리는데(merge_rgba가 force=True다) _mask_shape은 그 가지를
+    # 옮기지 않았다.
     if layer.vector_mask is not None and not layer.vector_mask.disabled:
         return False
     if any(getattr(e, "enabled", True) for e in layer.effects):
@@ -420,13 +478,32 @@ def _plain(layer, allow_passthrough=False):
 
 
 def _fast_mergeable(psd, layers):
-    """레이어들과 그 조상 그룹이 전부 '평범'하면 빠른 경로를 쓸 수 있다."""
+    """
+    레이어들과 그 조상 그룹이 전부 '평범'하면 빠른 경로를 쓸 수 있다.
+
+    잎에는 마스크·불투명도를 허용한다(_plain의 allow_mask_opacity). 실측
+    2026-08-06, 납품 25장의 병합 55건 인구조사:
+
+        빠른 경로 32건(58%) → 36건(65%)   빠른 361.3 → 397.6 Mpx
+
+    풀린 4건은 3~6배 빨라졌다(그 파일들의 픽셀 시간 합 32.3초 → 7.7초). 그중
+    가장 큰 것이 VtINTVoxOffice006의 'BG' 9장 11.6초 → 1.8초다.
+
+    **이것으로 풀리지 않는 쪽을 적어 둔다.** 남은 느린 405.2 Mpx의 대부분은 잎이
+    아니라 **조상 그룹**이 막고 있다(ancestor:mask 132.3 Mpx, ancestor:opacity
+    205.2 Mpx). 프로파일한 파일 VtINTVoxOffice069의 'BG'(38장 123.8초)와 'OL'
+    (11장 68.4초)이 정확히 그 경우라 이 변경으로 1초도 줄지 않는다 — 'OL'은 잎이
+    하나도 걸리지 않고 pass-through 그룹 'light2'의 마스크 하나에 걸려 있으며,
+    'BG'는 거기에 잎 'LINE'의 OuterGlow가 더해진다. 그쪽을 풀려면 그룹의 자식을
+    별도 버퍼에 먼저 합성하고 _apply_passthrough_source(383행)까지 옮겨야 한다 —
+    가드를 넓히는 일이 아니라 다른 크기의 일이다.
+    """
     from psd_tools.constants import ColorMode
 
     if psd.color_mode != ColorMode.RGB:
         return False
     for layer in layers:
-        if layer.is_group() or not _plain(layer):
+        if layer.is_group() or not _plain(layer, allow_mask_opacity=True):
             return False
         cur = layer.parent
         while cur is not None and cur is not psd:
@@ -445,13 +522,21 @@ def _merge_rgba_fast(psd, layers, viewport):
     트림 한 장도 병합 그룹의 합집합 뷰포트(실측 54Mpx)로 늘린 뒤 float32로 열댓
     번 훑는다. 여기서는 각 레이어의 bbox 안에서만 같은 계산을 한다.
 
-    식은 Compositor._apply_source의 normal 블렌드 경우를 그대로 옮긴 것이다.
-    대수적으로 줄이지 않는다 — float32에서 (1-a)*c + a*c 는 c 와 같은 값이
-    아니고, 그 마지막 비트가 절삭 경계에 걸리면 픽셀 값이 1 달라진다.
+    식은 Compositor.apply(348~372행)와 _apply_source의 normal·knockout 아님 경우를
+    그대로 옮긴 것이다. 대수적으로 줄이지 않는다 — float32에서 (1-a)*c + a*c 는 c 와
+    같은 값이 아니고, 그 마지막 비트가 절삭 경계에 걸리면 픽셀 값이 1 달라진다.
+
+    **shape와 alpha를 나눠 들고 간다.** 예전에는 둘이 같다고 보고 (shape - alpha)
+    항을 지웠는데, 마스크나 opacity가 붙으면 그 둘이 갈라진다. apply가 하는 일은
+    이렇다 — _get_object가 alpha를 shape의 **복사본**으로 먼저 떠 놓고(alpha =
+    shape * 1.0), 그 뒤에 shape에만 마스크를 곱하고(shape *= shape_mask) alpha에는
+    마스크와 불투명도를 함께 곱한다(alpha *= shape_mask * opacity_mask *
+    opacity_const). 그래서 alpha 쪽 마스크는 곱해진 shape가 아니라 원래 shape에
+    걸린다. 마지막으로 둘 다 fill opacity(shape_const)를 곱해 _apply_source로 간다.
     """
     from psd_tools.api import pil_io
     from psd_tools.composite import utils
-    from psd_tools.constants import Resource
+    from psd_tools.constants import Resource, Tag
 
     left, top, right, bottom = viewport
     # psd.composite(color=1.0, alpha=0.0)의 시작 상태와 같다.
@@ -469,6 +554,13 @@ def _merge_rgba_fast(psd, layers, viewport):
         shape = layer.numpy("shape")
         if shape is None:
             shape = np.ones(src.shape[:2] + (1,), dtype=np.float32)
+        # _get_mask(621행). composite는 마스크를 병합 뷰포트 전체에 붙이지만 여기서는
+        # 레이어 bbox에만 붙인다 — bbox 밖은 _get_object의 shape가 0이라(paste의
+        # 기본 배경) shape_s도 alpha_s도 0이고, 그 자리에서 apply는 색도 알파도
+        # 바꾸지 않는다. 마스크 bbox가 레이어보다 커도 그 바깥은 버려도 되는 이유다.
+        shape_mask = 1.0
+        if layer.mask is not None and not layer.mask.disabled:
+            shape_mask = _mask_shape(layer, bbox)
         h, w = src.shape[:2]
         y0, x0 = bbox[1] - top, bbox[0] - left
         # merge_rgba가 뷰포트를 캔버스로 자른 경우에는 레이어가 뷰포트 밖으로
@@ -481,19 +573,32 @@ def _merge_rgba_fast(psd, layers, viewport):
             continue
         if (cy0, cx0, cy1, cx1) != (0, 0, h, w):
             src, shape = src[cy0:cy1, cx0:cx1], shape[cy0:cy1, cx0:cx1]
+            if isinstance(shape_mask, np.ndarray):
+                shape_mask = shape_mask[cy0:cy1, cx0:cx1]
             h, w = src.shape[:2]
             y0, x0 = y0 + cy0, x0 + cx0
         box = (slice(y0, y0 + h), slice(x0, x0 + w))
 
-        alpha_s = shape          # 평범한 레이어는 shape == alpha
+        # _get_const(675행). 그리고 apply(348~352행) — _get_mask의 opacity는 언제나
+        # 1.0이라 상수로 적는다. 곱하는 순서를 그대로 지킨다.
+        shape_const = layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) / 255.0
+        opacity_const = layer.opacity / 255.0
+        mask = _scale(_scale(shape_mask, 1.0), opacity_const)
+        shape_s = _scale(_scale(shape, shape_mask), shape_const)
+        # 마스크만 있고 불투명도가 255면 mask가 shape_mask 그대로다 — 그때 alpha_s는
+        # shape_s와 값이 같으므로 배열 하나를 더 만들지 않는다. 마스크도 불투명도도
+        # 없으면 둘 다 shape 그 자체라 (shape_s - alpha_s)가 정확히 0이 되고, 예전
+        # 식과 비트까지 같은 결과가 나온다.
+        alpha_s = shape_s if mask is shape_mask else \
+            _scale(_scale(shape, mask), shape_const)
         color_b = color[box]
         alpha_b = alpha_g[box]
         alpha_new = utils.union(alpha_b, alpha_s)
-        color_t = (alpha_s - alpha_s) * alpha_b * color_b + alpha_s * (
+        color_t = (shape_s - alpha_s) * alpha_b * color_b + alpha_s * (
             (1.0 - alpha_b) * src + alpha_b * src
         )
         color[box] = utils.clip(
-            utils.divide((1.0 - alpha_s) * alpha_b * color_b + color_t, alpha_new)
+            utils.divide((1.0 - shape_s) * alpha_b * color_b + color_t, alpha_new)
         )
         alpha_g[box] = alpha_new
 
