@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pytest
 from psd_tools import PSDImage
@@ -361,3 +363,28 @@ def test_split_output_path_inherits_a_psb_extension():
     # .psb 원본이 레이어마다 .psd로 쪼개지면 안쪽 버전과 확장자가 어긋난다.
     assert Path(split_output_path("/tmp/a_LINE.psb", "BG")).name == "a_LINE_BG.psb"
     assert Path(split_output_path("/tmp/a_LINE.psd", "BG")).name == "a_LINE_BG.psd"
+
+
+def test_export_refuses_an_overlong_filename(session, tmp_path):
+    entries = _plan(session, [3, 4, 5], [])
+    out = tmp_path / ("가" * 300 + ".psd")
+    with pytest.raises(ValueError, match="파일 이름이 너무 깁니다"):
+        export_psd(session, entries, out)
+    # pathlib의 Path.exists()는 ENAMETOOLONG을 그대로 다시 던진다(macOS/Linux
+    # 공통) — "없다"와 "이름 자체가 파일시스템 한계를 넘는다"를 구분하지 않는
+    # os.path.exists로 확인한다. 프로덕션 코드가 os.path.exists(long_path(...))를
+    # 쓰는 것과 같은 이유다.
+    assert not os.path.exists(str(out))
+
+
+def test_split_export_checks_every_name_before_writing_any(session, tmp_path):
+    # 세 엔트리 중 하나만 이름이 길어도 한 장도 나가면 안 된다.
+    entries = _plan(session, [3, 4, 5], [])
+    entries[1]["finalName"] = "나" * 300
+    out = tmp_path / "X_LINE.psd"
+    # tmp_path는 session(→fixture_psd)이 이미 fixture.psd를 써 둔 디렉터리이므로
+    # "비어 있다"가 아니라 "이 호출로 새로 생긴 파일이 없다"를 본다.
+    before = set(tmp_path.iterdir())
+    with pytest.raises(ValueError, match="파일 이름이 너무 깁니다"):
+        export_psd_split(session, entries, out)
+    assert set(tmp_path.iterdir()) == before

@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 
 from .patches import apply_pytoshop_patches
+from .paths import ensure_writable_path, long_path
 from .render import (PSD_MAX_DIMENSION, apply_line_color, extract_rgba, merge_rgba,
                      parse_line_color)
 
@@ -35,7 +36,7 @@ def _output_version(output_path, width, height):
     return enums.Version.version_1
 
 
-def _entry_pixels(session, entry, line_rgb=None):
+def entry_pixels(session, entry, line_rgb=None):
     if len(entry["sourceIds"]) == 1:
         layer = session["layers_by_id"][entry["sourceIds"][0]]
         rgba, left, top = extract_rgba(layer), layer.left, layer.top
@@ -59,7 +60,8 @@ def export_psd(session, entries, output_path, embed_preview=True,
     from pytoshop.user import nested_layers
 
     output_path = str(output_path)
-    if os.path.exists(output_path) and not overwrite:
+    ensure_writable_path(output_path)
+    if os.path.exists(long_path(output_path)) and not overwrite:
         raise FileExistsError(f"output already exists: {output_path}")
 
     psd = session["psd"]
@@ -70,7 +72,7 @@ def export_psd(session, entries, output_path, embed_preview=True,
     canvas = Image.new("RGBA", (W, H), (255, 255, 255, 255)) if embed_preview else None
 
     for i, entry in enumerate(entries):
-        rgba, left, top = _entry_pixels(session, entry, line_rgb)
+        rgba, left, top = entry_pixels(session, entry, line_rgb)
         channels = {c: np.ascontiguousarray(rgba[..., c]) for c in range(3)}
         channels[-1] = np.ascontiguousarray(rgba[..., 3])
         images_bottom_to_top.append(nested_layers.Image(
@@ -96,7 +98,7 @@ def export_psd(session, entries, output_path, embed_preview=True,
         )
     if progress:
         progress("write", total - 1, total)
-    with open(output_path, "wb") as f:
+    with open(long_path(output_path), "wb") as f:
         out.write(f)
     if progress:
         progress("done", total, total)
@@ -151,8 +153,10 @@ def export_psd_split(session, entries, output_path, embed_preview=True,
         raise ValueError("no entries to export")
 
     targets = [(e, split_output_path(output_path, e["finalName"])) for e in entries]
+    for _, p in targets:
+        ensure_writable_path(p)
     if not overwrite:
-        existing = [p for _, p in targets if os.path.exists(p)]
+        existing = [p for _, p in targets if os.path.exists(long_path(p))]
         if existing:
             raise FileExistsError("output already exists: " + ", ".join(existing))
 
