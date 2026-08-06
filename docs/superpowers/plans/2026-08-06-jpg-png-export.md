@@ -1198,33 +1198,45 @@ from .verify_raster import verify_raster
             if progress:
                 progress(str(path), stage, current, total)
 
-        raster = fmt in ("png", "jpg")
-        split = export_raster_split if raster else export_psd_split
-        single = export_raster if raster else export_psd
-        checker = verify_raster if raster else verify_export
-        kw = {"line_color": preset.get("lineColor")}
-        fmt_kw = {"fmt": fmt} if raster else {"embed_preview": preset.get("embedPreview", True)}
+        line_color = preset.get("lineColor")
+        split = preset.get("splitLayers")
 
-        if preset.get("splitLayers"):
-            result = split(s, entries, out_path, overwrite=overwrite, progress=cb,
-                           **fmt_kw, **kw)
+        if fmt in ("png", "jpg"):
+            if split:
+                result = export_raster_split(s, entries, out_path, fmt,
+                                             overwrite=overwrite, progress=cb,
+                                             line_color=line_color)
+                for entry, out in zip(entries, result["outputs"]):
+                    out["verification"] = verify_raster(s, [entry], out["outputPath"],
+                                                        fmt, line_color=line_color)
+                verification = {"ok": all(o["verification"]["ok"] for o in result["outputs"])}
+                result["outputPath"] = str(out_dir)
+            else:
+                result = export_raster(s, entries, out_path, fmt, overwrite=overwrite,
+                                       progress=cb, line_color=line_color)
+                verification = verify_raster(s, entries, out_path, fmt,
+                                             line_color=line_color)
+        elif split:
+            result = export_psd_split(s, entries, out_path,
+                                      embed_preview=preset.get("embedPreview", True),
+                                      overwrite=overwrite, progress=cb,
+                                      line_color=line_color)
             for entry, out in zip(entries, result["outputs"]):
-                out["verification"] = (
-                    checker(s, [entry], out["outputPath"], fmt, **kw) if raster
-                    else checker(s, [entry], out["outputPath"], **kw)
-                )
+                out["verification"] = verify_export(s, [entry], out["outputPath"],
+                                                    line_color=line_color)
             verification = {"ok": all(o["verification"]["ok"] for o in result["outputs"])}
             result["outputPath"] = str(out_dir)
         else:
-            result = single(s, entries, out_path, overwrite=overwrite, progress=cb,
-                            **fmt_kw, **kw)
-            verification = (
-                checker(s, entries, out_path, fmt, **kw) if raster
-                else checker(s, entries, out_path, **kw)
-            )
+            result = export_psd(s, entries, out_path,
+                                embed_preview=preset.get("embedPreview", True),
+                                overwrite=overwrite, progress=cb, line_color=line_color)
+            verification = verify_export(s, entries, out_path, line_color=line_color)
 ```
 
-`export_raster`/`export_raster_split`의 `fmt`는 세 번째 위치 인자이므로 키워드로 넘기려면 시그니처가 `(session, entries, output_path, fmt, ...)`여야 한다 — Task 5·6이 그렇게 정의했으므로 `fmt=`로 넘어간다.
+네 갈래를 그대로 편다. `checker = verify_raster if raster else verify_export` 식으로 함수를
+변수에 담는 것은 호출 인자가 어차피 갈라지므로(`fmt`가 있고 없고) 짧아지지도 않고 읽기만
+어려워진다. PSD 두 갈래는 지금 코드와 글자 그대로 같아야 한다 — 이 태스크는 앞에 래스터
+갈래를 더하는 것이지 기존 동작을 건드리는 것이 아니다.
 
 - [ ] **Step 4: 통과를 확인한다**
 
