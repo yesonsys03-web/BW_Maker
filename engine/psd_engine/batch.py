@@ -46,7 +46,17 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
                 for entry, out in zip(entries, result["outputs"]):
                     out["verification"] = verify_raster(s, [entry], out["outputPath"],
                                                         fmt, line_color=line_color)
-                verification = {"ok": all(o["verification"]["ok"] for o in result["outputs"])}
+                # rpc.py의 raster split 검증과 같은 모양(ok/canvasOk/layerCountOk/
+                # expectedLayers/actualLayers/layers)으로 맞춘다 — verifyReport.ts가
+                # v.layers를 읽으므로, ok 하나뿐인 dict는 실패 행을 펼치는 순간 죽는다.
+                verification = {
+                    "ok": all(o["verification"]["ok"] for o in result["outputs"]),
+                    "canvasOk": all(o["verification"]["canvasOk"] for o in result["outputs"]),
+                    "layerCountOk": True,
+                    "expectedLayers": len(result["outputs"]),
+                    "actualLayers": len(result["outputs"]),
+                    "layers": [l for o in result["outputs"] for l in o["verification"]["layers"]],
+                }
                 result["outputPath"] = str(out_dir)
             else:
                 result = export_raster(s, entries, out_path, fmt, overwrite=overwrite,
@@ -61,7 +71,16 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
             for entry, out in zip(entries, result["outputs"]):
                 out["verification"] = verify_export(s, [entry], out["outputPath"],
                                                     line_color=line_color)
-            verification = {"ok": all(o["verification"]["ok"] for o in result["outputs"])}
+            # rpc.py의 psd split 검증과 같은 모양으로 맞춘다 — 위 raster split과
+            # 같은 이유(verifyReport.ts가 v.layers를 읽는다).
+            verification = {
+                "ok": all(o["verification"]["ok"] for o in result["outputs"]),
+                "canvasOk": all(o["verification"]["canvasOk"] for o in result["outputs"]),
+                "layerCountOk": all(o["verification"]["layerCountOk"] for o in result["outputs"]),
+                "expectedLayers": len(entries),
+                "actualLayers": sum(o["verification"]["actualLayers"] for o in result["outputs"]),
+                "layers": [l for o in result["outputs"] for l in o["verification"]["layers"]],
+            }
             result["outputPath"] = str(out_dir)
         else:
             result = export_psd(s, entries, out_path,

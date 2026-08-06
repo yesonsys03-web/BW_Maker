@@ -96,3 +96,41 @@ def test_batch_defaults_to_psd_when_the_preset_has_no_format(fixture_psd, tmp_pa
     assert "outputFormat" not in PRESET
     r = run_batch([str(fixture_psd)], PRESET, output_dir=str(tmp_path))
     assert r["results"][0]["outputPath"].endswith(".psd")
+
+
+def _split_dirs(tmp_path):
+    whole = tmp_path / "whole"
+    split = tmp_path / "split"
+    whole.mkdir()
+    split.mkdir()
+    return whole, split
+
+
+def test_batch_psd_split_verification_has_the_same_keys_as_non_split(fixture_psd, tmp_path):
+    """
+    rpc.py builds the full verification dict (ok/canvasOk/layerCountOk/
+    expectedLayers/actualLayers/layers) for the split path. batch.py used to
+    build only {"ok": ...} for the same situation — verifyReport.ts calls
+    v.layers.filter(...) unconditionally, so expanding a failed split-batch
+    row in the UI threw a TypeError.
+    """
+    whole, split = _split_dirs(tmp_path)
+    non_split = run_batch([str(fixture_psd)], PRESET, output_dir=str(whole))
+    split_result = run_batch([str(fixture_psd)], {**PRESET, "splitLayers": True},
+                             output_dir=str(split))
+
+    assert set(split_result["results"][0]["verification"].keys()) == \
+        set(non_split["results"][0]["verification"].keys())
+
+
+def test_batch_raster_split_verification_has_the_same_keys_as_non_split(fixture_psd, tmp_path):
+    # 같은 asymmetry가 이 브랜치가 넓힌 raster(png/jpg) split 경로에도 있었다.
+    whole, split = _split_dirs(tmp_path)
+    non_split = run_batch([str(fixture_psd)], {**PRESET, "outputFormat": "png"},
+                          output_dir=str(whole))
+    split_result = run_batch([str(fixture_psd)],
+                             {**PRESET, "outputFormat": "png", "splitLayers": True},
+                             output_dir=str(split))
+
+    assert set(split_result["results"][0]["verification"].keys()) == \
+        set(non_split["results"][0]["verification"].keys())
