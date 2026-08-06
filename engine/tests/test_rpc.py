@@ -93,6 +93,36 @@ def test_export_png_over_rpc(fixture_psd, tmp_path):
         eng.close()
 
 
+def test_export_png_split_over_rpc(fixture_psd, tmp_path):
+    """분할 PNG 내보내기: 파일마다 그 파일에 들어간 엔트리 하나로 검증돼야 한다.
+
+    entries 전체를 넘기면 각 파일이 세 레이어를 합친 것과 비교돼 ok가 거짓이
+    된다 — 그 회귀를 잡는 테스트다.
+    """
+    eng = EngineProc()
+    try:
+        doc = eng.call("open_psd", path=str(fixture_psd))["result"]
+        sid = doc["sessionId"]
+        out = tmp_path / "out.png"
+        resp = eng.call(
+            "export_psd", sessionId=sid, includedIds=[3, 4, 5], operations=[],
+            naming="pathPrefix", outputPath=str(out), outputFormat="png",
+            splitLayers=True,
+        )
+        assert "result" in resp, resp.get("error")
+        r = resp["result"]
+
+        assert len(r["outputs"]) == 3
+        for o in r["outputs"]:
+            assert os.path.isfile(o["outputPath"])
+            assert o["verification"]["ok"] is True
+
+        assert r["verification"]["ok"] is True
+        assert os.path.isdir(r["outputPath"])
+    finally:
+        eng.close()
+
+
 def test_rpc_error_carries_traceback(fixture_psd):
     eng = EngineProc()
     try:
