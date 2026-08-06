@@ -11,7 +11,7 @@ sha256과 배치 좌표를 담는다.
 같은 것을 증명할 수 있다. 쓰기 경로까지 통째로 확인하고 싶으면 --write 를 준다.
 
 엔진의 match_preset / preset_operations / build_export_plan / finalize_names /
-_entry_pixels 를 그대로 부른다. 여기서 규칙이나 픽셀 계산을 다시 구현하면 이 대조는
+entry_pixels 를 그대로 부른다. 여기서 규칙이나 픽셀 계산을 다시 구현하면 이 대조는
 앱의 동작과 갈라져 아무것도 증명하지 못한다.
 
 기준선 뜨기 (이어붙이므로 중단해도 --resume 으로 이어서 할 수 있다):
@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
 
 import numpy as np  # noqa: E402
 
-from psd_engine.export import _entry_pixels, export_psd  # noqa: E402
+from psd_engine.export import entry_pixels, export_psd  # noqa: E402
 from psd_engine.matching import match_preset, preset_operations  # noqa: E402
 from psd_engine.ops import build_export_plan, finalize_names  # noqa: E402
 from psd_engine.render import parse_line_color  # noqa: E402
@@ -122,7 +122,7 @@ def measure(path, preset, write_to=None):
         t = time.perf_counter()
         out_entries = []
         for e in entries:
-            rgba, left, top = _entry_pixels(s, e, line_rgb)
+            rgba, left, top = entry_pixels(s, e, line_rgb)
             arr = np.ascontiguousarray(rgba)
             out_entries.append({
                 "name": e["finalName"],
