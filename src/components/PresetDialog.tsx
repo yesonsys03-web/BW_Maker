@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { DEFAULT_EXCLUDE_TOKENS, DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS } from "../lib/presets";
-import type { Preset } from "../lib/types";
+import type { OutputFormat, Preset } from "../lib/types";
 
 export type PresetDialogMode = "edit" | "saveAs";
 
@@ -61,6 +61,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
     (preset.excludeTokens ?? DEFAULT_EXCLUDE_TOKENS).join(", ")
   );
   const [naming, setNaming] = useState<Preset["naming"]>(preset.naming);
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>(preset.outputFormat);
   const [outputSuffix, setOutputSuffix] = useState(preset.outputSuffix);
   const [embedPreview, setEmbedPreview] = useState(preset.embedPreview);
   const [splitLayers, setSplitLayers] = useState(preset.splitLayers ?? false);
@@ -121,10 +122,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       embedPreview,
       lineColor: normalizeColor ? lineColor : null,
       splitLayers,
-      // No form control yet — a later task owns the UI. Carry the incoming
-      // preset's value through unchanged so editing/duplicating a preset
-      // doesn't silently reset its output format to "psd".
-      outputFormat: preset.outputFormat,
+      outputFormat,
     };
   }
 
@@ -253,6 +251,16 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           </label>
         </div>
 
+        <label className="preset-field">
+          <span>출력 포맷</span>
+          <select value={outputFormat} onChange={(e) => setOutputFormat(e.target.value as OutputFormat)}>
+            <option value="psd">원본 따름 (.psd / .psb)</option>
+            <option value="png">PNG — 투명 배경</option>
+            <option value="jpg">JPG — 흰 배경</option>
+          </select>
+          <span className="preset-hint">배치 실행이 이 값을 씁니다. PNG/JPG는 평탄화된 한 장으로 나갑니다.</span>
+        </label>
+
         {merge === "byElement" && (
           <label className="preset-field">
             <span>병합 기준</span>
@@ -293,14 +301,16 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           />
         </label>
 
-        <label className="preset-checkbox">
-          <input
-            type="checkbox"
-            checked={embedPreview}
-            onChange={(e) => setEmbedPreview(e.currentTarget.checked)}
-          />
-          <span>미리보기 이미지 포함하여 내보내기</span>
-        </label>
+        {outputFormat === "psd" && (
+          <label className="preset-checkbox">
+            <input
+              type="checkbox"
+              checked={embedPreview}
+              onChange={(e) => setEmbedPreview(e.currentTarget.checked)}
+            />
+            <span>미리보기 이미지 포함하여 내보내기</span>
+          </label>
+        )}
 
         <label className="preset-checkbox">
           <input
