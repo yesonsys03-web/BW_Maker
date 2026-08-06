@@ -154,49 +154,6 @@ export function isEvictedSessionError(e: unknown): boolean {
  */
 export const PREVIEW_MAX_SIZE = 1500;
 
-/**
- * 연속된 토글을 한 번의 렌더로 묶는 창(ms).
- *
- * **값이 아니라 언제 세는지가 바뀌었다.** 예전에는 토글이 들어올 때마다 이만큼
- * 기다렸다가 그렸다(trailing). 그래서 한 번만 눌러도 무조건 이 시간을 냈고,
- * 실측한 체감 지연에서 가장 큰 몫이 그 대기였다:
- *
- *     디바운스 대기        120 ms   ← 클릭 한 번에도 무조건
- *     보이는 N장 재합성     ~60 ms   (캐시된 타일 20장)
- *     PNG 인코딩          27.7 ms
- *     브라우저 PNG 디코딩   17.8 ms
- *
- * 지금은 **직전 렌더로부터** 이만큼을 센다(leading edge). 조용하다가 누른 첫
- * 토글은 기다리지 않고 곧바로 나가고, 그 뒤 이 창 안에 들어온 것들만 묶인다.
- *
- * **이 창이 묶는 것은 dispatch 속도이지 큐 깊이가 아니다.** 엔진은 stdin을 순서대로
- * 처리하므로 렌더가 이 창보다 오래 걸리면 요청이 엔진을 앞지르고 큐가 자란다 —
- * 그건 trailing이던 시절에도 마찬가지였다. 실제로 130ms 간격(편안한 클릭)이면
- * 예전 코드도 초당 7.7번을 냈다. 두 방식 모두 상한은 **120ms당 1회**로 같고,
- * 달라지는 것은 어느 클릭 속도에서 그 상한에 닿느냐다.
- *
- * 그래도 창을 없애면 안 된다 — 없애면 상한 자체가 사라진다. 큐 깊이를 진짜로
- * 묶으려면 시간 창이 아니라 `inFlightRef`(진행 중인 렌더 수)를 봐야 한다.
- */
-export const PREVIEW_COALESCE_MS = 120;
-
-/**
- * 이번 토글을 얼마나 기다렸다 엔진에 낼지(ms). 0이면 곧바로.
- *
- * @param lastRenderStartedAt 직전에 렌더를 건 시각. 아직 없으면 null.
- * @param now 지금 시각.
- */
-export function previewRenderDelay(lastRenderStartedAt: number | null, now: number): number {
-  if (lastRenderStartedAt === null) return 0;
-  const since = now - lastRenderStartedAt;
-  // since < 0 이면 시계가 뒤로 간 것이다. 그대로 두면 ">= 120"을 피해가면서
-  // 120 - since 가 **커다란 양수**로 나간다(since=-1000이면 1120ms). 결과를 0으로
-  // 클램프하는 흔한 방어는 이걸 못 잡는다 — 틀린 값이 음수가 아니라 큰 양수라서다.
-  // 그래서 부호를 여기 가드에서 먼저 걸러낸다.
-  if (since >= PREVIEW_COALESCE_MS || since < 0) return 0;
-  return PREVIEW_COALESCE_MS - since;
-}
-
 export type PreviewBackground = "white" | "checker" | "black";
 
 export const PREVIEW_BACKGROUNDS: readonly PreviewBackground[] = ["white", "checker", "black"];

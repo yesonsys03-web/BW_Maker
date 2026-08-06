@@ -1,10 +1,8 @@
 import { expect, test } from "vitest";
 import {
   DEFAULT_PREVIEW_BACKGROUND,
-  PREVIEW_COALESCE_MS,
   groupSoloIds,
   isDocumentView,
-  previewRenderDelay,
   MAX_PREVIEW_SCALE,
   MIN_PREVIEW_SCALE,
   PREVIEW_BACKGROUNDS,
@@ -315,28 +313,3 @@ test("recenterOn with the cursor already centred changes nothing", () => {
   expect(recenterOn({ x: 12, y: 34 }, { x: 0, y: 0 })).toEqual({ x: 12, y: 34 });
 });
 
-test("첫 토글은 기다리지 않는다", () => {
-  // 이것이 이 함수가 존재하는 이유다. 예전에는 클릭 한 번에도 120ms를 무조건
-  // 냈고, 실측된 체감 지연 ~225ms의 절반 이상이 그 대기였다.
-  expect(previewRenderDelay(null, 1000)).toBe(0);
-});
-
-test("조용하다 누른 토글도 기다리지 않는다", () => {
-  // 마지막 렌더 이후 충분히 지났으면 연타가 아니다.
-  expect(previewRenderDelay(1000, 1000 + PREVIEW_COALESCE_MS)).toBe(0);
-  expect(previewRenderDelay(1000, 1000 + PREVIEW_COALESCE_MS + 50)).toBe(0);
-});
-
-test("연타는 묶는다 — 남은 시간만 기다린다", () => {
-  // 디바운스를 없애는 것이 아니라 앞으로 옮기는 것이다. 엔진은 stdin을 순서대로
-  // 처리하므로 열 번 빠르게 누르면 열 번의 전체 렌더가 큐에 쌓인다. requestIdRef가
-  // 오래된 *결과*는 버리지만 엔진은 그 일을 다 한다 — 그래서 묶기가 필요하다.
-  expect(previewRenderDelay(1000, 1000)).toBe(PREVIEW_COALESCE_MS);
-  expect(previewRenderDelay(1000, 1000 + 40)).toBe(PREVIEW_COALESCE_MS - 40);
-});
-
-test("시계가 뒤로 가도 음수를 돌려주지 않는다", () => {
-  // setTimeout에 음수를 주면 즉시 발사라 결과는 같지만, 이 함수가 "남은 대기"를
-  // 뜻하는 이상 음수는 뜻이 없는 값이다.
-  expect(previewRenderDelay(2000, 1000)).toBe(0);
-});

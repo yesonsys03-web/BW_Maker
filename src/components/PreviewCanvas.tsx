@@ -10,7 +10,6 @@ import {
   nextScale,
   PREVIEW_MAX_SIZE,
   parsePreviewBackground,
-  previewRenderDelay,
   recenterOn,
   scaledBy,
   toEngineError,
@@ -71,11 +70,24 @@ interface PreviewCanvasProps {
 }
 
 /**
+ * 엔진에 낼 렌더 한 건. 효과 밖(앞선 렌더가 끝나는 자리)에서도 그대로 낼 수
+ * 있도록, 렌더 효과의 본문이 화면 상태에서 읽던 것만 통째로 담아둔다.
+ */
+interface RenderSpec {
+  path: string;
+  visibleIds: number[];
+  documentView: boolean;
+  lineColor: string | null;
+  /** 결과를 담을 캐시 키. 만들 수 없으면(mtime 미상) null. */
+  cacheKey: string | null;
+}
+
+/**
  * Center preview canvas. Recomputes visibleIds whenever activePath / eye
  * toggle / include toggle changes (via tree, includedIds, previewHiddenIds
- * reference changes), waits previewRenderDelay (leading edge: fires
- * immediately unless a render started within PREVIEW_COALESCE_MS), then
- * renders via the engine. A monotonically increasing request id guards
+ * reference changes), then renders via the engine — at once if the engine is
+ * free, otherwise into pendingRef, a one-slot latch dispatched the moment the
+ * running render finishes. A monotonically increasing request id guards
  * against a stale response (e.g. from a render superseded by a later
  * toggle) overwriting a newer frame or clobbering a newer request's loading
  * state.
@@ -235,20 +247,35 @@ export function PreviewCanvas({
     },
     [measureAndFit]
   );
-  // Latest sessionId, read at debounce-timer-fire time rather than captured
-  // at effect-setup time — see the render effect below for why.
+  // Latest sessionId, read at dispatch time rather than captured at
+  // effect-setup time — see the render effect below for why.
   const sessionIdRef = useRef(sessionId);
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
   /**
-   * 직전에 엔진 렌더를 건 시각. previewRenderDelay(leading edge)가 "조용하다가
-   * 눌린 첫 토글"과 "연타 중인 토글"을 가르는 기준이 이 값이다. 타이머가 실제로
-   * 발사되는 지점에서만 갱신한다 — 효과가 스케줄될 때(디바운스를 걸 때)가 아니라
-   * 엔진에 나가는 순간이어야, 다음 토글이 "직전 렌더로부터 얼마나 지났는가"를
-   * 올바르게 잴 수 있다.
+   * 아직 못 낸 렌더 한 건 — 엔진에 이미 하나 걸려 있는 동안 화면이 원하게 된
+   * 최신 상태다. 자리가 하나뿐이라 새 것이 옛 것을 덮어쓰고, 그래서 엔진 앞에
+   * 쌓이는 요청은 정의상 한 건을 넘지 않는다.
+   *
+   * 여기 있던 것은 시간 창(PREVIEW_COALESCE_MS, 120ms)이었다. 그 창이 묶던 것은
+   * dispatch **속도**(120ms에 한 번)이지 큐 깊이가 아니었다. 엔진은 stdin을
+   * 순서대로 처리하므로, 렌더 한 장이 창보다 오래 걸리면 — 타일 캐시가 빈
+   * 레이어는 extract_rgba가 채널을 통째로 푼다 — 요청이 엔진을 앞질러 큐가
+   * 자랐다. 그건 창을 뒤(trailing)에 두든 앞(leading)에 두든 마찬가지였고, 상수를
+   * 바꿔서 될 일도 아니다: 고정된 ms는 직전 렌더가 끝났는지와 무관하게 발사된다.
+   * 진행 중인 렌더(inFlightRef)를 보고 미루면 그 일이 일어날 수 없다.
+   *
+   * 게다가 더 빠르다. 창은 시간만 셌으므로 연타의 마지막 토글이 최대 120ms를
+   * 그냥 기다렸지만, 이 자리는 엔진이 비는 그 순간 나간다. 실측한 체감 지연에서
+   * 그 대기가 가장 큰 몫이었다:
+   *
+   *     디바운스 대기        120 ms   ← 이제 없다
+   *     보이는 N장 재합성     ~60 ms   (캐시된 타일 20장)
+   *     PNG 인코딩          27.7 ms
+   *     브라우저 PNG 디코딩   17.8 ms
    */
-  const lastRenderStartedAtRef = useRef<number | null>(null);
+  const pendingRef = useRef<RenderSpec | null>(null);
 
   const visibleIds = useMemo(
     () => (tree ? visibleIdsForPreview(tree, includedIds, previewHiddenIds, soloIds) : []),
@@ -300,6 +327,14 @@ export function PreviewCanvas({
   // the view-reset bug above. Reading the ref at fire time instead keeps the
   // effect reactive to genuine visibility/file changes only.
   useEffect(() => {
+    // 밀려 있는 렌더의 주인은 이 효과 하나다. 매번 비우고, 아래에서 지금 화면이
+    // 원하는 것으로 다시 채운다. 요청 번호가 *이미 나간* 요청에 하는 일을 아직
+    // 안 나간 요청에 해주는 것이다 — 아래에는 엔진까지 가지 않고 빠지는 길이
+    // 넷 있고(파일 없음, 일시정지, 빈 집합, 캐시 적중) 그때 옛 요청이 자리에
+    // 남아 있으면, 진행 중인 렌더가 끝나는 순간 이미 지나간 조합이 — 심지어 방금
+    // 떠난 파일의 조합이 — 엔진으로 나간다. 자리를 다시 채우는 쪽은 매번 지금
+    // 상태에서 새로 만드므로, 비웠다가 잃는 것은 없다.
+    pendingRef.current = null;
     if (!path) return;
     // 큐가 끝나면 paused가 false로 바뀌면서 이 효과가 다시 돌아 그때 그린다.
     if (paused) return;
@@ -326,15 +361,30 @@ export function PreviewCanvas({
       }
     }
 
-    // 문서 보기는 저장된 병합 이미지를 그대로 쓰므로 즉시 끝난다. 파일을 연
-    // 직후가 바로 이 경우라, 여기에 디바운스를 걸면 첫 화면만 늦어진다.
-    // 합성 미리보기는 연속 토글을 묶어야 하므로(leading edge) previewRenderDelay를 쓴다.
-    const delay = documentView ? 0 : previewRenderDelay(lastRenderStartedAtRef.current, Date.now());
+    const spec: RenderSpec = { path, visibleIds, documentView, lineColor, cacheKey };
 
-    const timer = window.setTimeout(() => {
+    // 엔진에 이미 하나 걸려 있으면 자리에만 적어두고 물러난다. 타이머는 세우지
+    // 않는다 — 기다릴 것은 시간이 아니라 사건이고, 그 사건은 아래 finally다.
+    if (inFlightRef.current > 0) {
+      pendingRef.current = spec;
+      return;
+    }
+    // 비어 있으면 곧바로 낸다. 문서 보기든 합성 미리보기든 대기는 0이다 —
+    // 특히 문서 보기는 저장된 병합 이미지를 그대로 쓰므로 즉시 끝나고, 파일을
+    // 연 직후가 바로 그 경우라 여기서 기다리면 첫 화면만 늦어진다.
+    dispatch(spec);
+
+    /**
+     * 엔진에 실제로 내는 곳. 두 군데서 부른다 — 위(엔진이 비었을 때)와, 앞선
+     * 렌더가 끝나는 자리에서 밀려 있던 것을 집어서.
+     */
+    function dispatch(next: RenderSpec) {
+      // 세션 id는 효과가 설 때가 아니라 내는 이 시점에 읽는다(위 주석 참고).
       const sid = sessionIdRef.current;
       if (!sid) return;
-      lastRenderStartedAtRef.current = Date.now();
+      // 요청 번호도 같다. 밀렸다 나가는 렌더가 밀릴 때의 번호를 들고 있으면 그
+      // 사이에 올라간 번호(캐시 적중, 빈 집합, 파일 전환)에 밀려 자기 결과를
+      // 스스로 버린다 — 화면은 옛 그림에 멈춘 채로 남는다.
       const requestId = ++requestIdRef.current;
       setLoading(true);
       inFlightRef.current += 1;
@@ -342,20 +392,20 @@ export function PreviewCanvas({
       void (async () => {
         try {
           const { pngPath } = await withEvictedSessionRetry(
-            path,
+            next.path,
             sid,
             (s) =>
-              documentView
+              next.documentView
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
-                : renderPreview(s, visibleIds, PREVIEW_MAX_SIZE, lineColor),
-            (result) => onSessionRefreshed(path, result)
+                : renderPreview(s, next.visibleIds, PREVIEW_MAX_SIZE, next.lineColor),
+            (result) => onSessionRefreshed(next.path, result)
           );
           const dataUrl = await loadPngDataUrl(pngPath);
           // 화면에 못 띄우게 된 결과라도 캐시에는 넣는다 — 이 조합으로 돌아오면
           // (토글을 되돌리거나 파일을 오가면) 그때 그대로 쓴다. 키는 파일의 수정
           // 시각 기준이라, 중간에 축출-재오픈이 끼어 세션 id가 바뀌어도 그대로
           // 유효하다.
-          if (cacheKey) cache.set(cacheKey, dataUrl);
+          if (next.cacheKey) cache.set(next.cacheKey, dataUrl);
           if (requestIdRef.current !== requestId) return; // superseded by a newer request
           showImage(dataUrl);
           setLoading(false);
@@ -364,13 +414,19 @@ export function PreviewCanvas({
           setLoading(false);
           onError("미리보기 렌더링 실패", toEngineError(e));
         } finally {
+          // 밀려 있는 것을 내리기 **전에** 낸다. 그래야 inFlightRef가 0을 거치지
+          // 않고, "안 바쁨"도 나가지 않는다 — 그 한 틈에 미리보기 준비 큐가
+          // 비켜서기를 멈추고 파일을 열면(App.tsx) 세션 두 칸을 두고 다툰다.
+          const pending = pendingRef.current;
+          if (pending) {
+            pendingRef.current = null;
+            dispatch(pending);
+          }
           inFlightRef.current -= 1;
           if (inFlightRef.current === 0) onRenderingChange(false);
         }
       })();
-    }, delay);
-
-    return () => window.clearTimeout(timer);
+    }
     // visibleIds 대신 visibleKey에 의존한다 — 키가 같으면 내용이 같으므로 효과가
     // 들고 있는 배열이 한 세대 옛것이어도 렌더 결과는 동일하다. 위 visibleKey의
     // 주석에 왜 배열 정체로는 안 되는지 적어두었다.
