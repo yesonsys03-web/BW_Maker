@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { defaultExportPath, outputExtension, reorderArgs, resolveEntryName } from "../lib/exportFlow";
 import { exportPsd, onEngineEvent } from "../lib/engine";
-import { DEFAULT_LINE_COLOR } from "../lib/presets";
+import { DEFAULT_LINE_COLOR, OUTPUT_FORMAT_OPTIONS } from "../lib/presets";
 import { toEngineError } from "../lib/preview";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { OpsState } from "../lib/opsReducer";
@@ -252,9 +252,11 @@ export function ExportDialog({
         <label className="preset-field">
           <span>출력 포맷</span>
           <select value={outputFormat} onChange={(e) => setOutputFormat(e.target.value as OutputFormat)}>
-            <option value="psd">원본 따름 (.psd / .psb)</option>
-            <option value="png">PNG — 투명 배경</option>
-            <option value="jpg">JPG — 흰 배경</option>
+            {OUTPUT_FORMAT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
         </label>
 

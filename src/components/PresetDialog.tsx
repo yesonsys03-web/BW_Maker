@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { DEFAULT_EXCLUDE_TOKENS, DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS } from "../lib/presets";
+import { DEFAULT_EXCLUDE_TOKENS, DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS, OUTPUT_FORMAT_OPTIONS } from "../lib/presets";
 import type { OutputFormat, Preset } from "../lib/types";
 
 export type PresetDialogMode = "edit" | "saveAs";
@@ -254,9 +254,11 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
         <label className="preset-field">
           <span>출력 포맷</span>
           <select value={outputFormat} onChange={(e) => setOutputFormat(e.target.value as OutputFormat)}>
-            <option value="psd">원본 따름 (.psd / .psb)</option>
-            <option value="png">PNG — 투명 배경</option>
-            <option value="jpg">JPG — 흰 배경</option>
+            {OUTPUT_FORMAT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
           <span className="preset-hint">배치 실행이 이 값을 씁니다. PNG/JPG는 평탄화된 한 장으로 나갑니다.</span>
         </label>

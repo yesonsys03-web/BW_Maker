@@ -44,7 +44,24 @@ const INCLUDE_TYPES = new Set(["contains", "regex"]);
 const MERGE_MODES = new Set(["none", "all", "perGroup", "byElement"]);
 
 const MERGE_RULES = new Set(["role", "group", "plane"]);
-const OUTPUT_FORMATS = new Set<string>(["psd", "png", "jpg"]);
+
+export interface OutputFormatOption {
+  value: OutputFormat;
+  label: string;
+}
+
+/**
+ * 출력 포맷 선택지의 유일한 출처. ExportDialog와 PresetDialog가 그대로 렌더링에
+ * 쓰고, 아래 OUTPUT_FORMATS(검증기)도 여기서 값만 뽑아 쓴다 — 세 군데가 각자
+ * 같은 목록을 따로 적으면, 하나만 바뀌었을 때 나머지가 조용히 어긋난다.
+ */
+export const OUTPUT_FORMAT_OPTIONS: OutputFormatOption[] = [
+  { value: "psd", label: "원본 따름 (.psd / .psb)" },
+  { value: "png", label: "PNG — 투명 배경" },
+  { value: "jpg", label: "JPG — 흰 배경" },
+];
+
+const OUTPUT_FORMATS = new Set<string>(OUTPUT_FORMAT_OPTIONS.map((o) => o.value));
 
 /** byRole 병합의 기본 역할 토큰(아래→위 순서). 엔진 DEFAULT_ROLE_TOKENS와 같다. */
 export const DEFAULT_ROLE_TOKENS = ["UL", "OL_UL", "OL"];
