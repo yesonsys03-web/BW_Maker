@@ -169,10 +169,14 @@ export const PREVIEW_MAX_SIZE = 1500;
  * 지금은 **직전 렌더로부터** 이만큼을 센다(leading edge). 조용하다가 누른 첫
  * 토글은 기다리지 않고 곧바로 나가고, 그 뒤 이 창 안에 들어온 것들만 묶인다.
  *
- * **창 자체를 없애면 안 된다.** 엔진은 stdin을 순서대로 처리하므로 빠르게 열 번
- * 누르면 전체 렌더 열 개가 큐에 쌓인다. `requestIdRef`가 오래된 *결과*는 버리지만
- * 엔진은 그 일을 전부 한다 — 사람이 기다리는 것은 그 뒤에 선다. 그래서 값은
- * 그대로 두고 세는 시점만 옮겼다.
+ * **이 창이 묶는 것은 dispatch 속도이지 큐 깊이가 아니다.** 엔진은 stdin을 순서대로
+ * 처리하므로 렌더가 이 창보다 오래 걸리면 요청이 엔진을 앞지르고 큐가 자란다 —
+ * 그건 trailing이던 시절에도 마찬가지였다. 실제로 130ms 간격(편안한 클릭)이면
+ * 예전 코드도 초당 7.7번을 냈다. 두 방식 모두 상한은 **120ms당 1회**로 같고,
+ * 달라지는 것은 어느 클릭 속도에서 그 상한에 닿느냐다.
+ *
+ * 그래도 창을 없애면 안 된다 — 없애면 상한 자체가 사라진다. 큐 깊이를 진짜로
+ * 묶으려면 시간 창이 아니라 `inFlightRef`(진행 중인 렌더 수)를 봐야 한다.
  */
 export const PREVIEW_COALESCE_MS = 120;
 
@@ -185,10 +189,10 @@ export const PREVIEW_COALESCE_MS = 120;
 export function previewRenderDelay(lastRenderStartedAt: number | null, now: number): number {
   if (lastRenderStartedAt === null) return 0;
   const since = now - lastRenderStartedAt;
-  // since < 0 이면 시계가 뒤로 간 것이다 — 이 값을 그대로 크기 비교(>=)에 넣으면
-  // "충분히 지났다" 판정을 피해가면서 120 - since가 커다란 양수로 나가버려, 뒤에
-  // 있는 Math.max(0, …)가 음수 클램프로는 잡아내지 못한다. 그래서 부호는 여기,
-  // 가드에서 먼저 걸러낸다.
+  // since < 0 이면 시계가 뒤로 간 것이다. 그대로 두면 ">= 120"을 피해가면서
+  // 120 - since 가 **커다란 양수**로 나간다(since=-1000이면 1120ms). 결과를 0으로
+  // 클램프하는 흔한 방어는 이걸 못 잡는다 — 틀린 값이 음수가 아니라 큰 양수라서다.
+  // 그래서 부호를 여기 가드에서 먼저 걸러낸다.
   if (since >= PREVIEW_COALESCE_MS || since < 0) return 0;
   return PREVIEW_COALESCE_MS - since;
 }
