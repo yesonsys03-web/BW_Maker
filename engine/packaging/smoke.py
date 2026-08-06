@@ -195,6 +195,20 @@ def main():
             json.dumps(exported["verification"], ensure_ascii=False)[:500],
         )
 
+        # 윈도우 MAX_PATH(260자)를 넘는 경로. `\\?\` 접두사가 없으면 여기서 죽는다.
+        # 이 맥에서는 확인할 수 없고 Windows 러너에서만 진짜로 검증된다.
+        deep = work
+        while len(str(deep)) < 210:
+            deep = deep / "긴폴더이름"
+        deep.mkdir(parents=True, exist_ok=True)
+        long_out = deep / ("내보내기_" + "가" * 40 + "_LINE.psd")
+        response = engine.call("export_psd", sessionId=session_id, includedIds=layer_ids,
+                               operations=[], naming="pathPrefix",
+                               outputPath=str(long_out), overwrite=True)
+        check(f"긴 경로로 내보내기 ({len(str(long_out))}자)",
+              "result" in response, response.get("error"))
+        check("긴 경로 산출 파일 존재", Path(long_out).is_file())
+
         # 예외는 흡수하지 않고 traceback과 함께 돌아와야 한다.
         response = engine.call("open_psd", path=str(work / "없는 한글 파일.psd"))
         check("없는 파일 → 에러 응답", "error" in response, json.dumps(response)[:300])
