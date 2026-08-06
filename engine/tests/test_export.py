@@ -336,6 +336,26 @@ def test_output_extension_matches_the_frontend_rule(src, want):
     assert output_extension(src) == want
 
 
+@pytest.mark.parametrize("src,fmt,expected", [
+    ("a.psd", "png", ".png"),
+    ("a.psb", "png", ".png"),
+    ("a.PSD", "jpg", ".jpg"),
+    ("a.tiff", "jpg", ".jpg"),
+    ("no_extension", "png", ".png"),
+    ("a.psd", "psd", ".psd"),
+    ("a.psb", "psd", ".psb"),
+    ("a.PSB", "psd", ".psb"),
+])
+def test_output_extension_takes_an_explicit_format(src, fmt, expected):
+    assert output_extension(src, fmt) == expected
+
+
+def test_output_extension_defaults_to_following_the_source():
+    # 인자를 안 주면 지금까지의 동작 그대로여야 한다. 기존 호출부가 전부 이 경로다.
+    assert output_extension("a.psb") == ".psb"
+    assert output_extension("a.psd") == ".psd"
+
+
 def test_split_output_path_inherits_a_psb_extension():
     # 레이어별 내보내기는 건네받은 경로의 확장자를 그대로 물려받아야 한다 —
     # .psb 원본이 레이어마다 .psd로 쪼개지면 안쪽 버전과 확장자가 어긋난다.

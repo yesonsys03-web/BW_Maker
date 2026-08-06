@@ -103,16 +103,22 @@ def export_psd(session, entries, output_path, embed_preview=True,
     return {"outputPath": output_path, "layerCount": len(entries)}
 
 
-def output_extension(src_path):
+def output_extension(src_path, fmt="psd"):
     """
-    원본 경로에 대응하는 산출물 확장자. `.psb`만 `.psb`로 가고 나머지는 전부 `.psd`다.
+    산출물 확장자. `fmt`가 "png"/"jpg"면 그 확장자가 곧 답이고, "psd"는 "원본
+    따름"이라는 뜻이라 원본에서 .psd/.psb를 물려받는다.
 
-    프런트엔드 `src/lib/exportFlow.ts`의 `outputExtension`과 글자 그대로 같은 규칙이어야
-    한다. 그쪽이 계산한 경로는 덮어쓰기 사전 검사와 UI에 쓰이고 실제로 파일이 나가는
-    경로는 이쪽이라, 둘이 갈라지면 검사한 적 없는 경로에 파일을 쓰게 된다.
+    프런트엔드 `src/lib/exportFlow.ts`의 `outputExtension`과 글자 그대로 같은
+    규칙이어야 한다. 그쪽이 계산한 경로는 덮어쓰기 사전 검사와 UI에 쓰이고 실제로
+    파일이 나가는 경로는 이쪽이라, 둘이 갈라지면 검사한 적 없는 경로에 파일을
+    쓰게 된다.
 
     `Path.suffix`는 대소문자를 보존하므로 명시적으로 낮춘다 — `FOO.PSB`는 `FOO….psb`다.
     """
+    if fmt == "png":
+        return ".png"
+    if fmt == "jpg":
+        return ".jpg"
     return ".psb" if Path(src_path).suffix.lower() == ".psb" else ".psd"
 
 
