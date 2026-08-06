@@ -1,3 +1,6 @@
+/** 내보내기 출력 포맷. "psd"는 "원본 따름"이라 .psd/.psb를 원본에서 물려받는다. */
+export type OutputFormat = "psd" | "png" | "jpg";
+
 export interface TreeNode {
   id: number;
   name: string;

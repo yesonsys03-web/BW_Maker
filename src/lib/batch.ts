@@ -1,4 +1,5 @@
 import { defaultExportPath, outputExtension } from "./exportFlow";
+import type { OutputFormat } from "./types";
 
 export interface PlannedBatchOutput {
   path: string;
@@ -31,13 +32,14 @@ function joinDir(dir: string, name: string): string {
 export function planBatchOutputs(
   paths: string[],
   outputDir: string | null,
-  suffix: string
+  suffix: string,
+  fmt: OutputFormat = "psd"
 ): PlannedBatchOutput[] {
   return paths.map((path) => {
     const outputPath =
       outputDir === null
-        ? defaultExportPath(path, suffix)
-        : joinDir(outputDir, `${stemOf(baseName(path))}${suffix}.${outputExtension(path)}`);
+        ? defaultExportPath(path, suffix, fmt)
+        : joinDir(outputDir, `${stemOf(baseName(path))}${suffix}.${outputExtension(path, fmt)}`);
     return { path, outputPath };
   });
 }

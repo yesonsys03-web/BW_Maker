@@ -1,12 +1,20 @@
 import type { Entry } from "./opsReducer";
-import type { TreeNode } from "./types";
+import type { OutputFormat, TreeNode } from "./types";
 
 /**
- * Output extension for a source path: preserves ".psd"/".psb" from the
- * source (case-insensitively, normalized to lowercase), else falls back to
- * ".psd" for an unrelated or absent extension.
+ * Output extension for a source path. An explicit "png"/"jpg" answers
+ * itself; "psd" means "follow the source" and preserves ".psd"/".psb"
+ * (case-insensitively, normalized to lowercase), falling back to ".psd"
+ * for an unrelated or absent extension.
+ *
+ * Must match engine/psd_engine/export.py's output_extension letter for letter.
  */
-export function outputExtension(srcPath: string): "psd" | "psb" {
+export function outputExtension(
+  srcPath: string,
+  fmt: OutputFormat = "psd"
+): "psd" | "psb" | "png" | "jpg" {
+  if (fmt === "png") return "png";
+  if (fmt === "jpg") return "jpg";
   const lastSlash = Math.max(srcPath.lastIndexOf("/"), srcPath.lastIndexOf("\\"));
   const fileName = lastSlash === -1 ? srcPath : srcPath.slice(lastSlash + 1);
   const dotIdx = fileName.lastIndexOf(".");
@@ -21,13 +29,17 @@ export function outputExtension(srcPath: string): "psd" | "psb" {
  * the given suffix, extension preserved from the source (.psd → .psd,
  * .psb → .psb, see outputExtension) instead of forced to a fixed one.
  */
-export function defaultExportPath(srcPath: string, suffix: string): string {
+export function defaultExportPath(
+  srcPath: string,
+  suffix: string,
+  fmt: OutputFormat = "psd"
+): string {
   const lastSlash = Math.max(srcPath.lastIndexOf("/"), srcPath.lastIndexOf("\\"));
   const dir = lastSlash === -1 ? "" : srcPath.slice(0, lastSlash + 1);
   const fileName = lastSlash === -1 ? srcPath : srcPath.slice(lastSlash + 1);
   const dotIdx = fileName.lastIndexOf(".");
   const stem = dotIdx <= 0 ? fileName : fileName.slice(0, dotIdx);
-  return `${dir}${stem}${suffix}.${outputExtension(srcPath)}`;
+  return `${dir}${stem}${suffix}.${outputExtension(srcPath, fmt)}`;
 }
 
 /**

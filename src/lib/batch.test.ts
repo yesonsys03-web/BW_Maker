@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, it, test } from "vitest";
 import { findConflicts, planBatchOutputs } from "./batch";
 
 test("planBatchOutputs with outputDir null puts each output next to its source (defaultExportPath semantics)", () => {
@@ -34,6 +34,15 @@ test("planBatchOutputs handles an outputDir with a trailing separator", () => {
 test("planBatchOutputs preserves windows separators in the outputDir", () => {
   const result = planBatchOutputs(["/a/one.psd"], "C:\\out", "_LINE");
   expect(result).toEqual([{ path: "/a/one.psd", outputPath: "C:\\out\\one_LINE.psd" }]);
+});
+
+it("plans batch outputs with the chosen format", () => {
+  expect(planBatchOutputs(["/x/a.psb"], null, "_LINE", "png")).toEqual([
+    { path: "/x/a.psb", outputPath: "/x/a_LINE.png" },
+  ]);
+  expect(planBatchOutputs(["/x/a.psd"], "/out", "_LINE", "jpg")).toEqual([
+    { path: "/x/a.psd", outputPath: "/out/a_LINE.jpg" },
+  ]);
 });
 
 test("findConflicts returns only the output paths that already exist, via the injected existsFn", async () => {

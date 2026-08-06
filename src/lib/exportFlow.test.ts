@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, it, test } from "vitest";
 import { defaultExportPath, findTreeName, outputExtension, reorderArgs, resolveEntryName } from "./exportFlow";
 import type { Entry } from "./opsReducer";
 import type { TreeNode } from "./types";
@@ -46,6 +46,25 @@ test("outputExtension preserves .psd and .psb (case-insensitively), else falls b
   expect(outputExtension("/a/b/name.PSB")).toBe("psb");
   expect(outputExtension("/a/b/name.txt")).toBe("psd");
   expect(outputExtension("/a/.psd")).toBe("psd");
+});
+
+it("takes an explicit format over the source extension", () => {
+  expect(outputExtension("a.psd", "png")).toBe("png");
+  expect(outputExtension("a.psb", "png")).toBe("png");
+  expect(outputExtension("a.PSD", "jpg")).toBe("jpg");
+  expect(outputExtension("no_extension", "jpg")).toBe("jpg");
+});
+
+it("follows the source when no format is given", () => {
+  expect(outputExtension("a.psb")).toBe("psb");
+  expect(outputExtension("a.psd")).toBe("psd");
+  expect(outputExtension("a.psd", "psd")).toBe("psd");
+  expect(outputExtension("a.psb", "psd")).toBe("psb");
+});
+
+it("builds a default path with the chosen format", () => {
+  expect(defaultExportPath("/x/y/a.psb", "_LINE", "png")).toBe("/x/y/a_LINE.png");
+  expect(defaultExportPath("C:\\x\\a.psd", "_LINE", "jpg")).toBe("C:\\x\\a_LINE.jpg");
 });
 
 // ---------- reorderArgs ----------
