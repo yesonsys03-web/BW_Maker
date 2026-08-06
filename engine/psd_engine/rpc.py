@@ -16,9 +16,12 @@ from .export import export_psd_split as _export_split
 from .matching import (auto_merge_operations, auto_merge_preview,
                        match_preset, preset_operations)
 from .ops import build_export_plan, finalize_names
+from .raster import export_raster as _export_raster
+from .raster import export_raster_split as _export_raster_split
 from .render import render_document_preview, render_preview, render_thumbnails
 from .session import SessionStore
 from .verify import verify_export
+from .verify_raster import verify_raster
 
 
 #: 종류별로 살려두는 렌더 디렉터리 세대 수.
@@ -153,7 +156,7 @@ class Engine:
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
                    embedPreview=True, overwrite=False, verify=True, lineColor=None,
-                   splitLayers=False):
+                   splitLayers=False, outputFormat="psd"):
         s = self.store.get(sessionId)
         included = sorted(includedIds)
         for lid in included:
@@ -170,6 +173,35 @@ class Engine:
         def progress(stage, current, total):
             _emit({"event": "progress", "stage": stage,
                    "current": current, "total": total}, self.out)
+
+        if outputFormat in ("png", "jpg"):
+            if splitLayers:
+                result = _export_raster_split(s, entries, outputPath, outputFormat,
+                                              overwrite=overwrite, progress=progress,
+                                              line_color=lineColor)
+                if verify:
+                    # 파일마다 그 파일에 들어간 엔트리 하나로 검증한다.
+                    for entry, out in zip(entries, result["outputs"]):
+                        out["verification"] = verify_raster(
+                            s, [entry], out["outputPath"], outputFormat,
+                            line_color=lineColor)
+                    result["verification"] = {
+                        "ok": all(o["verification"]["ok"] for o in result["outputs"]),
+                        "canvasOk": all(o["verification"]["canvasOk"] for o in result["outputs"]),
+                        "layerCountOk": True,
+                        "expectedLayers": len(result["outputs"]),
+                        "actualLayers": len(result["outputs"]),
+                        "layers": [l for o in result["outputs"] for l in o["verification"]["layers"]],
+                    }
+                result["outputPath"] = os.path.dirname(result["outputs"][0]["outputPath"])
+                return result
+            result = _export_raster(s, entries, outputPath, outputFormat,
+                                    overwrite=overwrite, progress=progress,
+                                    line_color=lineColor)
+            if verify:
+                result["verification"] = verify_raster(s, entries, outputPath,
+                                                       outputFormat, line_color=lineColor)
+            return result
 
         if splitLayers:
             result = _export_split(s, entries, outputPath, embed_preview=embedPreview,

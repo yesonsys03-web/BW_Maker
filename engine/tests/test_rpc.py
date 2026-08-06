@@ -73,6 +73,26 @@ def test_rpc_full_flow(fixture_psd, tmp_path):
         eng.close()
 
 
+def test_export_png_over_rpc(fixture_psd, tmp_path):
+    """실제 서브프로세스로 열기 → PNG 내보내기 → 검증까지."""
+    eng = EngineProc()
+    try:
+        doc = eng.call("open_psd", path=str(fixture_psd))["result"]
+        sid = doc["sessionId"]
+        # 픽셀 레이어 id — test_rpc_full_flow(:41)와 같은 fixture_psd에서
+        # 확인된 세 픽셀 레이어(hidden line, line, lines)의 id다.
+        out = tmp_path / "out.png"
+        resp = eng.call(
+            "export_psd", sessionId=sid, includedIds=[3, 4, 5], operations=[],
+            naming="pathPrefix", outputPath=str(out), outputFormat="png",
+        )
+        assert "result" in resp, resp.get("error")
+        assert resp["result"]["verification"]["ok"] is True
+        assert out.is_file()
+    finally:
+        eng.close()
+
+
 def test_rpc_error_carries_traceback(fixture_psd):
     eng = EngineProc()
     try:
