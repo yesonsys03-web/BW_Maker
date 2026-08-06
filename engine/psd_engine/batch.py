@@ -6,8 +6,10 @@ from .export import export_psd, export_psd_split, output_extension
 from .matching import match_preset, preset_operations
 from .ops import build_export_plan, finalize_names
 from .paths import ensure_writable_path
+from .raster import export_raster, export_raster_split
 from .session import SessionStore
 from .verify import verify_export
+from .verify_raster import verify_raster
 
 
 def _process_one(store, path, preset, output_dir, overwrite, progress):
@@ -23,31 +25,49 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
             build_export_plan(matched, operations),
             s["nodes_by_id"], preset["naming"],
         )
+        fmt = preset.get("outputFormat", "psd")
         src = Path(path)
         out_dir = Path(output_dir) if output_dir else src.parent
-        out_path = out_dir / f"{src.stem}{preset['outputSuffix']}{output_extension(src)}"
+        out_path = out_dir / f"{src.stem}{preset['outputSuffix']}{output_extension(src, fmt)}"
         ensure_writable_path(out_path)
 
         def cb(stage, current, total):
             if progress:
                 progress(str(path), stage, current, total)
 
-        if preset.get("splitLayers"):
+        line_color = preset.get("lineColor")
+        split = preset.get("splitLayers")
+
+        if fmt in ("png", "jpg"):
+            if split:
+                result = export_raster_split(s, entries, out_path, fmt,
+                                             overwrite=overwrite, progress=cb,
+                                             line_color=line_color)
+                for entry, out in zip(entries, result["outputs"]):
+                    out["verification"] = verify_raster(s, [entry], out["outputPath"],
+                                                        fmt, line_color=line_color)
+                verification = {"ok": all(o["verification"]["ok"] for o in result["outputs"])}
+                result["outputPath"] = str(out_dir)
+            else:
+                result = export_raster(s, entries, out_path, fmt, overwrite=overwrite,
+                                       progress=cb, line_color=line_color)
+                verification = verify_raster(s, entries, out_path, fmt,
+                                             line_color=line_color)
+        elif split:
             result = export_psd_split(s, entries, out_path,
                                       embed_preview=preset.get("embedPreview", True),
                                       overwrite=overwrite, progress=cb,
-                                      line_color=preset.get("lineColor"))
+                                      line_color=line_color)
             for entry, out in zip(entries, result["outputs"]):
                 out["verification"] = verify_export(s, [entry], out["outputPath"],
-                                                    line_color=preset.get("lineColor"))
+                                                    line_color=line_color)
             verification = {"ok": all(o["verification"]["ok"] for o in result["outputs"])}
             result["outputPath"] = str(out_dir)
         else:
             result = export_psd(s, entries, out_path,
                                 embed_preview=preset.get("embedPreview", True),
-                                overwrite=overwrite, progress=cb,
-                                line_color=preset.get("lineColor"))
-            verification = verify_export(s, entries, out_path, line_color=preset.get("lineColor"))
+                                overwrite=overwrite, progress=cb, line_color=line_color)
+            verification = verify_export(s, entries, out_path, line_color=line_color)
         return {
             "path": str(path), "ok": verification["ok"],
             "outputPath": result["outputPath"],

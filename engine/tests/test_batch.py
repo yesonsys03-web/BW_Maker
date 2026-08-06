@@ -82,3 +82,17 @@ def test_batch_no_match_is_failure(fixture_psd, tmp_path):
     r = run_batch([str(fixture_psd)], preset, output_dir=str(tmp_path))
     assert r["results"][0]["ok"] is False
     assert "no layers matched" in r["results"][0]["error"]["message"]
+
+
+def test_batch_writes_png_when_the_preset_says_so(fixture_psd, tmp_path):
+    r = run_batch([str(fixture_psd)], {**PRESET, "outputFormat": "png"},
+                  output_dir=str(tmp_path))
+    assert r["results"][0]["ok"] is True
+    assert r["results"][0]["outputPath"].endswith(".png")
+
+
+def test_batch_defaults_to_psd_when_the_preset_has_no_format(fixture_psd, tmp_path):
+    # 사용자의 기존 presets.json에는 이 필드가 없다. PRESET에도 없어야 한다.
+    assert "outputFormat" not in PRESET
+    r = run_batch([str(fixture_psd)], PRESET, output_dir=str(tmp_path))
+    assert r["results"][0]["outputPath"].endswith(".psd")
