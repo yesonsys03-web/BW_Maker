@@ -6,7 +6,7 @@ import { DEFAULT_LINE_COLOR } from "../lib/presets";
 import { toEngineError } from "../lib/preview";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { OpsState } from "../lib/opsReducer";
-import type { EngineError, ExportResult, OpenResult, Operation, Preset, TreeNode } from "../lib/types";
+import type { EngineError, ExportResult, OpenResult, Operation, OutputFormat, Preset, TreeNode } from "../lib/types";
 
 interface ExportDialogProps {
   sessionId: number;
@@ -59,6 +59,7 @@ export function ExportDialog({
   // switch while already open.
   const [outputSuffix, setOutputSuffix] = useState(preset?.outputSuffix ?? "_LINE");
   const [naming, setNaming] = useState<"pathPrefix" | "original">(preset?.naming ?? "pathPrefix");
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>(preset?.outputFormat ?? "psd");
   const [embedPreview, setEmbedPreview] = useState(preset?.embedPreview ?? true);
   const [splitLayers, setSplitLayers] = useState(preset?.splitLayers ?? false);
   const [normalizeColor, setNormalizeColor] = useState((preset?.lineColor ?? null) !== null);
@@ -162,10 +163,14 @@ export function ExportDialog({
 
   async function handleExport() {
     try {
-      const defaultPath = defaultExportPath(srcPath, outputSuffix);
+      const defaultPath = defaultExportPath(srcPath, outputSuffix, outputFormat);
+      const ext = outputExtension(srcPath, outputFormat);
       const outputPath = await save({
         defaultPath,
-        filters: [{ name: "Photoshop", extensions: [outputExtension(srcPath)] }],
+        filters: [{
+          name: outputFormat === "psd" ? "Photoshop" : outputFormat.toUpperCase(),
+          extensions: [ext],
+        }],
       });
       if (!outputPath) return;
 
@@ -178,7 +183,7 @@ export function ExportDialog({
         sessionId,
         (sid) =>
           exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true,
-                    normalizeColor ? lineColor : null, splitLayers),
+                    normalizeColor ? lineColor : null, splitLayers, outputFormat),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);
@@ -244,6 +249,15 @@ export function ExportDialog({
           })}
         </div>
 
+        <label className="preset-field">
+          <span>출력 포맷</span>
+          <select value={outputFormat} onChange={(e) => setOutputFormat(e.target.value as OutputFormat)}>
+            <option value="psd">원본 따름 (.psd / .psb)</option>
+            <option value="png">PNG — 투명 배경</option>
+            <option value="jpg">JPG — 흰 배경</option>
+          </select>
+        </label>
+
         <div className="export-field-row">
           <label className="preset-field">
             <span>파일명 규칙</span>
@@ -274,10 +288,12 @@ export function ExportDialog({
           </label>
         </div>
 
-        <label className="preset-checkbox">
-          <input type="checkbox" checked={embedPreview} onChange={(e) => setEmbedPreview(e.currentTarget.checked)} />
-          <span>미리보기 이미지 포함하여 내보내기</span>
-        </label>
+        {outputFormat === "psd" && (
+          <label className="preset-checkbox">
+            <input type="checkbox" checked={embedPreview} onChange={(e) => setEmbedPreview(e.currentTarget.checked)} />
+            <span>미리보기 이미지 포함하여 내보내기</span>
+          </label>
+        )}
 
         <label className="preset-checkbox">
           <input

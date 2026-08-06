@@ -5,6 +5,7 @@ import type {
   EngineError,
   OpenResult,
   Operation,
+  OutputFormat,
   Preset,
   ExportResult,
   BatchItemResult,
@@ -175,7 +176,8 @@ export async function exportPsd(
   overwrite: boolean = false,
   verify: boolean = true,
   lineColor: string | null = null,
-  splitLayers: boolean = false
+  splitLayers: boolean = false,
+  outputFormat: OutputFormat = "psd"
 ): Promise<ExportResult> {
   return callEngine("export_psd", {
     sessionId,
@@ -188,6 +190,7 @@ export async function exportPsd(
     verify,
     lineColor,
     splitLayers,
+    outputFormat,
   }) as Promise<ExportResult>;
 }
 
