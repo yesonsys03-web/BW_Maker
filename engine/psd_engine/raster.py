@@ -4,7 +4,7 @@ import os
 import numpy as np
 from PIL import Image
 
-from .export import entry_pixels
+from .export import entry_pixels, split_output_path
 from .paths import ensure_writable_path, long_path
 from .render import parse_line_color
 
@@ -85,3 +85,33 @@ def export_raster(session, entries, output_path, fmt, overwrite=False,
         canvas.save(long_path(output_path), format="PNG")
 
     return {"outputPath": output_path, "layerCount": len(entries)}
+
+
+def export_raster_split(session, entries, output_path, fmt, overwrite=False,
+                        progress=None, line_color=None):
+    """
+    엔트리마다 이미지 하나로 내보낸다. 캔버스 크기는 매 파일 원본 그대로다 —
+    나중에 다시 합칠 때 좌표가 맞아야 하기 때문이다.
+
+    충돌·길이 검사는 한 장이라도 쓰기 전에 전부 끝낸다. 절반쯤 쓰다 멈추면
+    어디까지 나갔는지 알 수 없는 상태가 남는다.
+    """
+    if not entries:
+        raise ValueError("no entries to export")
+
+    targets = [(e, split_output_path(str(output_path), e["finalName"])) for e in entries]
+    for _, p in targets:
+        ensure_writable_path(p)
+    if not overwrite:
+        existing = [p for _, p in targets if os.path.exists(long_path(p))]
+        if existing:
+            raise FileExistsError("output already exists: " + ", ".join(existing))
+
+    outputs = []
+    total = len(targets)
+    for i, (entry, path) in enumerate(targets):
+        outputs.append(export_raster(session, [entry], path, fmt, overwrite=True,
+                                     progress=None, line_color=line_color))
+        if progress:
+            progress("write", i + 1, total)
+    return {"outputs": outputs, "layerCount": len(entries)}

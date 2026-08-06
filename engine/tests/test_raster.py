@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from psd_engine.raster import export_raster
+from psd_engine.raster import export_raster, export_raster_split
 
 
 def test_jpg_with_line_color_is_not_a_solid_block(session, plan, tmp_path):
@@ -59,3 +59,26 @@ def test_raster_rejects_a_bad_line_color_before_writing(session, plan, tmp_path)
 def test_raster_rejects_an_empty_plan(session, tmp_path):
     with pytest.raises(ValueError, match="no entries"):
         export_raster(session, [], tmp_path / "a.png", "png")
+
+
+def test_raster_split_writes_one_file_per_entry(session, plan, tmp_path):
+    entries = plan([3, 4, 5])
+    result = export_raster_split(session, entries, tmp_path / "X_LINE.png", "png")
+    assert len(result["outputs"]) == len(entries)
+    for out in result["outputs"]:
+        assert Image.open(out["outputPath"]).size == (
+            session["psd"].width, session["psd"].height)
+
+
+def test_raster_split_checks_every_target_before_writing_any(session, plan, tmp_path):
+    from pathlib import Path
+
+    from psd_engine.export import split_output_path
+
+    entries = plan([3, 4, 5])
+    base = str(tmp_path / "X_LINE.png")
+    Path(split_output_path(base, entries[1]["finalName"])).write_bytes(b"")
+    with pytest.raises(FileExistsError):
+        export_raster_split(session, entries, base, "png")
+    # 첫 엔트리의 파일이 나가 있으면 안 된다.
+    assert not Path(split_output_path(base, entries[0]["finalName"])).exists()
