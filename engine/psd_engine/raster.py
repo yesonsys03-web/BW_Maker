@@ -1,7 +1,6 @@
 """export plan → 평탄화된 PNG/JPG. 원본은 절대 수정하지 않는다."""
 import os
 
-import numpy as np
 from PIL import Image
 
 from .export import entry_pixels, split_output_path

@@ -16,8 +16,13 @@ def test_jpg_with_line_color_is_not_a_solid_block(session, plan, tmp_path):
     export_raster(session, entries, out, "jpg", line_color="#000000")
     arr = np.array(Image.open(out).convert("RGB"))
     assert len(np.unique(arr.reshape(-1, 3), axis=0)) > 1, "단색 이미지가 나왔다"
-    # 라인이 없는 자리는 흰 배경이어야 한다.
-    assert arr.max() > 200
+    # 라인이 없는 자리는 흰 배경이어야 한다. 캔버스는 64x48인데 포함된 세 엔트리
+    # (id 3/4/5: hidden line 5,5..9,9 / line 0,0..32,24 / lines 10,10..30,20)의
+    # 합집합은 (0,0)-(32,24)를 벗어나지 않으므로, (y=40, x=50)은 어떤 레이어와도
+    # 절대 겹치지 않는 순수 배경 픽셀이다. 회색(예: 210,210,210) 같은 스펙 위반
+    # 배경도 걸러내도록 채널별로 근사 흰색인지 본다(JPEG 양자화 여유만 남긴다).
+    bg = arr[40, 50]
+    assert (bg > 250).all(), f"배경이 흰색이 아니다: {tuple(int(c) for c in bg)}"
 
 
 def test_png_keeps_a_transparent_background(session, plan, tmp_path):
