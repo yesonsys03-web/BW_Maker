@@ -43,6 +43,7 @@ vi.mock("../lib/presets", async (orig) => ({
 }));
 
 import { BatchPanel } from "./BatchPanel";
+import { loadPresets } from "../lib/presets";
 import type { FileEntry } from "../state/appStore";
 
 const FILES: FileEntry[] = ["/cuts/a.psd", "/cuts/b.psd", "/cuts/c.psd"].map((path) => ({
@@ -118,6 +119,25 @@ test("the batch asks the engine for one file at a time", async () => {
   finish(0);
   await waitFor(() => expect(runs).toHaveLength(2));
   expect(runs[1].paths).toEqual(["/cuts/b.psd"]);
+});
+
+// planBatchOutputs was already correct and unit-tested — the bug was that
+// the caller here never passed the preset's outputFormat, so the pre-check
+// always looked for .psd paths no matter what the preset would actually
+// write. A PNG-format preset run twice into the same folder would then find
+// zero conflicts on the second run (it's checking .psd, not .png), skip the
+// overwrite dialog, and the engine would raise FileExistsError for every
+// file — with no way in the UI to recover.
+test("the pre-check inspects paths in the preset's output format, not always .psd", async () => {
+  const pngPreset = { ...PRESET, outputFormat: "png" as const };
+  vi.mocked(loadPresets).mockResolvedValueOnce([pngPreset]);
+
+  await startRun();
+
+  expect(engine.pathsExist).toHaveBeenCalledTimes(1);
+  const checked = engine.pathsExist.mock.calls[0][0] as string[];
+  expect(checked.length).toBeGreaterThan(0);
+  expect(checked.every((p) => p.endsWith(".png"))).toBe(true);
 });
 
 test("stop takes effect at the next file, not in the middle of one", async () => {

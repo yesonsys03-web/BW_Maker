@@ -224,7 +224,7 @@ export function BatchPanel({ files, onError, onRunningChange }: BatchPanelProps)
         return;
       }
 
-      const planned = planBatchOutputs(paths, dir, selectedPreset.outputSuffix);
+      const planned = planBatchOutputs(paths, dir, selectedPreset.outputSuffix, selectedPreset.outputFormat);
       // paths_exist (not plugin-fs's exists) — batch outputs routinely land
       // outside the AppData scope plugin-fs is capability-restricted to.
       const flags = await pathsExist(planned.map((p) => p.outputPath));
