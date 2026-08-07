@@ -920,9 +920,26 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
     # 생성된 색 경계 획. 내보내기에서는 라인 엔트리에 합쳐지므로 여기서도 라인과
     # 같은 자리에 놓이면 되는데, 라인이 스택 맨 위인 경우가 대부분이라 마지막에
     # 얹는다. 미리보기 배율로 줄여서 얹는다.
+    #
+    # 스택 순서는 여기서 재현하지 않는다 — 알고 있고 일부러 남겨 둔 것이다. 라인이
+    # 색보다 아래인 문서에서만 드러나고, 고치려면 미리보기 합성 구조를 다시 짜야
+    # 한다(내보내기는 라인 엔트리 자리에 합치는데 미리보기는 레이어를 따로따로
+    # 합성하기 때문).
+    visible_ids = set(visible_layer_ids)
     for overlay in edge_overlays or []:
+        # 이 뷰의 라인이 지금 화면에 없으면 그릴 게 없다 — attach_overlays가
+        # 내보내기 플랜에 없는 뷰를 건너뛰는 것과 같은 규칙이고 판단 기준도 같다:
+        # lineIds가 지금 그려지는 레이어(visible_layer_ids)와 겹치는가.
+        line_ids = set(overlay["lineIds"])
+        if not (line_ids & visible_ids):
+            continue
         arr = overlay["rgba"]
-        if rgb is not None:
+        # 색 통일 범위도 레이어별 루프와 같은 규칙을 쓴다. assign_line_color는
+        # 엔트리의 sourceIds가 **전부** ids 안에 있을 때만 색을 건다(섞이면
+        # 원본색을 지킨다) — 여기서는 엔트리 대신 뷰의 lineIds에 같은 전부-포함
+        # 조건을 적용한다. 어차피 lineIds가 한 장뿐인 흔한 경우에는 레이어별
+        # 루프의 `lid in ids`와 똑같아진다.
+        if rgb is not None and (ids is None or line_ids <= ids):
             arr = apply_line_color(arr, rgb)
         h, w = arr.shape[:2]
         x0, y0 = round(overlay["left"] * scale), round(overlay["top"] * scale)

@@ -972,10 +972,61 @@ def test_render_preview_draws_the_edge_overlays_it_is_given(fixture_psd, tmp_pat
     assert tuple(arr[2, 2][:3]) == (255, 0, 0)
 
 
-def test_render_preview_without_overlays_is_unchanged(fixture_psd, tmp_path):
+def test_render_preview_a_fully_transparent_overlay_leaves_the_canvas_unchanged(
+        fixture_psd, tmp_path):
+    # None과 []는 둘 다 루프를 0번 돈다 — 루프 본문이 무슨 짓을 해도 통과하는
+    # 공허한 대조였다. 알파가 전부 0인 진짜 오버레이를 실제로 루프에 태우고도
+    # (필터 통과, 리사이즈, 합성까지 다 거치고) 결과가 바뀌지 않아야 한다.
     from PIL import Image
     s = _session(fixture_psd)
-    a = np.array(Image.open(render_preview(s, [2, 5], 256, tmp_path)).convert("RGBA"))
-    b = np.array(Image.open(
-        render_preview(s, [2, 5], 256, tmp_path, edge_overlays=[])).convert("RGBA"))
+    transparent = np.zeros((8, 8, 4), np.uint8)  # alpha 전부 0
+    a = np.array(Image.open(render_preview(s, [4, 5], 256, tmp_path)).convert("RGBA"))
+    b = np.array(Image.open(render_preview(
+        s, [4, 5], 256, tmp_path,
+        edge_overlays=[{"rgba": transparent, "left": 0, "top": 0, "lineIds": [4]}],
+    )).convert("RGBA"))
     assert np.array_equal(a, b)
+
+
+def test_render_preview_hides_an_overlay_whose_view_is_not_on_screen(fixture_psd, tmp_path):
+    # 눈 아이콘으로 뷰의 라인을 끄면(=visible_layer_ids에서 빠지면) 그 뷰의 생성된
+    # 획도 같이 사라져야 한다 — 안 그러면 화면에 없는 레이어의 획이 캔버스에
+    # 떠 있게 된다(결함 1).
+    from PIL import Image
+    s = _session(fixture_psd)
+    shown = np.zeros((4, 4, 4), np.uint8)
+    shown[..., :3] = [0, 255, 0]
+    shown[..., 3] = 255
+    hidden = np.zeros((4, 4, 4), np.uint8)
+    hidden[..., :3] = [0, 0, 255]
+    hidden[..., 3] = 255
+    png = render_preview(s, [4], max_size=256, out_dir=tmp_path, edge_overlays=[
+        {"rgba": shown, "left": 0, "top": 0, "lineIds": [4]},   # lineIds가 화면에 있다
+        {"rgba": hidden, "left": 40, "top": 0, "lineIds": [5]},  # lineIds가 화면에 없다
+    ])
+    arr = np.array(Image.open(png).convert("RGBA"))
+    assert tuple(arr[2, 2][:3]) == (0, 255, 0), "화면에 있는 뷰의 획이 그려지지 않았다"
+    assert arr[2, 42, 3] == 0, "화면에 없는 뷰의 획이 그려졌다"
+
+
+def test_render_preview_only_recolors_overlays_whose_view_is_in_the_color_scope(
+        fixture_psd, tmp_path):
+    # 색 통일이 일부 레이어에만 걸릴 때(line_color_ids로 범위를 좁혔을 때), 그
+    # 범위 밖 뷰의 획은 원본 색을 지켜야 한다 — assign_line_color가 규칙에
+    # 걸리지 않은 엔트리의 lineRgb를 None으로 남기는 것과 같은 규칙이다(결함 2).
+    from PIL import Image
+    s = _session(fixture_psd)
+    original = np.zeros((4, 4, 4), np.uint8)
+    original[..., :3] = [100, 100, 100]
+    original[..., 3] = 255
+    png = render_preview(
+        s, [4, 5], max_size=256, out_dir=tmp_path,
+        line_color="#FF0000", line_color_ids=[4],
+        edge_overlays=[
+            {"rgba": original.copy(), "left": 0, "top": 0, "lineIds": [4]},   # 범위 안
+            {"rgba": original.copy(), "left": 40, "top": 0, "lineIds": [5]},  # 범위 밖
+        ],
+    )
+    arr = np.array(Image.open(png).convert("RGBA"))
+    assert tuple(arr[2, 2][:3]) == (255, 0, 0), "범위 안 뷰의 획이 통일색으로 칠해지지 않았다"
+    assert tuple(arr[2, 42][:3]) == (100, 100, 100), "범위 밖 뷰의 획이 통일색으로 칠해졌다"
