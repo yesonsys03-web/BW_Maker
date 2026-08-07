@@ -384,6 +384,61 @@ describe("ops actions delegate to the active file's OpsState", () => {
     expect(after.includedIds).toEqual(before.includedIds);
     expect(after.entries).toEqual(before.entries);
   });
+
+  // --- 색 경계선 수동 지정 (edgeColourIds, task-8b) ---
+
+  test("EMPTY_OPS carries an empty designation set", () => {
+    expect(EMPTY_OPS.edgeColourIds).toEqual([]);
+  });
+
+  test("a freshly opened tree starts with nothing designated", () => {
+    expect(opened().opsByPath["/a.psd"].edgeColourIds).toEqual([]);
+  });
+
+  test("setEdgeColour designates a batch and clears it again", () => {
+    const s0 = opened();
+    const on = appReducer(s0, { type: "setEdgeColour", path: "/a.psd", layerIds: [1, 5], on: true });
+    expect(on.opsByPath["/a.psd"].edgeColourIds).toEqual([1, 5]);
+    const off = appReducer(on, { type: "setEdgeColour", path: "/a.psd", layerIds: [1, 5], on: false });
+    expect(off.opsByPath["/a.psd"].edgeColourIds).toEqual([]);
+  });
+
+  // 설계의 핵심 보장 — 체크박스를 재사용하지 않는다는 결정이 실제로 지켜지는지.
+  test("designating a layer never changes the export checkbox set, and vice versa", () => {
+    const s0 = opened();
+    const designated = appReducer(s0, { type: "setEdgeColour", path: "/a.psd", layerIds: [1], on: true });
+    expect(designated.opsByPath["/a.psd"].includedIds).toEqual(s0.opsByPath["/a.psd"].includedIds);
+
+    const unchecked = appReducer(s0, { type: "setIncluded", path: "/a.psd", includedIds: [5] });
+    expect(unchecked.opsByPath["/a.psd"].edgeColourIds).toEqual(s0.opsByPath["/a.psd"].edgeColourIds);
+  });
+
+  // applyPresetResult는 includedIds/ops/entries를 엔진 결과로 갈아끼우지만,
+  // 지정은 그 프리셋과 무관한 "이 파일의 사실"이므로 previewHiddenIds/soloIds와
+  // 같은 이유로 그대로 넘어가야 한다.
+  test("applyPresetResult carries the designation over unchanged", () => {
+    const s0 = opened();
+    const designated = appReducer(s0, { type: "setEdgeColour", path: "/a.psd", layerIds: [1, 5], on: true });
+    const s = appReducer(designated, {
+      type: "applyPresetResult",
+      path: "/a.psd",
+      matchedLayerIds: [1, 5],
+      operations: [{ op: "merge", layerIds: [1, 5], name: "M" }],
+    });
+    expect(s.opsByPath["/a.psd"].edgeColourIds).toEqual([1, 5]);
+  });
+
+  // 지정은 파일마다 다른 사실이다. 새로 연 파일에 이전 파일의 지정이 새면
+  // 엉뚱한 레이어에 획이 붙는다.
+  test("reopening the file (a fresh openSuccess) does not carry the designation over", () => {
+    const designated = appReducer(opened(), { type: "setEdgeColour", path: "/a.psd", layerIds: [1], on: true });
+    const reopened = appReducer(designated, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId: 2, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+    expect(reopened.opsByPath["/a.psd"].edgeColourIds).toEqual([]);
+  });
 });
 
 // 파일을 열면 App.tsx가 선택된 프리셋을 자동으로 적용한다. 그 효과는 오직

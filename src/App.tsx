@@ -77,6 +77,7 @@ function AppShell() {
     setPreviewHidden,
     toggleSolo,
     setSolo,
+    setEdgeColour,
     pushOp,
     setIncluded,
     applyPresetResult,
@@ -473,7 +474,8 @@ function AppShell() {
       ops.soloIds,
       presetRef.current?.lineColor ?? null,
       matchedIdsByPathRef.current[file.path],
-      presetRef.current?.edgeLines ?? null
+      presetRef.current?.edgeLines ?? null,
+      ops.edgeColourIds
     );
   }, []);
 
@@ -539,7 +541,7 @@ function AppShell() {
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
                 : renderPreview(s, plan.visibleIds, PREVIEW_MAX_SIZE,
                                 presetRef.current?.lineColor ?? null, plan.lineColorIds,
-                                presetRef.current?.edgeLines ?? null),
+                                presetRef.current?.edgeLines ?? null, plan.edgeColourIds),
             (r) => {
               sid = r.sessionId;
               refreshSession(path, r);
@@ -799,6 +801,7 @@ function AppShell() {
           lineColor={selectedPreset?.lineColor ?? null}
           matchedIds={state.activePath ? state.matchedIdsByPath[state.activePath] : undefined}
           edgeLines={selectedPreset?.edgeLines ?? null}
+          edgeColourIds={ops.edgeColourIds}
           paused={loading}
           cache={previewCacheRef.current}
           onRenderingChange={handleCanvasRendering}
@@ -838,6 +841,7 @@ function AppShell() {
           onSetPreviewHidden={setPreviewHidden}
           onToggleSolo={toggleSolo}
           onSetSolo={setSolo}
+          onSetEdgeColour={setEdgeColour}
           onPushOp={pushOp}
           onThumbnailsNeeded={requestThumbnails}
           onError={pushError}

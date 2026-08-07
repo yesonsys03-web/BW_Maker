@@ -121,6 +121,15 @@ export async function autoMergePreview(
 
 /**
  * Renders a preview image of visible layers.
+ *
+ * `manualColourIds`는 색 경계선 생성의 수동 지정(설계 3.1) — 자동 검출이
+ * 못 찾은 색 레이어를 아티스트가 트리에서 직접 짚은 것이다. TS `EdgeLines`
+ * 타입에는 이 필드가 없다: `EdgeLines`는 프리셋에 그대로 저장되는데, 지정은
+ * 파일마다 다른 사실이라 프리셋(파일과 무관)에 넣으면 안 되기 때문이다
+ * (opsReducer.ts의 edgeColourIds 주석 참고). 그래서 엔진이 기대하는 모양
+ * (`edgeLines.manualColourIds`)은 여기서, payload를 만드는 이 자리에서만
+ * 합친다. edgeLines가 꺼져 있으면(null) 엔진이 애초에 안 읽으므로 지정이
+ * 있어도 그대로 null을 보낸다 — 기능이 꺼진 상태를 payload로 흉내내지 않는다.
  */
 export async function renderPreview(
   sessionId: number,
@@ -128,7 +137,8 @@ export async function renderPreview(
   maxSize: number,
   lineColor: string | null = null,
   lineColorIds: number[] | null = null,
-  edgeLines: EdgeLines | null = null
+  edgeLines: EdgeLines | null = null,
+  manualColourIds: number[] | null = null
 ): Promise<{ pngPath: string }> {
   return callEngine("render_preview", {
     sessionId,
@@ -136,7 +146,7 @@ export async function renderPreview(
     maxSize,
     lineColor,
     lineColorIds,
-    edgeLines,
+    edgeLines: edgeLines ? { ...edgeLines, manualColourIds: manualColourIds ?? [] } : null,
   }) as Promise<{ pngPath: string }>;
 }
 
@@ -170,6 +180,10 @@ export async function renderThumbnails(
 
 /**
  * Exports a PSD file with applied operations.
+ *
+ * `manualColourIds` — renderPreview 위의 주석과 같다. PreviewCanvas와 여기가
+ * 같은 값(ops.edgeColourIds)을 보내야 한다: 하나라도 다른 값을 쓰면 아티스트가
+ * 미리보기로 승인한 그림과 실제로 내보낸 파일이 달라진다.
  */
 export async function exportPsd(
   sessionId: number,
@@ -184,7 +198,8 @@ export async function exportPsd(
   splitLayers: boolean = false,
   outputFormat: OutputFormat = "psd",
   lineColorIds: number[] | null = null,
-  edgeLines: EdgeLines | null = null
+  edgeLines: EdgeLines | null = null,
+  manualColourIds: number[] | null = null
 ): Promise<ExportResult> {
   return callEngine("export_psd", {
     sessionId,
@@ -199,7 +214,7 @@ export async function exportPsd(
     splitLayers,
     outputFormat,
     lineColorIds,
-    edgeLines,
+    edgeLines: edgeLines ? { ...edgeLines, manualColourIds: manualColourIds ?? [] } : null,
   }) as Promise<ExportResult>;
 }
 

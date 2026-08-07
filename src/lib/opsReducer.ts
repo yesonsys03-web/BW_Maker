@@ -18,6 +18,18 @@ export interface OpsState {
    * previewHiddenIds와 독립이라, solo를 풀면 원래 화면이 그대로 돌아온다.
    */
   soloIds: number[];
+  /**
+   * 색 경계선 생성의 수동 지정(설계 3.1) — 아티스트가 레이어 트리에서 직접
+   * 짚은 색 레이어(잎) id. 체크박스(includedIds)와 완전히 분리된 별도의
+   * per-layer 집합이다: 체크박스를 그대로 쓰면 지정한 색 레이어가 그 자체로
+   * 내보내기 엔트리가 되어 산출물에 색 레이어가 한 장 끼어든다 — "최종 라인
+   * 레이어만 내보낸다"는 이 기능의 목적과 정면으로 어긋난다.
+   *
+   * 내보내기와 무관하고(soloIds처럼 화면 조작을 위한 것도 아니다), 렌더/
+   * 내보내기 요청의 payload에만 실린다. 프리셋에는 저장하지 않는다 — 어떤
+   * 레이어가 색 원본인지는 파일마다 다른 사실이고 프리셋은 파일과 무관하다.
+   */
+  edgeColourIds: number[];
   ops: Operation[]; // exclude 제외: merge/rename/reorder/flatten
   entries: Entry[]; // includedIds+ops로부터 계산된 현재 내보내기 목록 (아래→위)
 }
@@ -28,6 +40,8 @@ export type OpsAction =
   | { type: "togglePreview"; layerId: number }
   | { type: "toggleSolo"; layerId: number }
   | { type: "setSolo"; layerIds: number[]; solo: boolean }
+  | { type: "toggleEdgeColour"; layerId: number }
+  | { type: "setEdgeColour"; layerIds: number[]; on: boolean }
   | { type: "pushOp"; op: Operation }
   | { type: "undo" };
 
@@ -292,7 +306,10 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
   switch (action.type) {
     case "reset": {
       const includedIds = action.includedIds;
-      return { includedIds, previewHiddenIds: [], soloIds: [], ops: [], entries: buildEntries(includedIds, []) };
+      return {
+        includedIds, previewHiddenIds: [], soloIds: [], edgeColourIds: [],
+        ops: [], entries: buildEntries(includedIds, []),
+      };
     }
     case "setIncluded": {
       const includedIds = action.includedIds;
@@ -318,6 +335,20 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
         ? Array.from(new Set([...state.soloIds, ...action.layerIds]))
         : state.soloIds.filter((id) => !target.has(id));
       return { ...state, soloIds };
+    }
+    case "toggleEdgeColour": {
+      const { layerId } = action;
+      const edgeColourIds = state.edgeColourIds.includes(layerId)
+        ? state.edgeColourIds.filter((id) => id !== layerId)
+        : [...state.edgeColourIds, layerId];
+      return { ...state, edgeColourIds };
+    }
+    case "setEdgeColour": {
+      const target = new Set(action.layerIds);
+      const edgeColourIds = action.on
+        ? Array.from(new Set([...state.edgeColourIds, ...action.layerIds]))
+        : state.edgeColourIds.filter((id) => !target.has(id));
+      return { ...state, edgeColourIds };
     }
     case "pushOp": {
       // Throws on invalid refs (unchanged) — caller/UI catches and displays.

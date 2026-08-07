@@ -89,6 +89,7 @@ export type AppAction =
   | { type: "setPreviewHidden"; path: string; layerIds: number[]; hidden: boolean }
   | { type: "toggleSolo"; path: string; layerId: number }
   | { type: "setSolo"; path: string; layerIds: number[]; solo: boolean }
+  | { type: "setEdgeColour"; path: string; layerIds: number[]; on: boolean }
   | { type: "pushOp"; path: string; op: Operation }
   | { type: "setIncluded"; path: string; includedIds: number[] }
   | { type: "applyPresetResult"; path: string; matchedLayerIds: number[]; operations: Operation[] }
@@ -105,6 +106,7 @@ export const EMPTY_OPS: OpsState = {
   includedIds: [],
   previewHiddenIds: [],
   soloIds: [],
+  edgeColourIds: [],
   ops: [],
   entries: [],
 };
@@ -136,7 +138,9 @@ function collectLeaves(nodes: TreeNode[], out: TreeNode[] = []): TreeNode[] {
  * Initial OpsState for a freshly-opened tree, per the Task 5 contract:
  * includedIds = every pixel leaf id ascending; previewHiddenIds = leaves that
  * were visible=false in the original tree; soloIds = empty — a freshly
- * opened file starts with nothing soloed.
+ * opened file starts with nothing soloed. edgeColourIds is empty for the same
+ * reason: which layers are colour art is a fact about *this* file's tree, not
+ * something a previously open file's designation should leak into (task-8b).
  */
 export function buildInitialOpsState(tree: TreeNode[]): OpsState {
   const leaves = collectLeaves(tree);
@@ -145,7 +149,10 @@ export function buildInitialOpsState(tree: TreeNode[]): OpsState {
     .map((n) => n.id)
     .sort((a, b) => a - b);
   const previewHiddenIds = leaves.filter((n) => !n.visible).map((n) => n.id);
-  return { includedIds, previewHiddenIds, soloIds: [], ops: [], entries: buildEntries(includedIds, []) };
+  return {
+    includedIds, previewHiddenIds, soloIds: [], edgeColourIds: [],
+    ops: [], entries: buildEntries(includedIds, []),
+  };
 }
 
 function updateFile(files: FileEntry[], path: string, patch: Partial<FileEntry>): FileEntry[] {
@@ -258,6 +265,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
     }
 
+    // 색 경계선 생성의 수동 지정(task-8b). setSolo와 같은 모양이다 — 체크박스
+    // (includedIds)와 완전히 분리된 별도 집합이라 setIncluded와는 무관하다.
+    case "setEdgeColour": {
+      const current = state.opsByPath[action.path];
+      if (!current) return state;
+      const next = opsReducer(current, {
+        type: "setEdgeColour", layerIds: action.layerIds, on: action.on,
+      });
+      return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
+    }
+
     case "pushOp": {
       const current = state.opsByPath[action.path];
       if (!current) return state;
@@ -308,6 +326,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           includedIds,
           previewHiddenIds: current.previewHiddenIds,
           soloIds: current.soloIds,
+          // 지정은 이 프리셋과 무관한 "이 파일의 사실"이다(어떤 레이어가 색
+          // 원본인지는 어느 프리셋을 걸든 바뀌지 않는다) — previewHiddenIds/
+          // soloIds와 같은 이유로 그대로 넘긴다.
+          edgeColourIds: current.edgeColourIds,
           ops: action.operations,
           entries,
         };
@@ -567,6 +589,8 @@ export interface AppContextValue {
   setPreviewHidden: (layerIds: number[], hidden: boolean) => void;
   toggleSolo: (layerId: number) => void;
   setSolo: (layerIds: number[], solo: boolean) => void;
+  /** 색 경계선 생성의 수동 지정을 켜고 끈다(task-8b). LayerTree의 컨텍스트 메뉴가 쓴다. */
+  setEdgeColour: (layerIds: number[], on: boolean) => void;
   pushOp: (op: Operation) => void;
   setIncluded: (includedIds: number[]) => void;
   applyPresetResult: (matchedLayerIds: number[], operations: Operation[]) => void;
@@ -627,6 +651,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (layerIds: number[], solo: boolean) => {
       if (!state.activePath) return;
       dispatch({ type: "setSolo", path: state.activePath, layerIds, solo });
+    },
+    [state.activePath]
+  );
+
+  const setEdgeColour = useCallback(
+    (layerIds: number[], on: boolean) => {
+      if (!state.activePath) return;
+      dispatch({ type: "setEdgeColour", path: state.activePath, layerIds, on });
     },
     [state.activePath]
   );
@@ -704,6 +736,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setPreviewHidden,
       toggleSolo,
       setSolo,
+      setEdgeColour,
       pushOp,
       setIncluded,
       applyPresetResult,
@@ -725,6 +758,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setPreviewHidden,
       toggleSolo,
       setSolo,
+      setEdgeColour,
       pushOp,
       setIncluded,
       applyPresetResult,

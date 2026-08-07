@@ -217,6 +217,7 @@ const fresh = (includedIds: number[]): OpsState => ({
   includedIds,
   previewHiddenIds: [],
   soloIds: [],
+  edgeColourIds: [],
   ops: [],
   entries: buildEntries(includedIds, []),
 });
@@ -224,6 +225,7 @@ const withOps = (includedIds: number[], ops: Operation[]): OpsState => ({
   includedIds,
   previewHiddenIds: [],
   soloIds: [],
+  edgeColourIds: [],
   ops,
   entries: buildEntries(includedIds, ops),
 });
@@ -359,6 +361,7 @@ const soloBase: OpsState = {
   includedIds: [1, 2, 3],
   previewHiddenIds: [2],
   soloIds: [],
+  edgeColourIds: [],
   ops: [],
   entries: [],
 };
@@ -404,4 +407,74 @@ test("setSolo removes only the ids it names, leaving other solos alone", () => {
   const all = opsReducer(soloBase, { type: "setSolo", layerIds: [1, 2, 3], solo: true });
   const some = opsReducer(all, { type: "setSolo", layerIds: [1, 2], solo: false });
   expect(some.soloIds).toEqual([3]);
+});
+
+// --- 색 경계선 수동 지정 (edgeColourIds, 설계 결정 1) ---
+//
+// 체크박스(includedIds)와 완전히 분리된 별도의 per-layer 집합이다. 체크박스를
+// 그대로 쓰면 지정한 색 레이어가 그 자체로 내보내기 엔트리가 되어 산출물에
+// 색 레이어가 한 장 끼어든다 — "최종 라인 레이어만 내보낸다"는 이 기능의
+// 목적과 정면으로 어긋난다. soloIds와 같은 모양이라 액션도 그대로 본떴다.
+
+const edgeColourBase: OpsState = {
+  includedIds: [1, 2, 3],
+  previewHiddenIds: [],
+  soloIds: [],
+  edgeColourIds: [],
+  ops: [],
+  entries: [],
+};
+
+test("toggleEdgeColour designates a leaf, then undesignates it", () => {
+  const on = opsReducer(edgeColourBase, { type: "toggleEdgeColour", layerId: 1 });
+  expect(on.edgeColourIds).toEqual([1]);
+  const off = opsReducer(on, { type: "toggleEdgeColour", layerId: 1 });
+  expect(off.edgeColourIds).toEqual([]);
+});
+
+test("toggleEdgeColour keeps earlier designations — several layers can be designated at once", () => {
+  const one = opsReducer(edgeColourBase, { type: "toggleEdgeColour", layerId: 1 });
+  const two = opsReducer(one, { type: "toggleEdgeColour", layerId: 3 });
+  expect(two.edgeColourIds).toEqual([1, 3]);
+});
+
+test("setEdgeColour designates and clears a whole selection in one action", () => {
+  const on = opsReducer(edgeColourBase, { type: "setEdgeColour", layerIds: [1, 2, 3], on: true });
+  expect(on.edgeColourIds).toEqual([1, 2, 3]);
+  const off = opsReducer(on, { type: "setEdgeColour", layerIds: [1, 2, 3], on: false });
+  expect(off.edgeColourIds).toEqual([]);
+});
+
+test("setEdgeColour does not duplicate ids that are already designated", () => {
+  const one = opsReducer(edgeColourBase, { type: "toggleEdgeColour", layerId: 2 });
+  const many = opsReducer(one, { type: "setEdgeColour", layerIds: [1, 2], on: true });
+  expect(many.edgeColourIds).toEqual([2, 1]);
+});
+
+test("setEdgeColour removes only the ids it names, leaving other designations alone", () => {
+  const all = opsReducer(edgeColourBase, { type: "setEdgeColour", layerIds: [1, 2, 3], on: true });
+  const some = opsReducer(all, { type: "setEdgeColour", layerIds: [1, 2], on: false });
+  expect(some.edgeColourIds).toEqual([3]);
+});
+
+// 설계의 핵심 보장. 지정과 체크박스가 서로에게 영향을 주면 "체크박스를
+// 재사용하지 않는다"는 설계 결정 전체가 무너진다.
+test("designating a layer never touches includedIds", () => {
+  const before = edgeColourBase.includedIds;
+  const designated = opsReducer(edgeColourBase, { type: "setEdgeColour", layerIds: [1], on: true });
+  expect(designated.includedIds).toEqual(before);
+});
+
+test("checking/unchecking a layer never touches edgeColourIds", () => {
+  const withDesignation = opsReducer(edgeColourBase, { type: "setEdgeColour", layerIds: [1], on: true });
+  const uncheckedOne = opsReducer(withDesignation, { type: "setIncluded", includedIds: [2, 3] });
+  expect(uncheckedOne.edgeColourIds).toEqual([1]);
+});
+
+// reset은 파일을 새로 열 때 쓰인다(App.tsx buildInitialOpsState와 같은 계약).
+// 지정은 파일마다 다른 사실이므로, 이전 파일의 지정이 다음 파일로 새면 안 된다.
+test("reset clears edgeColourIds along with the rest of the file-scoped state", () => {
+  const designated = opsReducer(edgeColourBase, { type: "setEdgeColour", layerIds: [1, 2], on: true });
+  const reset = opsReducer(designated, { type: "reset", includedIds: [1, 2, 3] });
+  expect(reset.edgeColourIds).toEqual([]);
 });

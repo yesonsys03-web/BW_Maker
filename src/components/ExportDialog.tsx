@@ -190,9 +190,12 @@ export function ExportDialog({
         srcPath,
         sessionId,
         (sid) =>
+          // ops.edgeColourIds(수동 지정)를 넘긴다 — PreviewCanvas가 미리보기에
+          // 쓰는 것과 같은 값이어야 한다. 하나라도 다르면 아티스트가 미리보기로
+          // 승인한 그림과 실제 내보낸 파일이 갈린다.
           exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true,
                     normalizeColor ? lineColor : null, splitLayers, outputFormat,
-                    matchedIds ?? null, preset?.edgeLines ?? null),
+                    matchedIds ?? null, preset?.edgeLines ?? null, ops.edgeColourIds),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);

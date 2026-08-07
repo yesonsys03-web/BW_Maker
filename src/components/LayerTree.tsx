@@ -43,6 +43,11 @@ interface LayerTreeProps {
   onSetPreviewHidden: (layerIds: number[], hidden: boolean) => void;
   onToggleSolo: (layerId: number) => void;
   onSetSolo: (layerIds: number[], solo: boolean) => void;
+  /**
+   * 색 경계선 생성의 수동 지정을 켜고 끈다(설계 3.1). ops.edgeColourIds가
+   * 대상 집합이고, 여기서는 컨텍스트 메뉴의 다중 선택을 그대로 받는다.
+   */
+  onSetEdgeColour: (layerIds: number[], on: boolean) => void;
   onPushOp: (op: Operation) => void;
   /**
    * 지금 화면에 보이는 pixel leaf id 전부. 스크롤할 때마다 새 목록으로 불린다.
@@ -128,6 +133,7 @@ export function LayerTree({
   onSetPreviewHidden,
   onToggleSolo,
   onSetSolo,
+  onSetEdgeColour,
   onPushOp,
   onThumbnailsNeeded,
   onError,
@@ -159,6 +165,7 @@ export function LayerTree({
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
   const previewHiddenSet = useMemo(() => new Set(ops.previewHiddenIds), [ops.previewHiddenIds]);
   const soloSet = useMemo(() => new Set(ops.soloIds), [ops.soloIds]);
+  const edgeColourSet = useMemo(() => new Set(ops.edgeColourIds), [ops.edgeColourIds]);
   const matchedSet = useMemo(() => new Set(matchedIds), [matchedIds]);
 
   const allLeaves = useMemo(() => (tree ? flattenLeaves(tree) : []), [tree]);
@@ -412,6 +419,39 @@ export function LayerTree({
   }
 
   /**
+   * 색 경계선 생성의 수동 지정 대상. pixel leaf만 남긴다 — 색 경계선은 실제로
+   * 칠해진 픽셀에서만 의미가 있다(체크박스가 pixel leaf에만 걸리는 것과 같은
+   * 이유). 병합 행이 섞여 있으면 expandRowIds가 원본 소스 id로 펼친다.
+   */
+  function edgeColourTargets(ids: number[]): number[] {
+    if (!tree) return [];
+    return expandRowIds(ids).filter((id) => nodeById(tree, id)?.kind === "pixel");
+  }
+
+  /**
+   * 컨텍스트 메뉴의 "색 원본으로 지정" 버튼. 다중 선택이 섞인 상태(일부만
+   * 지정됨)일 때의 동작은 그룹 solo/eye 토글과 같은 규약을 쓴다 — 전부
+   * 지정됐으면 눌렀을 때 전부 해제하고, 하나라도 안 됐으면 전부 지정한다.
+   * 선택마다 개별 토글하면 "일부는 켜지고 일부는 꺼지는" 결과를 예측하기
+   * 어렵고, 그 규약이 이미 이 파일 전체에서 쓰이고 있어 일관적이다.
+   */
+  function handleToggleEdgeColour(ids: number[]) {
+    setContextMenu(null);
+    const targets = edgeColourTargets(ids);
+    if (targets.length === 0) return;
+    const allDesignated = targets.every((id) => edgeColourSet.has(id));
+    onSetEdgeColour(targets, !allDesignated);
+  }
+
+  function edgeColourButtonLabel(ids: number[]): string {
+    const targets = edgeColourTargets(ids);
+    if (targets.length > 0 && targets.every((id) => edgeColourSet.has(id))) {
+      return "색 원본 지정 해제";
+    }
+    return "색 원본으로 지정";
+  }
+
+  /**
    * 지금 화면에 보이는 leaf 전체를 한 번에 체크/해제한다. 필터로 좁힌 뒤
    * 하나씩 누르지 않아도 되게 하는 것이 이 패널의 목적이므로, 대상은 항상
    * "필터 결과"이지 트리 전체가 아니다.
@@ -566,6 +606,7 @@ export function LayerTree({
     const included = includedSet.has(node.id);
     const hidden = previewHiddenSet.has(node.id);
     const soloed = soloSet.has(node.id);
+    const edgeColour = edgeColourSet.has(node.id);
     const selected = selectedIds.has(node.id);
     const disabledCheckbox = node.kind !== "pixel";
     const flat = opts.breadcrumb !== undefined;
@@ -574,7 +615,7 @@ export function LayerTree({
     return (
       <div
         key={node.id}
-        className={`tree-row tree-row-leaf${flat ? " tree-row-flat" : ""}${opts.nested ? " tree-row-merge-source" : ""}${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
+        className={`tree-row tree-row-leaf${flat ? " tree-row-flat" : ""}${opts.nested ? " tree-row-merge-source" : ""}${selected ? " selected" : ""}${isMatched ? " matched" : ""}${edgeColour ? " edge-colour" : ""}`}
         style={{ paddingLeft: `${opts.indentPx}px` }}
         role={flat ? "listitem" : "treeitem"}
         aria-selected={selected}
@@ -632,16 +673,28 @@ export function LayerTree({
             </span>
           )}
         </span>
-        {exportLabel && (
-          <span
-            className={`node-export-label${exportLabel.merged ? " merged" : ""}`}
-            title={
-              exportLabel.merged
-                ? `${exportLabel.sourceCount}장이 "${exportLabel.name}" 하나로 병합되어 내보내집니다.`
-                : `"${exportLabel.name}" 이름으로 내보내집니다.`
-            }
-          >
-            {exportLabel.merged ? `⤳ ${exportLabel.name} ×${exportLabel.sourceCount}` : `⤳ ${exportLabel.name}`}
+        {(edgeColour || exportLabel) && (
+          <span className="node-trailing">
+            {edgeColour && (
+              <span
+                className="node-edge-colour-badge"
+                title="색 경계선 생성의 색 원본으로 지정됨 (체크박스·내보내기 포함 여부와는 무관)"
+              >
+                색 원본
+              </span>
+            )}
+            {exportLabel && (
+              <span
+                className={`node-export-label${exportLabel.merged ? " merged" : ""}`}
+                title={
+                  exportLabel.merged
+                    ? `${exportLabel.sourceCount}장이 "${exportLabel.name}" 하나로 병합되어 내보내집니다.`
+                    : `"${exportLabel.name}" 이름으로 내보내집니다.`
+                }
+              >
+                {exportLabel.merged ? `⤳ ${exportLabel.name} ×${exportLabel.sourceCount}` : `⤳ ${exportLabel.name}`}
+              </span>
+            )}
           </span>
         )}
         {node.kind !== "pixel" && <span className="node-kind">{node.kind}</span>}
@@ -658,6 +711,10 @@ export function LayerTree({
     const sourceIds = row.leaves.map((l) => l.node.id);
     const selected = selectedIds.has(row.entryId);
     const isMatched = sourceIds.some((id) => matchedSet.has(id));
+    // 병합된 소스 중 하나라도 지정돼 있으면 표시한다 — isMatched와 같은 규약
+    // ("일부라도 있으면 보인다")이다. 지정은 소스 leaf 단위라 병합 행 자체에는
+    // 별도로 붙지 않는다.
+    const edgeColour = sourceIds.some((id) => edgeColourSet.has(id));
     const allIncluded = sourceIds.length > 0 && sourceIds.every((id) => includedSet.has(id));
     const someIncluded = sourceIds.some((id) => includedSet.has(id));
     const hidden = sourceIds.length > 0 && sourceIds.every((id) => previewHiddenSet.has(id));
@@ -672,7 +729,7 @@ export function LayerTree({
     return (
       <div
         key={`merged-${row.entryId}`}
-        className={`tree-row tree-row-leaf tree-row-flat tree-row-merged${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
+        className={`tree-row tree-row-leaf tree-row-flat tree-row-merged${selected ? " selected" : ""}${isMatched ? " matched" : ""}${edgeColour ? " edge-colour" : ""}`}
         style={{ paddingLeft: "8px" }}
         role="listitem"
         aria-selected={selected}
@@ -745,6 +802,16 @@ export function LayerTree({
             {sourceNames} ({row.sourceCount}장 병합)
           </span>
         </span>
+        {edgeColour && (
+          <span className="node-trailing">
+            <span
+              className="node-edge-colour-badge"
+              title="병합된 소스 중 색 경계선 생성의 색 원본으로 지정된 것이 있습니다"
+            >
+              색 원본
+            </span>
+          </span>
+        )}
       </div>
     );
   }
@@ -921,6 +988,14 @@ export function LayerTree({
             onClick={() => handleUnmerge(contextMenu.ids)}
           >
             병합에서 빼기
+          </button>
+          <button
+            type="button"
+            disabled={edgeColourTargets(contextMenu.ids).length === 0}
+            title="색 경계선 생성이 자동으로 못 찾은 색 레이어를 직접 표시합니다. 체크박스(내보내기 포함 여부)와는 무관하고, 프리셋에는 저장되지 않습니다."
+            onClick={() => handleToggleEdgeColour(contextMenu.ids)}
+          >
+            {edgeColourButtonLabel(contextMenu.ids)}
           </button>
           <button type="button" onClick={() => handleExclude(contextMenu.ids)}>
             내보내기에서 제외

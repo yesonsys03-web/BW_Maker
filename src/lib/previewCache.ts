@@ -29,11 +29,21 @@ export function previewRenderSpec(
   soloIds: number[],
   lineColor: string | null,
   matchedIds: number[] | undefined,
-  edgeLines: EdgeLines | null
+  edgeLines: EdgeLines | null,
+  /**
+   * 색 경계선 생성의 수동 지정(opsReducer의 edgeColourIds). EdgeLines 안이
+   * 아니라 여기 별도 인자인 이유: EdgeLines는 프리셋에 실려 저장되는데,
+   * 지정은 파일마다 다른 사실이라 프리셋에 넣으면 안 된다(엔진에 보내는
+   * payload에서만 합쳐진다 — lib/engine.ts 참고). 값을 그대로 돌려주는 것은
+   * 호출부(App.tsx의 준비 큐)가 렌더 호출에 같은 값을 다시 쓸 수 있게 하기
+   * 위해서다 — 화면이 그리는 값과 미리 만들어두는 값이 갈리면 안 된다.
+   */
+  edgeColourIds: number[]
 ): {
   visibleIds: number[];
   documentView: boolean;
   lineColorIds: number[] | null;
+  edgeColourIds: number[];
   key: string | null;
 } {
   const visibleIds = visibleIdsForPreview(tree, includedIds, previewHiddenIds, soloIds);
@@ -42,7 +52,8 @@ export function previewRenderSpec(
     visibleIds,
     documentView,
     lineColorIds: lineColorIdsFor(visibleIds, lineColor, matchedIds),
-    key: previewCacheKey(file, documentView, visibleIds, lineColor, matchedIds, edgeLines),
+    edgeColourIds,
+    key: previewCacheKey(file, documentView, visibleIds, lineColor, matchedIds, edgeLines, edgeColourIds),
   };
 }
 
@@ -98,7 +109,9 @@ export function previewCacheKey(
   visibleIds: number[],
   lineColor: string | null,
   matchedIds: number[] | undefined,
-  edgeLines: EdgeLines | null
+  edgeLines: EdgeLines | null,
+  /** 색 경계선 생성의 수동 지정. previewRenderSpec의 같은 이름 인자 참고. */
+  edgeColourIds: number[]
 ): string | null {
   if (file.mtime === undefined) return null;
   // 문서 보기는 visibleIds/lineColor/edgeLines를 쓰지 않지만 키에 남겨도 해롭지
@@ -112,6 +125,11 @@ export function previewCacheKey(
   // 통째로 담는다. 켰다 껐다 하거나 프리셋을 바꿨는데 캐시가 이전 그림을 그대로
   // 돌려주면, 아티스트는 계속 옛 미리보기를 보면서 다른 설정을 확인했다고
   // 믿게 된다. 느린 편이 그보다 낫다.
+  //
+  // edgeColourIds(수동 지정)도 같은 이유로 무조건 담는다 — EdgeLines가 꺼져
+  // 있는 동안(JSON.stringify(edgeLines) === "null")에도 값을 남긴다. 지정을
+  // 바꾼 뒤 곧바로 켜는 순서로 쓰일 수 있어서, 꺼진 동안의 지정 변경을 키가
+  // 놓치면 켠 순간 옛 그림을 재사용하게 된다.
   const lineColorIds = lineColorIdsFor(visibleIds, lineColor, matchedIds);
   return [
     file.path,
@@ -121,6 +139,7 @@ export function previewCacheKey(
     lineColorIds === null ? "all" : lineColorIds.join(","),
     visibleIds.join(","),
     JSON.stringify(edgeLines),
+    edgeColourIds.join(","),
   ].join("\n");
 }
 
