@@ -165,3 +165,73 @@ def build_overlay(colour_rgba, line_alpha, opts):
     mask = drop_small(mask, labels, count, o["minLength"])
     labels, _ = label_components(mask)
     return stroke_rgba(mask, labels, colour, o["width"])
+
+
+def _union_bbox(layers):
+    boxes = [l.bbox for l in layers if l.bbox != (0, 0, 0, 0)]
+    if not boxes:
+        return None
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def _paste_alpha(layers, box):
+    """레이어들의 알파를 box 좌표계의 한 장으로 모은다(최댓값 합성)."""
+    left, top, right, bottom = box
+    out = np.zeros((bottom - top, right - left), np.uint8)
+    for layer in layers:
+        if layer.bbox == (0, 0, 0, 0):
+            continue
+        arr = np.array(layer.topil().convert("RGBA"))[..., 3]
+        lx, ly = layer.bbox[0] - left, layer.bbox[1] - top
+        y0, x0 = max(0, ly), max(0, lx)
+        y1 = min(out.shape[0], ly + arr.shape[0])
+        x1 = min(out.shape[1], lx + arr.shape[1])
+        if y1 <= y0 or x1 <= x0:
+            continue
+        np.maximum(out[y0:y1, x0:x1], arr[y0 - ly:y1 - ly, x0 - lx:x1 - lx],
+                   out=out[y0:y1, x0:x1])
+    return out
+
+
+def overlay_for_view(session, colour_ids, line_ids, opts):
+    """
+    뷰 하나의 획 오버레이. 그릴 것이 없으면 None.
+
+    색 레이어를 **합성해서** 본다. 레이어별 알파 경계를 쓰면 다른 레이어에 가려져
+    실제로는 보이지 않는 경계까지 후보가 되기 때문이다(모듈 docstring 참고).
+
+    뷰포트는 색 레이어들의 합집합이다. 기존 라인은 그 좌표계로 옮겨 담는다 —
+    라인이 색보다 넓어도 겹치는 부분만 있으면 된다.
+    """
+    layers_by_id = session["layers_by_id"]
+    colour_layers = [layers_by_id[i] for i in colour_ids]
+    box = _union_bbox(colour_layers)
+    if box is None:
+        return None
+
+    wanted = {id(l) for l in colour_layers}
+    img = session["psd"].composite(
+        viewport=box, force=True, color=1.0, alpha=0.0,
+        layer_filter=lambda l: id(l) in wanted or l.is_group(),
+    )
+    colour_rgba = np.array(img.convert("RGBA"))
+    line_alpha = _paste_alpha([layers_by_id[i] for i in line_ids], box)
+
+    out = build_overlay(colour_rgba, line_alpha, opts)
+    if out[..., 3].max() == 0:
+        return None
+    return out, box[0], box[1]
+
+
+def plan_overlays(session, views, opts):
+    """뷰 목록 → 오버레이 목록. 그릴 것이 없는 뷰는 빠진다."""
+    plans = []
+    for view in views:
+        made = overlay_for_view(session, view["colourIds"], view["lineIds"], opts)
+        if made is None:
+            continue
+        rgba, left, top = made
+        plans.append({"lineIds": view["lineIds"], "rgba": rgba,
+                      "left": left, "top": top})
+    return plans

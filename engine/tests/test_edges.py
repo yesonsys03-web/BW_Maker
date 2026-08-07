@@ -116,3 +116,52 @@ def test_build_overlay_draws_where_no_line_covers_the_colour_change():
     out = build_overlay(rgba, line, EDGE_DEFAULTS)
     assert out[..., 3].max() > 0
     assert out[10, 5, 3] > 0
+
+
+from psd_engine.character import find_views
+from psd_engine.edges import overlay_for_view, plan_overlays
+from psd_engine.session import SessionStore
+from pytoshop.user import nested_layers
+
+from conftest import make_rgb_image, write_psd
+
+
+def _two_tone_session(tmp_path):
+    """빨강 바탕 위에 어두운 조각이 얹힌 뷰 하나. 그 경계에는 선이 없다."""
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("dark", (40, 20, 20), 0, 0, 32, 12),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    line = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    p = tmp_path / "twotone.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT 3/4", layers=[line, colours])])
+    store = SessionStore()
+    return store.get(store.open(str(p)))
+
+
+def test_overlay_for_view_draws_the_unlined_colour_seam(tmp_path):
+    s = _two_tone_session(tmp_path)
+    view = find_views(s)[0]
+    rgba, left, top = overlay_for_view(s, view["colourIds"], view["lineIds"], EDGE_DEFAULTS)
+    assert rgba[..., 3].max() > 0, "경계에 획이 생기지 않았다"
+    assert rgba.shape[2] == 4
+
+
+def test_overlay_for_view_is_none_when_there_is_no_unlined_boundary(tmp_path):
+    # 색이 한 가지뿐이면 색 변화가 없다.
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)])
+    line = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    p = tmp_path / "flat.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT 3/4", layers=[line, colours])])
+    store = SessionStore()
+    s = store.get(store.open(str(p)))
+    view = find_views(s)[0]
+    assert overlay_for_view(s, view["colourIds"], view["lineIds"], EDGE_DEFAULTS) is None
+
+
+def test_plan_overlays_carries_the_line_ids_it_belongs_to(tmp_path):
+    s = _two_tone_session(tmp_path)
+    plans = plan_overlays(s, find_views(s), EDGE_DEFAULTS)
+    assert len(plans) == 1
+    assert plans[0]["lineIds"] == find_views(s)[0]["lineIds"]
