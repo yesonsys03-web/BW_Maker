@@ -426,3 +426,86 @@ def test_paste_alpha_applies_the_layers_mask(tmp_path):
     out = _paste_alpha([layer], (0, 0, 8, 8))
     assert out[:, 4:].max() == 0, "마스크로 가려진 자리가 topil()의 불투명 알파로 남았다"
     assert out[:, :4].max() > 0, "마스크로 가려지지 않은 자리까지 지워졌다"
+
+
+from PIL import Image as _PILImage  # noqa: E402
+from PIL import ImageFilter as _PILImageFilter  # noqa: E402
+
+from psd_engine.edges import _morph  # noqa: E402
+
+
+def _pil_morph(mask, size, grow):
+    """_morph의 옛 구현 그대로 — 새 구현이 갈라지지 않았음을 재는 기준자다."""
+    if size <= 1:
+        return mask
+    size = size if size % 2 else size + 1
+    f = (_PILImageFilter.MaxFilter(size) if grow
+         else _PILImageFilter.MinFilter(size))
+    return np.array(
+        _PILImage.fromarray((mask * 255).astype(np.uint8)).filter(f)) > 127
+
+
+def test_morph_matches_the_pil_rank_filter_pixel_for_pixel():
+    # PIL의 랭크 필터는 커널 넓이의 제곱으로 드는데(21px면 픽셀당 441회), 실제
+    # 납품 파일 한 장이 이 안에서 16분을 보냈다. 정사각 커널이면 팽창은 "창 안에
+    # 켜진 픽셀이 하나라도 있는가"와 같은 말이고 그건 적분영상 네 귀퉁이로 O(1)에
+    # 답할 수 있다 — 커널이 커져도 비용이 늘지 않는다.
+    #
+    # 바꾼 것은 속도뿐이어야 하므로 옛 구현을 그대로 기준자로 두고 한 픽셀도
+    # 다르지 않은지 잰다. 특히 가장자리를 조심해서 본다: PIL은 여백을 복사하는
+    # 것이 아니라 창을 이미지 안으로 잘라 계산하고, 제로 패딩한 적분영상이 그와
+    # 같은 답을 내는지가 이 테스트의 핵심이다.
+    rng = np.random.default_rng(20260807)
+    cases = []
+
+    # 가장자리·모서리에 정확히 걸친 것들 — 여백 규칙이 갈리면 여기서 갈린다.
+    for h, w in ((9, 9), (12, 7)):
+        for spot in ((0, 0), (0, w - 1), (h - 1, 0), (h - 1, w - 1),
+                     (0, w // 2), (h // 2, 0), (h // 2, w // 2)):
+            m = np.zeros((h, w), bool)
+            m[spot] = True
+            cases.append(m)
+        edge = np.zeros((h, w), bool)
+        edge[0, :] = True                      # 위쪽 변 전체
+        edge[:, -1] = True                     # 오른쪽 변 전체
+        cases.append(edge)
+        cases.append(np.ones((h, w), bool))    # 전부 켜짐 — 침식이 전부 지우는지
+        cases.append(np.zeros((h, w), bool))   # 전부 꺼짐
+
+    # 밀도가 다른 무작위 마스크. 성긴 쪽이 실제 경계 마스크에 가깝고, 빽빽한
+    # 쪽은 침식이 실제로 깎을 것이 있는 경우를 만든다.
+    for density in (0.02, 0.2, 0.8):
+        for _ in range(6):
+            cases.append(rng.random((13, 17)) < density)
+
+    for size in (1, 2, 3, 5, 9, 11, 21):
+        for grow in (True, False):
+            for i, m in enumerate(cases):
+                got = _morph(m, size, grow=grow)
+                want = _pil_morph(m, size, grow=grow)
+                assert got.dtype == want.dtype, f"size={size} grow={grow} 케이스 {i}"
+                assert (got == want).all(), (
+                    f"size={size} grow={grow} 케이스 {i}에서 갈렸다 "
+                    f"({int((got != want).sum())}px)")
+
+
+def test_morph_cost_does_not_grow_with_the_kernel():
+    # 이 함수를 바꾼 이유 자체를 지킨다. 옛 구현은 폭 21이 폭 5의 열 배쯤 들었다.
+    # 새 구현은 창 크기와 무관해야 하므로, 넓은 커널이 좁은 커널의 세 배를 넘으면
+    # 제곱 비용이 어딘가로 돌아온 것이다.
+    import time
+
+    rng = np.random.default_rng(11)
+    mask = rng.random((900, 900)) < 0.01
+
+    def elapsed(size):
+        best = float("inf")
+        for _ in range(3):                     # 최솟값을 쓴다 — 잡음에 흔들리지 않게
+            t0 = time.perf_counter()
+            _morph(mask, size, grow=True)
+            best = min(best, time.perf_counter() - t0)
+        return best
+
+    narrow, wide = elapsed(5), elapsed(21)
+    assert wide < narrow * 3, (
+        f"넓은 커널이 여전히 비싸다 (폭 5 {narrow*1000:.1f}ms, 폭 21 {wide*1000:.1f}ms)")

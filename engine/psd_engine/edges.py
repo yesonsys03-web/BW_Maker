@@ -108,12 +108,38 @@ def colour_change(rgba, threshold):
 
 
 def _morph(mask, size, grow):
-    """PIL로 하는 팽창/침식. size는 홀수여야 한다."""
+    """
+    적분영상으로 하는 팽창/침식. size는 홀수여야 한다.
+
+    정사각 커널이면 팽창은 "창 안에 켜진 픽셀이 하나라도 있는가"와 같은 말이고,
+    창의 합은 적분영상 네 귀퉁이의 덧뺄셈이라 **커널이 커져도 비용이 늘지 않는다**.
+    침식은 여집합의 팽창이다.
+
+    전에는 PIL의 `MaxFilter(size)`였다. 랭크 필터는 커널 넓이의 제곱으로 드는데
+    (폭 21이면 픽셀당 441회), 자동 굵기가 큰 파일에서 이것이 터졌다 — 실측으로
+    납품 파일 한 장이 이 함수 안에서 16분을 보냈고, 그동안 프로세스는 CPU 98%에
+    RSS는 1MB도 움직이지 않았다. 12 Mpx / 폭 21 기준 11.19초가 0.38초가 된다.
+
+    가장자리 규칙까지 PIL과 같다. PIL은 여백을 복사하는 것이 아니라 창을 이미지
+    안으로 잘라서 계산하고, 제로 패딩한 적분영상이 같은 답을 낸다 — 팽창에서는
+    바깥이 꺼진 픽셀이고, 침식에서는 여집합을 취하므로 바깥이 켜진 픽셀이라
+    양쪽 다 "이미지 밖은 창에 없는 것과 같다"가 된다. `test_morph_matches_the_
+    pil_rank_filter_pixel_for_pixel`이 옛 구현을 기준자로 두고 이것을 잰다.
+    """
     if size <= 1:
         return mask
     size = size if size % 2 else size + 1
-    f = ImageFilter.MaxFilter(size) if grow else ImageFilter.MinFilter(size)
-    return np.array(Image.fromarray((mask * 255).astype(np.uint8)).filter(f)) > 127
+    r = size // 2
+    src = mask if grow else ~mask
+    h, w = src.shape
+    # 위·왼쪽에 한 줄 더 있는 제로 패딩 적분영상. 창 합은 네 귀퉁이로 얻는다.
+    padded = np.zeros((h + 2 * r + 1, w + 2 * r + 1), np.int32)
+    padded[r + 1:r + 1 + h, r + 1:r + 1 + w] = src
+    total = padded.cumsum(0).cumsum(1)
+    window = (total[2 * r + 1:, 2 * r + 1:] - total[:h, 2 * r + 1:]
+              - total[2 * r + 1:, :w] + total[:h, :w])
+    hit = window > 0
+    return hit if grow else ~hit
 
 
 def subtract_lines(mask, line_alpha, gap, line_alpha_threshold):
