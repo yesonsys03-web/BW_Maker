@@ -376,3 +376,13 @@ test("a non-numeric edge line setting is rejected rather than coerced", () => {
   const bad = { ...DEFAULT_PRESET, edgeLines: { ...DEFAULT_PRESET.edgeLines, width: "굵게" } };
   expect(() => parsePresets(JSON.stringify([bad]))).toThrow(/edgeLines\.width/);
 });
+
+test.each([
+  ["a string", "garbage"],
+  ["a number", 42],
+  ["an array", [1, 2, 3]],
+  ["null", null],
+])("a non-object top-level edgeLines (%s) is rejected rather than spread into defaults", (_label, value) => {
+  const bad = { ...DEFAULT_PRESET, edgeLines: value };
+  expect(() => parsePresets(JSON.stringify([bad]))).toThrow(/edgeLines/);
+});

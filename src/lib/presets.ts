@@ -162,6 +162,17 @@ function validatePreset(value: unknown, index: number): Preset {
   // edgeLines도 나중에 추가된 항목이라 그 이전 presets.json에는 없다. 없는 것은
   // 꺼짐으로 읽는다 — 구버전 파일은 잘못된 것이 아니다. 반대로 들어있는데 형식이
   // 어긋나면 통과시키지 않는다.
+  // 키 자체가 없는 것(구버전 파일)과 키는 있는데 객체가 아닌 것(손상된 파일)을
+  // 구분해야 한다 — typeof만으로는 null과 배열도 "object"로 잡히므로 따로
+  // 걸러낸다. 여기서 조용히 기본값으로 바꿔치기하면, 파일에 적힌 값을 무시한
+  // 채로 내보내기가 진행되어 아티스트가 의도하지 않은 결과물을 받게 된다 —
+  // 차라리 막는 편이 낫다.
+  if (
+    v.edgeLines !== undefined &&
+    (typeof v.edgeLines !== "object" || v.edgeLines === null || Array.isArray(v.edgeLines))
+  ) {
+    throw new Error(`${prefix}.edgeLines: 객체가 아닙니다.`);
+  }
   const edge = { ...DEFAULT_EDGE_LINES, ...((v.edgeLines as object | undefined) ?? {}) };
   if (typeof edge.enabled !== "boolean") {
     throw new Error(`${prefix}.edgeLines.enabled: boolean이 아닙니다.`);
