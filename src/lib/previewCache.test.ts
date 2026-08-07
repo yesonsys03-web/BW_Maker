@@ -93,6 +93,26 @@ test("every other input that changes the rendered image changes the key", () => 
   expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [1])).not.toBe(base); // 색 원본 수동 지정
 });
 
+// 켜져 있는 동안에는 다섯 수치 전부가 그림을 바꾸므로 키에 그대로 반영돼야
+// 한다.
+test("with edge lines on, different settings get different keys", () => {
+  const edgeOnWide: EdgeLines = { ...EDGE_ON, width: 7 };
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, EDGE_ON, [])).not.toBe(
+    previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOnWide, [])
+  );
+});
+
+// enabled가 false면 엔진이 이 기능을 아예 돌리지 않으므로, 나머지 다섯 수치가
+// 무엇이든 그림은 같다. 프리셋의 threshold/width 등을 손보는 동안 enabled를
+// 켜지 않았다면 캐시를 전부 버릴 이유가 없다 — 켰을 때만 다시 그리면 된다.
+test("with edge lines off, different numeric settings still get the same key", () => {
+  const edgeOffA: EdgeLines = { enabled: false, threshold: 10, gap: 4, width: 5, minLength: 8, lineAlpha: 64 };
+  const edgeOffB: EdgeLines = { enabled: false, threshold: 90, gap: 40, width: 50, minLength: 80, lineAlpha: 6 };
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOffA, [])).toBe(
+    previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOffB, [])
+  );
+});
+
 // 수동 지정 자체가 "무엇이 색 원본인지"를 바꾸므로, edgeLines가 꺼져 있는
 // 동안에도 키에 반영해야 한다 — 켤 때마다 다시 그려야 하는 상황을
 // 캐시가 감추면 안 된다("느린 편이 정확한 편보다 낫다").

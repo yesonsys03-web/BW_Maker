@@ -377,6 +377,11 @@ test("a non-numeric edge line setting is rejected rather than coerced", () => {
   expect(() => parsePresets(JSON.stringify([bad]))).toThrow(/edgeLines\.width/);
 });
 
+test("a fractional edge line setting is rejected rather than reaching the engine", () => {
+  const bad = { ...DEFAULT_PRESET, edgeLines: { ...DEFAULT_PRESET.edgeLines, width: 4.5 } };
+  expect(() => parsePresets(JSON.stringify([bad]))).toThrow(/edgeLines\.width/);
+});
+
 test.each([
   ["a string", "garbage"],
   ["a number", 42],

@@ -8,7 +8,7 @@ const PRESETS_FILENAME = "presets.json";
 export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"];
 
 /**
- * 색 경계선 생성 기본값. 엔진 EDGE_DEFAULTS(engine/psd_engine/edge_lines.py)와
+ * 색 경계선 생성 기본값. 엔진 EDGE_DEFAULTS(engine/psd_engine/edges.py)와
  * threshold/gap/width/minLength/lineAlpha가 같다 — enabled만 TS 쪽에만 있다
  * (엔진은 edgeLines.get("enabled")로 켜짐 여부를 읽는다). 기본은 꺼짐이라
  * BG 프리셋과 이미 저장된 모든 프리셋은 이 기능 도입 전과 똑같이 동작한다.
@@ -178,8 +178,13 @@ function validatePreset(value: unknown, index: number): Preset {
     throw new Error(`${prefix}.edgeLines.enabled: boolean이 아닙니다.`);
   }
   for (const key of ["threshold", "gap", "width", "minLength", "lineAlpha"] as const) {
-    if (typeof edge[key] !== "number" || !Number.isFinite(edge[key]) || edge[key] < 0) {
-      throw new Error(`${prefix}.edgeLines.${key}: 0 이상의 숫자가 아닙니다.`);
+    if (
+      typeof edge[key] !== "number" ||
+      !Number.isFinite(edge[key]) ||
+      !Number.isInteger(edge[key]) ||
+      edge[key] < 0
+    ) {
+      throw new Error(`${prefix}.edgeLines.${key}: 0 이상의 정수가 아닙니다.`);
     }
   }
 

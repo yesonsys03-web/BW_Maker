@@ -121,16 +121,22 @@ export function previewCacheKey(
   // 것에 색을 거느냐에 따라 그림이 다르기 때문이다 — 프리셋을 적용하기 전후가
   // 정확히 그 경우다.
   //
-  // edgeLines도 켜짐 여부와 다섯 수치 전부가 그림을 바꾼다 — JSON.stringify로
-  // 통째로 담는다. 켰다 껐다 하거나 프리셋을 바꿨는데 캐시가 이전 그림을 그대로
-  // 돌려주면, 아티스트는 계속 옛 미리보기를 보면서 다른 설정을 확인했다고
-  // 믿게 된다. 느린 편이 그보다 낫다.
+  // edgeLines는 켜져 있을 때만 다섯 수치가 그림을 바꾼다 — 그때는
+  // JSON.stringify로 통째로 담는다. 켰다 껐다 하거나 프리셋을 바꿨는데 캐시가
+  // 이전 그림을 그대로 돌려주면, 아티스트는 계속 옛 미리보기를 보면서 다른
+  // 설정을 확인했다고 믿게 된다. 느린 편이 그보다 낫다.
   //
-  // edgeColourIds(수동 지정)도 같은 이유로 무조건 담는다 — EdgeLines가 꺼져
-  // 있는 동안(JSON.stringify(edgeLines) === "null")에도 값을 남긴다. 지정을
-  // 바꾼 뒤 곧바로 켜는 순서로 쓰일 수 있어서, 꺼진 동안의 지정 변경을 키가
-  // 놓치면 켠 순간 옛 그림을 재사용하게 된다.
+  // 반대로 꺼져 있으면(null이거나 enabled: false) 엔진이 이 기능을 아예 돌리지
+  // 않으므로 threshold/gap/width/minLength/lineAlpha가 무엇이든 그림은 같다.
+  // 여기서까지 수치를 키에 실으면, 꺼둔 프리셋의 수치를 손보기만 해도 무관한
+  // 캐시 항목이 몽땅 버려진다 — 상수 하나로 뭉뚱그린다.
+  //
+  // edgeColourIds(수동 지정)도 켜짐 여부와 별개로 무조건 담는다 — EdgeLines가
+  // 꺼져 있는 동안에도 값을 남긴다. 지정을 바꾼 뒤 곧바로 켜는 순서로 쓰일 수
+  // 있어서, 꺼진 동안의 지정 변경을 키가 놓치면 켠 순간 옛 그림을 재사용하게
+  // 된다.
   const lineColorIds = lineColorIdsFor(visibleIds, lineColor, matchedIds);
+  const edgeLinesKey = edgeLines !== null && edgeLines.enabled ? JSON.stringify(edgeLines) : "off";
   return [
     file.path,
     file.mtime,
@@ -138,7 +144,7 @@ export function previewCacheKey(
     lineColor ?? "",
     lineColorIds === null ? "all" : lineColorIds.join(","),
     visibleIds.join(","),
-    JSON.stringify(edgeLines),
+    edgeLinesKey,
     edgeColourIds.join(","),
   ].join("\n");
 }
