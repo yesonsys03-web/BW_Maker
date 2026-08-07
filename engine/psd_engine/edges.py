@@ -412,6 +412,37 @@ def _paste_alpha(layers, box):
     return out
 
 
+#: 라인 잎 하나가 뷰 박스의 이 비율을 넘게 덮으면 선화가 아니라 채우기로 본다.
+#:
+#: 납품 폴더 100장을 전수로 재서 고른 값이다. `character._line_leaves`가 이름으로
+#: 채색 잎을 걸러낸 뒤, 뷰 339개 중 338개의 라인 cover는 최대 **32.0%**였고
+#: (중앙값 4.8%, p99 29.5%) 남은 하나가 **100.0%**였다 — 그 사이가 통째로 비어
+#: 있어 어디를 잡아도 오분류가 없다. 가운데를 잡는다.
+#:
+#: 이름으로 못 거르는 경우가 있어서 이 가드가 따로 필요하다. 남은 그 하나는 잎
+#: 이름이 `Layer 27`/`Layer 28`이고, 그중 `Layer 28`이 문서 전체 크기(9899x3240)의
+#: 채우기였다. 같은 뷰의 진짜 라인은 6.5%라 잎 단위로 재면 정확히 갈린다 —
+#: 뷰 단위로 재면 그 진짜 라인까지 함께 버리게 된다.
+FILL_COVERAGE = 0.5
+
+
+def _drop_filled(line_layers, box, alpha_threshold):
+    """뷰 박스를 너무 많이 덮는 라인 잎을 뺀다. 선화는 몇 %를 덮는다.
+
+    채우기가 라인 알파에 섞이면 두 가지가 함께 망가진다 — `_auto_width`가 그
+    알파의 가로 런 중앙값에서 굵기를 유도하므로 획이 캐릭터 몸통만큼 굵어지고,
+    `subtract_lines`가 그 자리를 "이미 선이 있다"로 보고 이 기능이 그려야 할
+    색 경계를 지운다.
+    """
+    kept = []
+    for layer in line_layers:
+        alpha = _paste_alpha([layer], box)
+        if float((alpha > alpha_threshold).mean()) > FILL_COVERAGE:
+            continue
+        kept.append(layer)
+    return kept
+
+
 def overlay_for_view(session, colour_ids, line_ids, opts):
     """
     뷰 하나의 획 오버레이. 그릴 것이 없으면 None.
@@ -449,7 +480,11 @@ def overlay_for_view(session, colour_ids, line_ids, opts):
         layer_filter=lambda l: l.visible and (id(l) in wanted or l.is_group()),
     )
     colour_rgba = np.array(img.convert("RGBA"))
-    line_alpha = _paste_alpha([layers_by_id[i] for i in line_ids], box)
+    o = {**EDGE_DEFAULTS, **(opts or {})}
+    line_alpha = _paste_alpha(
+        _drop_filled(
+            [layers_by_id[i] for i in line_ids], box, o["lineAlpha"]),
+        box)
 
     out = build_overlay(colour_rgba, line_alpha, opts)
     if out[..., 3].max() == 0:

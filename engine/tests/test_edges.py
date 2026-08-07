@@ -509,3 +509,55 @@ def test_morph_cost_does_not_grow_with_the_kernel():
     narrow, wide = elapsed(5), elapsed(21)
     assert wide < narrow * 3, (
         f"넓은 커널이 여전히 비싸다 (폭 5 {narrow*1000:.1f}ms, 폭 21 {wide*1000:.1f}ms)")
+
+
+from psd_engine.edges import FILL_COVERAGE, _drop_filled  # noqa: E402
+
+
+class _FakeLayer:
+    """_paste_alpha가 보는 것만 흉내 낸다 — 좌표와 알파."""
+
+    def __init__(self, name, left, top, alpha):
+        self.name = name
+        self.left, self.top = left, top
+        self._alpha = alpha
+        self.width, self.height = alpha.shape[1], alpha.shape[0]
+
+    def numpy(self, channel=None):                      # pragma: no cover - 대역폭용
+        raise NotImplementedError
+
+
+def test_drop_filled_removes_a_fill_and_keeps_the_real_line(monkeypatch):
+    # 납품 폴더에서 이름으로는 못 거르는 경우가 하나 남았다: 라인 그룹 안의
+    # 잎이 `Layer 27`/`Layer 28`인데 `Layer 28`이 문서 전체 크기(9899x3240)의
+    # 채우기였다. 그 알파가 뷰 박스를 100% 덮으니 획 굵기가 343px로 나왔다.
+    # 같은 뷰의 진짜 라인은 6.5%다 — 잎 단위로 재야 이 둘이 갈린다.
+    import psd_engine.edges as edges_module
+
+    box = (0, 0, 100, 100)
+    thin = np.zeros((100, 100), np.uint8)
+    thin[50, :] = 255                                   # 한 줄짜리 선: 1% 커버
+    fill = np.full((100, 100), 255, np.uint8)           # 박스를 다 덮는 채우기
+
+    alphas = {"thin": thin, "fill": fill}
+    monkeypatch.setattr(edges_module, "_paste_alpha",
+                        lambda layers, _box: alphas[layers[0].name])
+
+    kept = _drop_filled([_FakeLayer("thin", 0, 0, thin),
+                         _FakeLayer("fill", 0, 0, fill)], box, 64)
+    assert [l.name for l in kept] == ["thin"], \
+        f"채우기가 남았거나 선이 함께 버려졌다: {[l.name for l in kept]}"
+
+
+def test_drop_filled_keeps_a_line_that_is_dense_but_under_the_bound(monkeypatch):
+    # 문턱 바로 아래는 반드시 남아야 한다. 실측에서 정상 뷰의 최대 cover가
+    # 32.0%였고(머리카락 선이 빽빽한 뷰들) 그것들이 잘리면 이 기능이 그 뷰에서
+    # 기존 선 위에 획을 덧그린다.
+    import psd_engine.edges as edges_module
+
+    dense = np.zeros((100, 100), np.uint8)
+    dense[:int(FILL_COVERAGE * 100) - 5, :] = 255       # 문턱보다 5%p 아래
+    monkeypatch.setattr(edges_module, "_paste_alpha", lambda layers, _box: dense)
+
+    kept = _drop_filled([_FakeLayer("dense", 0, 0, dense)], (0, 0, 100, 100), 64)
+    assert len(kept) == 1, "문턱 아래인데 버려졌다"

@@ -169,3 +169,43 @@ def test_a_colour_group_nested_inside_a_colour_group_does_not_make_a_second_view
     write_psd(p, [nested_layers.Group(name="FRONT", layers=[
         make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24), colours])])
     assert len(find_views(_session(p))) == 1
+
+
+def test_find_views_drops_a_colour_named_leaf_from_inside_a_line_group(tmp_path):
+    # 납품 폴더에서 실제로 이 모양이 나왔다: `LINE` 그룹 안에 `colour`가 들어
+    # 있어서, 라인 알파가 뷰 박스의 95.6%를 덮었다. 그 알파에서 획 굵기를
+    # 유도하므로(edges._auto_width는 가로 런 길이의 중앙값을 쓴다) 굵기가
+    # 캐릭터 몸통 너비인 771px로 나왔고, 옛 PIL 모폴로지에서 그 한 장이 16분을
+    # 잡아먹었다. 굵기만 문제가 아니다 — subtract_lines가 같은 알파를 "이미
+    # 선이 있다"로 보고 박스의 95%에서 경계를 지운다.
+    #
+    # 내보내기 경로는 이런 잎을 excludeTokens로 이미 걸러낸다. 두 경로가 같은
+    # 물음("이 잎이 선화인가")에 다른 답을 내고 있었던 것이 결함이다.
+    line_group = nested_layers.Group(name="LINE", layers=[
+        make_rgb_image("LINE", (0, 0, 0), 0, 0, 32, 24),
+        make_rgb_image("colour", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)])
+    p = tmp_path / "colour_inside_line_group.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[line_group, colours])])
+    s = _session(p)
+    views = find_views(s)
+    assert len(views) == 1
+    names = {s["layers_by_id"][lid].name for lid in views[0]["lineIds"]}
+    assert names == {"LINE"}, f"채색 잎이 lineIds에 들어갔다: {names}"
+
+
+def test_find_views_keeps_a_line_leaf_whose_name_merely_contains_a_colour_word(tmp_path):
+    # 제외는 토큰 단위여야 한다. `colour line`은 색으로 그린 선화이지 채색이
+    # 아니다 — 부분 문자열로 자르면 진짜 선화까지 함께 사라진다.
+    line_group = nested_layers.Group(name="LINES", layers=[
+        make_rgb_image("colourful line", (0, 0, 0), 0, 0, 32, 24),
+    ])
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)])
+    p = tmp_path / "colourful_line.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[line_group, colours])])
+    s = _session(p)
+    names = {s["layers_by_id"][lid].name for lid in find_views(s)[0]["lineIds"]}
+    assert names == {"colourful line"}, f"선화가 빠졌다: {names}"

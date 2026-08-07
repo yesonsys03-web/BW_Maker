@@ -4,6 +4,8 @@
 뷰를 찾고, 찾은 뷰 355개 중 352개(99%)가 라인을 함께 찾는다. 나머지 17장은 군중·
 스토리보드·배치 시트라 색 분리가 없다 — 실패가 아니라 대상이 아니다.
 """
+from .matching import DEFAULT_EXCLUDE_TOKENS
+from .names import has_any_token
 
 #: 색 그룹으로 칠 이름. **전체 일치**여야 한다.
 #:
@@ -18,6 +20,30 @@ COLOUR_GROUP_NAMES = frozenset({"colors", "colours", "color", "colour", "fills"}
 
 def _is_line_named(layer):
     return "line" in layer.name.lower()
+
+
+def _line_leaves(layer):
+    """`_pixel_leaves`에서 채색 잎을 뺀 것. **lineIds에만** 쓴다.
+
+    line-named 노드 안의 잎을 전부 라인으로 담던 것이 결함이었다. 납품 폴더에서
+    `LINE` 그룹 안에 `colour`가 들어 있는 뷰가 나왔고, 그 잎까지 담으니 라인
+    알파가 뷰 박스의 95.6%를 덮었다. 결과는 두 가지로 번진다 — `edges._auto_width`가
+    그 알파의 가로 런 중앙값에서 굵기를 유도하므로 획 굵기가 캐릭터 몸통 너비인
+    771px로 나오고(전수 스캔에서 339뷰 중 16뷰, 파일 넷), `edges.subtract_lines`는
+    같은 알파를 "이미 선이 있다"로 보고 그 95% 안의 색 경계를 지운다.
+
+    내보내기 경로(`matching.match_preset`)는 이런 잎을 `excludeTokens`로 이미
+    걸러낸다. 같은 물음("이 잎이 선화인가")에 두 경로가 다른 답을 내고 있었던
+    것이 문제이므로, 규칙을 다시 쓰지 않고 그쪽이 쓰는 `has_any_token`을 그대로
+    부른다. 토큰 단위라 `colourful line` 같은 진짜 선화는 남는다.
+
+    프리셋의 `excludeTokens` 대신 기본 상수를 쓴다. `rpc.render_preview`는
+    프리셋을 받지 않아서, 인자로 흘리면 미리보기와 내보내기가 서로 다른 라인
+    집합을 볼 수 있다 — 갈리지 않는 쪽이 낫다. 아티스트가 토큰을 손봤다면 그
+    변경은 이 경로에 반영되지 않는다.
+    """
+    return [leaf for leaf in _pixel_leaves(layer)
+            if not has_any_token(leaf.name, DEFAULT_EXCLUDE_TOKENS)]
 
 
 def _pixel_leaves(layer):
@@ -66,7 +92,7 @@ def find_views(session):
                 line_ids = [
                     ids[id(l)]
                     for sib in node if sib is not child and _is_line_named(sib)
-                    for l in _pixel_leaves(sib) if id(l) in ids
+                    for l in _line_leaves(sib) if id(l) in ids
                 ]
                 if colour_ids:
                     views.append({"name": name, "colourIds": colour_ids,
@@ -178,7 +204,7 @@ def manual_views(session, colour_ids, included_ids):
         line_ids = [
             ids[id(l)]
             for sib in view_node if _is_line_named(sib)
-            for l in _pixel_leaves(sib) if id(l) in ids
+            for l in _line_leaves(sib) if id(l) in ids
         ]
         line_ids = [lid for lid in line_ids if lid in included]
         views.append({"name": v["name"], "colourIds": v["colourIds"], "lineIds": line_ids})
