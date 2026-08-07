@@ -21,7 +21,22 @@ def _is_line_named(layer):
 
 
 def _pixel_leaves(layer):
-    """그룹이면 그릴 수 있는 잎까지 펼치고, 잎이면 자기 자신."""
+    """그룹이면 그릴 수 있는 잎까지 펼치고, 잎이면 자기 자신.
+
+    보이지 않는 레이어는 건너뛴다. 꺼진 대체 색상(예: 꺼진 `hair red (alt)`)은
+    포토샵에서 안 보이고 내보내기에도 안 들어가지만, 이 검사가 없으면
+    `colourIds`에 끼어 들어가 base 위에 그대로 합성돼 그 실루엣이 색 경계로
+    오인된다(edges.overlay_for_view). 반대 방향도 있다 — 숨은 라인 잎이
+    `lineIds`에 끼면 edges._paste_alpha가 그 알파를 그대로 붙여, 실제로는 선이
+    없는 자리를 "선이 있다"고 오판하고 이 기능이 그려야 할 바로 그 경계를 지운다.
+
+    `.visible`은 레이어 **자신의** 플래그일 뿐 조상은 보지 않지만, 여기서는
+    재귀마다 이 검사를 하므로 숨은 조상을 만나면 그 아래로 내려가지 않고
+    그대로 멈춘다 — 결과적으로 조상 전체를 본 것과 같아진다. `render.py`의
+    기존 BG 경로(render_thumbnails)도 같은 이유로 `.visible`을 쓴다.
+    """
+    if not layer.visible:
+        return []
     if not layer.is_group():
         return [layer] if layer.width > 0 and layer.height > 0 else []
     out = []
@@ -91,19 +106,38 @@ def _parent_map(psd):
     return parent_of
 
 
+def _nearest_line_ancestor(parent_of, layer):
+    """
+    고른 잎에서 위로 올라가며 `_is_line_named` 자식을 가진 첫 조상을 뷰로 찾는다.
+
+    **뷰란 "라인 노드를 자식으로 가진 조상"이다.** `find_views`에서 "색 그룹의
+    부모"가 뷰가 되는 것도 같은 조건이다 — 그 부모가 색 그룹과 형제로
+    line-named 노드를 두고 있기 때문이다. 이것은 수동을 위한 별도 규칙이 아니라
+    같은 조건을 잎에서 거슬러 올라가며 찾는 것뿐이다 — 3단(잎→색그룹→뷰),
+    2단(잎→뷰, 색 그룹이 아예 없는 파일), 더 깊은 중첩까지 조건문 없이 이
+    한 함수로 덮인다. 그런 조상이 끝내 없으면 `None` — 그 지정은 뷰가 없는
+    것이다.
+    """
+    node = parent_of.get(id(layer))
+    while node is not None:
+        if any(_is_line_named(c) for c in node):
+            return node
+        node = parent_of.get(id(node))
+    return None
+
+
 def manual_views(session, colour_ids, included_ids):
     """
     아티스트가 레이어 트리에서 직접 짚은 색 레이어(잎)로 뷰를 만든다.
     `find_views`와 **같은 모양**을 돌려주고 같은 `overlay_for_view`를 탄다 —
     경계 계산은 색 레이어 목록과 라인 목록만 받을 뿐 누가 골랐는지 묻지 않는다.
 
-    자동(find_views)은 "닫힌 이름 집합의 그룹"에서 시작해 그 부모를 뷰로 삼는다.
-    수동은 이름 검사를 뺀 같은 규칙이다 — 아티스트가 고르는 것은 잎이므로, 그
-    잎의 부모 그룹 P가 사실상의 색 그룹이고 뷰 V는 P의 부모다. 여러 잎이 같은
-    V 아래 있으면(서로 다른 P 아래여도) 한 뷰로 묶인다 — 뷰 하나에 오버레이
-    한 장이라는 설계(5절) 때문이다.
+    뷰는 `_nearest_line_ancestor`로 찾는다 — 고른 잎에서 올라가며 line-named
+    자식을 가진 첫 조상이 뷰다. 여러 잎이 같은 뷰 아래 있으면(서로 다른 중간
+    그룹 아래여도) 한 뷰로 묶인다 — 뷰 하나에 오버레이 한 장이라는 설계(5절)
+    때문이다. 그 조상을 못 찾은 잎은 조용히 빠진다.
 
-    라인은 자동과 똑같이 V 바로 아래에서 이름에 line이 든 노드를 펼쳐 쓰되,
+    라인은 자동과 똑같이 뷰 바로 아래에서 이름에 line이 든 노드를 펼쳐 쓰되,
     `included_ids`(내보내기에 이미 포함된 라인)와 교집합만 남긴다 — 체크하지
     않은 라인 위에 획을 얹을 자리가 없다(edges.attach_overlays가 그런 뷰를
     건너뛰는 것과 같은 이유).
@@ -127,10 +161,9 @@ def manual_views(session, colour_ids, included_ids):
         layer = layers_by_id.get(lid)
         if layer is None:
             continue
-        parent = parent_of.get(id(layer))
-        if parent is None:
+        view_node = _nearest_line_ancestor(parent_of, layer)
+        if view_node is None:
             continue
-        view_node = parent_of.get(id(parent), session["psd"])
         key = id(view_node)
         if key not in grouped:
             name = "(root)" if view_node is session["psd"] else view_node.name

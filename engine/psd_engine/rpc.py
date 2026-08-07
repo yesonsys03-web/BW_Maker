@@ -116,11 +116,37 @@ class Engine:
         overlays = None
         if edgeLines and edgeLines.get("enabled"):
             opts = {**EDGE_DEFAULTS, **edgeLines}
+            visible = set(visibleLayerIds)
             # 수동은 자동에 **보탠다**(설계 3.1). 자동 결과를 지우지 않는다.
-            # 미리보기의 "내보내기에 이미 포함된 라인"은 화면에 켜진 레이어,
-            # 즉 visibleLayerIds다.
+            #
+            # manual_views의 included_ids는 "내보내기에 이미 포함된 라인"을
+            # 뜻한다(character.manual_views 참고) — export_psd는 실제 includedIds를
+            # 준다. 그런데 render_preview는 그 목록을 인자로 받지 않는다. 여기
+            # 있는 visibleLayerIds는 체크 ∩ 눈(솔로 중이면 체크와 무관한 솔로
+            # 목록)이다(src/lib/preview.ts의 visibleIdsForPreview) — 체크는
+            # 됐지만 눈으로만 숨긴 라인도 여기서는 "빠진" 것으로 보인다.
+            # 그걸 그대로 included_ids로 넘기면, 체크는 됐지만 숨겨 둔 라인
+            # 위에도 획을 겹쳐 그리게 된다 — 이 앱 다른 곳에서는 눈이 무엇이
+            # 그려지는지만 바꾸는데(export_psd는 눈을 아예 안 본다) 여기서만
+            # 계산 자체가 눈에 따라 달라지는 예외였다.
+            #
+            # 진짜 포함 목록이 없으므로 세션의 모든 레이어 id를 넘겨 그 교집합을
+            # 사실상 무력화한다 — 구조상 후보인 라인은 전부 "이미 있다"고 본다.
+            # 잔여 차이: 뷰의 색은 손으로 짚었는데 그 라인 그룹을 아예 체크
+            # 해제해 둔 조합에서는, 실제로는 내보내기에 없는 그 라인을 "있다"고
+            # 보아 획을 덜 그릴 수 있다 — 수동 지정과 라인 미체크를 같이 쓰는
+            # 조합은 드물다고 보고 받아들인다. 화면에 실제로 그려지는지는
+            # 여전히 render.render_preview의 그리기 시점 필터(lineIds & visible)가
+            # 정한다.
             views = find_views(s) + manual_views(
-                s, edgeLines.get("manualColourIds") or [], visibleLayerIds)
+                s, edgeLines.get("manualColourIds") or [], s["layers_by_id"].keys())
+            # render.render_preview가 그리기 직전에 이미 하는 lineIds & visible
+            # 필터를 여기로 앞당긴다. plan_overlays 하나가 뷰당 0.9~11.6초라
+            # (설계 9절) 다섯 뷰 모델에서 하나만 솔로해도 나머지 넷을 합성해
+            # 버리고 버리는 낭비가 있었다 — 요청이 stdin 큐에서 순차 처리되므로
+            # 그 낭비가 뒤에 온 다른 요청까지 물고 늘어진다. 그리기 시점 필터는
+            # 그대로 둔다 — 호출자가 잊을 수 없는 안전망이다.
+            views = [v for v in views if set(v["lineIds"]) & visible]
             overlays = plan_overlays(s, views, opts)
         return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
                                           line_color=lineColor,
@@ -194,6 +220,11 @@ class Engine:
         if edgeLines and edgeLines.get("enabled"):
             opts = {**EDGE_DEFAULTS, **edgeLines}
             # 수동은 자동에 **보탠다**(설계 3.1). 자동 결과를 지우지 않는다.
+            #
+            # 여기서는 `included`(진짜 includedIds, 눈 상태와 무관) 그대로 준다 —
+            # render_preview 쪽과 달리 이 메서드는 진짜 포함 목록을 이미 갖고
+            # 있으므로 근사할 이유가 없다. 눈(previewHiddenIds)은 여기 관여하지
+            # 않는다 — export_psd 전체가 애초에 눈을 보지 않는다.
             views = find_views(s) + manual_views(
                 s, edgeLines.get("manualColourIds") or [], included)
             attach_overlays(entries, plan_overlays(s, views, opts))

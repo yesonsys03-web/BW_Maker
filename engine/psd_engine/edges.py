@@ -9,6 +9,12 @@ scipy를 쓰지 않는다(엔진 venv에 없다). 모폴로지는 PIL, 연결 �
 import numpy as np
 from PIL import Image, ImageFilter
 
+# render.py는 psd_engine의 다른 모듈을 import하지 않으므로(edges.py를 포함해)
+# 이쪽에서 render를 가져와도 순환 import가 안 생긴다. export.py가 이미 두 모듈을
+# 함께 가져오는 것(edges의 _composite_overlay + render의 extract_rgba)이 같은
+# 방향이 안전하다는 증거다.
+from .render import extract_rgba
+
 #: 실측에 근거한 기본값. 설계 문서 7절 참고.
 EDGE_DEFAULTS = {
     "threshold": 24,    # 이웃과의 RGB 최대 채널 차가 이보다 크면 색이 바뀐 것으로 본다
@@ -193,13 +199,21 @@ def _union_bbox(layers):
 
 
 def _paste_alpha(layers, box):
-    """레이어들의 알파를 box 좌표계의 한 장으로 모은다(최댓값 합성)."""
+    """레이어들의 알파를 box 좌표계의 한 장으로 모은다(최댓값 합성).
+
+    `layer.topil()`이 아니라 `render.extract_rgba`로 읽는다. `topil()`은 레이어의
+    래스터 마스크를 적용하지 않으므로, 마스크로 가려진 자리가 그대로 불투명하게
+    나온다 — 실제로는 선이 없는 그 자리를 "이미 선이 있다"고 오판해
+    `subtract_lines`가 gap만큼 부풀려 지우고, 그 아래 살아 있어야 할 색 경계까지
+    함께 지운다. `extract_rgba`는 마스크를 적용하는 값싼 경로(막히면
+    `layer.composite`)를 쓰므로 이 문제가 없고, 덤으로 그 빠른 경로도 공짜로 얻는다.
+    """
     left, top, right, bottom = box
     out = np.zeros((bottom - top, right - left), np.uint8)
     for layer in layers:
         if layer.bbox == (0, 0, 0, 0):
             continue
-        arr = np.array(layer.topil().convert("RGBA"))[..., 3]
+        arr = extract_rgba(layer)[..., 3]
         lx, ly = layer.bbox[0] - left, layer.bbox[1] - top
         y0, x0 = max(0, ly), max(0, lx)
         y1 = min(out.shape[0], ly + arr.shape[0])
@@ -228,9 +242,24 @@ def overlay_for_view(session, colour_ids, line_ids, opts):
         return None
 
     wanted = {id(l) for l in colour_layers}
+    # `layer_filter`를 주면 psd.composite의 기본 필터(`Layer.is_visible`)를
+    # **대체**한다 — 더해지는 것이 아니다(psd_tools/composite/composite.py:
+    # `layer_filter = layer_filter or Layer.is_visible`). `.visible` 항 없이
+    # `id(l) in wanted or l.is_group()`만 쓰면 숨은 레이어도 조건 없이
+    # 합성된다: `wanted` 안의 숨은 잎은 그대로 그려지고(꺼진 대체 색상의
+    # 실루엣이 색 경계로 오인된다), 숨은 그룹도 전부 통과해 그 자손까지
+    # 뚫린다.
+    #
+    # `.visible`(자신의 플래그, 조상은 안 봄)이면 충분하다. Compositor.apply는
+    # 필터를 통과 못 한 레이어에서 그 자리 그대로 반환하고 자식을 아예 보지
+    # 않으므로(psd_tools/composite/composite.py의 Compositor.apply 앞부분),
+    # 매 단계 자기 플래그만 검사해도 숨은 조상 아래는 재귀가 거기서 멈춰
+    # 전부 걸린다 — `is_visible()`로 조상을 직접 훑는 것과 결과가 같다.
+    # `render.py`의 기존 BG 경로(render_thumbnails)도 같은 이유로 `.visible`을
+    # 쓴다.
     img = session["psd"].composite(
         viewport=box, force=True, color=1.0, alpha=0.0,
-        layer_filter=lambda l: id(l) in wanted or l.is_group(),
+        layer_filter=lambda l: l.visible and (id(l) in wanted or l.is_group()),
     )
     colour_rgba = np.array(img.convert("RGBA"))
     line_alpha = _paste_alpha([layers_by_id[i] for i in line_ids], box)

@@ -287,3 +287,101 @@ def test_allowed_methods_all_exist():
 
     missing = [n for n in Engine._ALLOWED_METHODS if not hasattr(Engine, n)]
     assert missing == []
+
+
+from pytoshop.user import nested_layers
+
+from conftest import make_rgb_image, write_psd
+
+
+def _two_view_psd(tmp_path):
+    """FRONT/BACK 각각 색 경계가 있고 라인이 없는 뷰 하나씩."""
+    colours_front = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("dark", (40, 20, 20), 0, 0, 16, 12),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    line_front = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    colours_back = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("dark", (10, 60, 90), 0, 0, 16, 12),
+        make_rgb_image("base", (250, 250, 20), 0, 0, 32, 24),
+    ])
+    line_back = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    p = tmp_path / "two_views.psd"
+    write_psd(p, [
+        nested_layers.Group(name="FRONT", layers=[line_front, colours_front]),
+        nested_layers.Group(name="BACK", layers=[line_back, colours_back]),
+    ])
+    return p
+
+
+def test_render_preview_does_not_plan_overlays_for_a_view_whose_lines_are_not_visible(tmp_path, monkeypatch):
+    # plan_overlays 한 번이 뷰당 0.9~11.6초다(설계 9절). 다섯 뷰 모델에서 하나만
+    # 켜도 나머지를 합성해 버리고 버리면 그 낭비를 요청마다 치르고, 요청은
+    # stdin 큐에서 순차 처리되므로 뒤에 온 다른 요청까지 물고 늘어진다. 뷰
+    # 둘짜리 문서에서 하나의 라인만 visibleLayerIds에 넣으면, plan_overlays에는
+    # 그 뷰 하나만 넘어가야 한다(시간을 재는 대신 넘어간 뷰 자체를 본다).
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    captured = []
+    real_plan_overlays = rpc.plan_overlays
+
+    def spy(session, views, opts):
+        captured.append(views)
+        return real_plan_overlays(session, views, opts)
+
+    monkeypatch.setattr(rpc, "plan_overlays", spy)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True})
+
+    assert len(captured) == 1
+    view_names = {v["name"] for v in captured[0]}
+    assert view_names == {"FRONT"}, \
+        f"보이지 않는 뷰까지 plan_overlays에 넘어갔다: {view_names}"
+
+
+def test_render_preview_manual_path_treats_a_checked_line_as_covering_regardless_of_the_eye(fixture_psd, monkeypatch):
+    # character.manual_views의 included_ids는 "내보내기에 이미 포함된 라인"을
+    # 뜻한다. export_psd는 진짜 includedIds를 준다. render_preview는 그 목록을
+    # 받지 않으므로, visibleLayerIds(체크 ∩ 눈)를 그대로 넘기면 체크는 됐지만
+    # 눈으로만 숨긴 라인이 "포함 안 됨"으로 보인다 — 이 앱 다른 곳에서는 눈이
+    # 무엇이 그려지는지만 바꾸는데 여기서만 계산 자체가 눈에 따라 달라지는
+    # 예외였다. render_preview가 manual_views에 넘기는 included_ids가
+    # visibleLayerIds보다 넓어야(체크됐지만 숨은 것도 포함) 한다.
+    captured = {}
+    real_manual_views = rpc.manual_views
+
+    def spy(session, colour_ids, included_ids):
+        captured["included_ids"] = set(included_ids)
+        return real_manual_views(session, colour_ids, included_ids)
+
+    monkeypatch.setattr(rpc, "manual_views", spy)
+
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(fixture_psd))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    all_ids = set(s["layers_by_id"].keys())
+    # render_preview는 visibleLayerIds를 픽셀 레이어로 그리려 하므로(render.py의
+    # _preview_tile) 그룹 id를 넣으면 이 테스트와 무관한 이유로 터진다 — 잎을 쓴다.
+    some_id = next(lid for lid, l in s["layers_by_id"].items() if not l.is_group())
+
+    engine.render_preview(
+        sid, visibleLayerIds=[some_id],
+        edgeLines={"enabled": True, "manualColourIds": [some_id]},
+    )
+
+    assert "included_ids" in captured
+    assert captured["included_ids"] == all_ids, (
+        "render_preview가 visibleLayerIds만 included_ids로 넘겼다 — 체크는 됐지만 "
+        "눈으로 숨긴 라인이 포함 안 된 것으로 보여, 그 라인이 이미 덮는 자리에도 "
+        "획을 겹쳐 그리게 된다"
+    )

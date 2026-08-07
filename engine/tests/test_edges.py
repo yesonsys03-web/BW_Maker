@@ -167,6 +167,31 @@ def test_overlay_for_view_draws_the_unlined_colour_seam(tmp_path):
     assert rgba.shape[2] == 4
 
 
+def test_overlay_for_view_ignores_a_hidden_colour_layer(tmp_path):
+    # 꺼진 대체 색상(예: 꺼진 'hair red (alt)')은 포토샵에서 안 보이고 내보내기
+    # 에도 안 들어가지만, layer_filter가 group만 무조건 통과시키고 visible을
+    # 안 보면 wanted 안의 숨은 잎이 base 위에 그대로 합성돼 그 실루엣이 색
+    # 경계로 오인된다.
+    #
+    # find_views가 아니라 id를 직접 모아 넘긴다 — character._pixel_leaves(Fix 1의
+    # 다른 절반)가 이미 숨은 레이어를 걸러내므로, find_views를 거치면 이 필터가
+    # 없어도 같은 결과가 나와 무엇을 지키는 테스트인지 알 수 없어진다.
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("alt", (10, 200, 10), 4, 4, 8, 8, visible=False),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    line = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    p = tmp_path / "hidden_colour.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT 3/4", layers=[line, colours])])
+    store = SessionStore()
+    s = store.get(store.open(str(p)))
+    alt_id = next(lid for lid, l in s["layers_by_id"].items() if l.name == "alt")
+    base_id = next(lid for lid, l in s["layers_by_id"].items() if l.name == "base")
+    line_id = next(lid for lid, l in s["layers_by_id"].items() if l.name == "LINES")
+    result = overlay_for_view(s, [alt_id, base_id], [line_id], EDGE_DEFAULTS)
+    assert result is None, "숨은 색 레이어의 실루엣이 경계로 잡혔다"
+
+
 def test_overlay_for_view_is_none_when_there_is_no_unlined_boundary(tmp_path):
     # 색이 한 가지뿐이면 색 변화가 없다.
     colours = nested_layers.Group(name="COLORS", layers=[
@@ -185,3 +210,34 @@ def test_plan_overlays_carries_the_line_ids_it_belongs_to(tmp_path):
     plans = plan_overlays(s, find_views(s), EDGE_DEFAULTS)
     assert len(plans) == 1
     assert plans[0]["lineIds"] == find_views(s)[0]["lineIds"]
+
+
+from pytoshop import enums as _pt_enums
+
+from psd_engine.edges import _paste_alpha
+from psd_engine.patches import apply_pytoshop_patches
+
+from conftest import attach_mask
+
+
+def test_paste_alpha_applies_the_layers_mask(tmp_path):
+    # layer.topil()은 래스터 마스크를 적용하지 않는다 — 마스크로 가려진 자리가
+    # 그대로 불투명하게 나와 subtract_lines가 "이미 선이 있다"고 오판하고, 그
+    # 아래 살아 있어야 할 색 경계까지 함께 지운다. render.extract_rgba는 마스크를
+    # 적용하는 경로를 쓰므로 이 문제가 없다.
+    apply_pytoshop_patches()
+    line = make_rgb_image("LINES", (0, 0, 0), 0, 0, 8, 8)
+    psd = nested_layers.nested_layers_to_psd(
+        [line], color_mode=_pt_enums.ColorMode.rgb, size=(8, 8))
+    mask = np.zeros((8, 8), np.uint8)
+    mask[:, :4] = 255                      # 왼쪽 절반만 보이게, 오른쪽 절반은 가린다
+    attach_mask(psd, "LINES", mask, left=0, top=0, default_color=0)
+    p = tmp_path / "masked_line.psd"
+    with open(p, "wb") as f:
+        psd.write(f)
+    store = SessionStore()
+    s = store.get(store.open(str(p)))
+    layer = next(l for l in s["layers_by_id"].values() if l.name == "LINES")
+    out = _paste_alpha([layer], (0, 0, 8, 8))
+    assert out[:, 4:].max() == 0, "마스크로 가려진 자리가 topil()의 불투명 알파로 남았다"
+    assert out[:, :4].max() > 0, "마스크로 가려지지 않은 자리까지 지워졌다"

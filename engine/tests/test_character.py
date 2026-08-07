@@ -44,6 +44,26 @@ def test_a_line_group_is_flattened_to_its_leaves(tmp_path):
     assert len(views[0]["lineIds"]) == 1
 
 
+def test_find_views_excludes_a_hidden_line_leaf_from_line_ids(tmp_path):
+    # 숨은 라인 잎은 포토샵에서도 안 보이고 내보내기에도 안 들어가지만,
+    # _pixel_leaves가 visible을 안 보면 lineIds에 끼어 edges._paste_alpha가 그
+    # 알파를 그대로 붙인다 — 실제로는 선이 없는 자리를 "선이 있다"고 오판해 이
+    # 기능이 그려야 할 바로 그 경계(색으로만 갈린 곳)를 지워 버린다.
+    line_group = nested_layers.Group(name="LINES", layers=[
+        make_rgb_image("visible line", (0, 0, 0), 0, 0, 32, 24),
+        make_rgb_image("hidden line", (0, 0, 0), 0, 0, 32, 24, visible=False),
+    ])
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)])
+    p = tmp_path / "hidden_line.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[line_group, colours])])
+    s = _session(p)
+    views = find_views(s)
+    assert len(views) == 1
+    names = {s["layers_by_id"][lid].name for lid in views[0]["lineIds"]}
+    assert names == {"visible line"}, f"숨은 라인이 lineIds에 들어갔다: {names}"
+
+
 def test_a_palette_group_is_not_a_colour_group(tmp_path):
     # colour palette 는 46장, color palette 는 36장에 있다. 부분 일치면 전부 오인한다.
     colours = nested_layers.Group(name="COLOUR PALETTE", layers=[
@@ -108,6 +128,30 @@ def test_manual_views_only_take_lines_that_are_being_exported(tmp_path):
     picked = [lid for lid, l in s["layers_by_id"].items() if l.name == "base"]
     views = manual_views(s, picked, included_ids=[])
     assert views[0]["lineIds"] == [], "체크하지 않은 라인이 들어왔다"
+
+
+def test_manual_views_find_the_view_through_the_nearest_line_ancestor_with_no_colour_group_at_all(tmp_path):
+    # 색 그룹 자체가 없는 파일(FRONT/{LINES, base, hair}) — 자동 검출이 실패하는
+    # 바로 그 모양이고, 수동 지정이 존재하는 이유다. 뷰는 "line 자식을 가진
+    # 가장 가까운 조상"이라는 한 원칙(_nearest_line_ancestor)으로 찾으므로
+    # 2단(잎→뷰)과 3단(잎→색그룹→뷰, 위 test_manual_views_group_picked_leaves_by_their_view가
+    # 지킨다)이 조건문 없이 같은 코드 경로를 탄다.
+    p = tmp_path / "two_level.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+        make_rgb_image("hair", (40, 20, 20), 0, 0, 16, 16),
+    ])])
+    s = _session(p)
+    assert find_views(s) == [], "색 그룹이 없으므로 자동은 아무것도 못 찾아야 한다"
+
+    picked = [lid for lid, l in s["layers_by_id"].items() if l.name in ("base", "hair")]
+    lines = [lid for lid, l in s["layers_by_id"].items() if l.name == "LINES"]
+    views = manual_views(s, picked, included_ids=lines)
+    assert len(views) == 1
+    assert views[0]["name"] == "FRONT"
+    assert sorted(views[0]["colourIds"]) == sorted(picked)
+    assert views[0]["lineIds"] == lines, "2단 모양에서 lineIds가 비었다 — 뷰를 못 찾았다는 뜻"
 
 
 def test_manual_views_are_empty_when_nothing_is_picked(tmp_path):
