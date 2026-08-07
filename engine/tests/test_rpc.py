@@ -443,3 +443,143 @@ def test_render_preview_given_the_export_inclusion_list_agrees_with_export_on_wh
         "체크 해제한 라인을 그대로 뺐다 — 그 라인은 실제로는 export에 없으므로 "
         "미리보기가 export보다 획이 적어진다"
     )
+
+
+def _spy_on_plan_overlays(monkeypatch):
+    """rpc.plan_overlays 호출을 가로채 넘어온 views를 기록한다. 실제 계산은 그대로 돈다."""
+    calls = []
+    real_plan_overlays = rpc.plan_overlays
+
+    def spy(session, views, opts):
+        calls.append((views, opts))
+        return real_plan_overlays(session, views, opts)
+
+    monkeypatch.setattr(rpc, "plan_overlays", spy)
+    return calls
+
+
+def test_render_preview_reuses_the_overlay_cache_for_a_repeat_render_with_the_same_inputs(
+    tmp_path, monkeypatch
+):
+    # 컨트롤러 실측: 기능이 꺼지면 미리보기 0.20초, plan_overlays 한 번이
+    # 20.71초 — 켜져 있으면 매 렌더가 20.81초가 된다. 오버레이 내용은 뭐가
+    # 보이는지와 무관하므로, 같은 뷰·같은 설정으로 다시 렌더하면 두 번째는
+    # 계산 없이 캐시를 그대로 써야 한다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id], edgeLines={"enabled": True})
+    engine.render_preview(sid, visibleLayerIds=[front_line_id], edgeLines={"enabled": True})
+
+    assert len(calls) == 1, f"두 번째 렌더가 캐시를 쓰지 않고 다시 계산했다: {len(calls)}번 호출됨"
+
+
+def test_render_preview_recomputes_the_overlay_when_a_pixel_affecting_setting_changes(
+    tmp_path, monkeypatch
+):
+    # width 같은 설정은 그려지는 획 자체를 바꾼다. 캐시 키가 뷰만 보고 설정을
+    # 무시하면, 설정을 바꿔도 예전 오버레이가 그대로 나오는 조용한 오류가
+    # 생긴다 — 두 번째 렌더는 반드시 새로 계산해야 한다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "width": 3})
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "width": 7})
+
+    assert len(calls) == 2, f"설정이 바뀌었는데도 캐시를 재사용했다: {len(calls)}번만 호출됨"
+
+
+def test_render_preview_toggling_visibility_does_not_recompute_a_view_already_cached(
+    tmp_path, monkeypatch
+):
+    # 눈 토글은 어떤 오버레이를 "그릴지"만 바꾼다 — 오버레이 자체의 계산과는
+    # 무관하다(뷰포트 필터는 별개로 남는다: 안 보이는 뷰는 애초에 캐시 조회에도
+    # 들어가지 않는다). 뷰 하나를 껐다 다시 켜도, 이미 계산해 둔 것이면 다시
+    # 계산하면 안 된다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+    back_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "BACK"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    # 둘 다 보임 — FRONT, BACK 둘 다 처음 계산된다.
+    engine.render_preview(sid, visibleLayerIds=[front_line_id, back_line_id],
+                          edgeLines={"enabled": True})
+    assert len(calls) == 2
+
+    # FRONT를 끈다 — BACK만 남고, BACK은 이미 캐시돼 있으므로 재계산이 없다.
+    engine.render_preview(sid, visibleLayerIds=[back_line_id],
+                          edgeLines={"enabled": True})
+    assert len(calls) == 2, "숨겨졌다 남은 뷰(BACK)를 다시 계산했다"
+
+    # FRONT를 다시 켠다 — FRONT도 이미 캐시돼 있으므로 재계산이 없어야 한다.
+    engine.render_preview(sid, visibleLayerIds=[front_line_id, back_line_id],
+                          edgeLines={"enabled": True})
+    assert len(calls) == 2, "껐다 켠 뷰(FRONT)를 다시 계산했다 — 캐시가 눈 상태에 묶여 있다"
+
+
+def test_the_overlay_cache_evicts_the_oldest_entry_instead_of_growing_without_bound(
+    tmp_path, monkeypatch
+):
+    # 오버레이 한 장이 3.1 Mpx 뷰에서 12MB를 넘을 수 있다(컨트롤러 실측) —
+    # 세션당 무한정 쌓이면 예전 레이어별 썸네일 캐시가 냈던 OOM을 그대로
+    # 반복한다. 설정을 상한 이상으로 바꿔가며 렌더하면 캐시 크기는 상한을
+    # 넘지 않아야 하고, 밀려난 항목은 다시 요청하면 새로 계산돼야 한다(그냥
+    # 상한에서 추가를 멈추는 구현과 구별하기 위함).
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    widths = list(range(1, rpc.OVERLAY_CACHE_PER_SESSION + 6))
+    for w in widths:
+        engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                              edgeLines={"enabled": True, "width": w})
+
+    assert len(s["_overlay_cache"]) <= rpc.OVERLAY_CACHE_PER_SESSION, (
+        f"캐시가 상한 없이 자랐다: {len(s['_overlay_cache'])}개"
+    )
+
+    calls_before = len(calls)
+    # 가장 먼저 넣은 설정(widths[0])은 상한에 밀려 캐시에서 빠졌어야 한다 —
+    # 다시 요청하면 캐시가 아니라 새로 계산돼야 한다.
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "width": widths[0]})
+    assert len(calls) == calls_before + 1, "상한에 밀려났어야 할 설정이 여전히 캐시에 남아 있다"

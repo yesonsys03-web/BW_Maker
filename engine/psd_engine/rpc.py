@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 import traceback
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 
 from .character import find_views, manual_views
@@ -38,6 +38,75 @@ from .verify_raster import verify_raster
 #: 원리상 충분하고, 렌더가 연달아 두 번 끼어드는 최악의 경우까지 감안해 3을
 #: 둔다. 상한이 있으므로 누수는 여전히 없다.
 RENDER_DIR_GENERATIONS = 3
+
+
+#: 오버레이 캐시가 세션당 들고 있는 항목 수 상한.
+#:
+#: 오버레이 한 장은 그 뷰의 bbox 크기짜리 RGBA 배열이다. 컨트롤러 실측으로 뷰
+#: 박스가 최대 약 3.1 Mpx였으니 한 장이 3.1e6px * 4B(RGBA) ≈ 12.4MB를 넘을 수
+#: 있고, 실사용 파일은 뷰가 최대 7장이었다(설계 문서 9절). 8칸(여유 1칸)이면
+#: 같은 설정에서 한 파일의 모든 뷰를 동시에 캐시해 둘 수 있어, 미리보기에서
+#: 레이어 눈을 이리저리 켜고 꺼도 재계산이 없다. SessionStore는 세션을 최대
+#: 2개까지만 들고 있으므로(session.py의 max_sessions) 최악의 경우 총 메모리는
+#: 8 * 12.4MB * 2 ≈ 198MB — 예전에 레이어별 썸네일을 무한정 캐시하다 낸 OOM과
+#: 달리 이건 하드 캡이 있어 그 자리로 다시 빠지지 않는다.
+OVERLAY_CACHE_PER_SESSION = 8
+
+#: opts 중 실제로 그려지는 픽셀을 바꾸는 설정만 뽑아 캐시 키로 쓴다
+#: (edges.EDGE_DEFAULTS·build_overlay가 읽는 것과 정확히 같은 다섯 개).
+#: "enabled"는 이 값이 캐시 키에 들어갈 필요가 없다 — _cached_plan_overlays는
+#: 호출부가 이미 enabled를 확인한 뒤에만 부른다. "manualColourIds"도 뺀다 —
+#: 그게 바뀌면 뷰 자체(view["colourIds"]/view["lineIds"])가 달라지므로 뷰
+#: 키에서 이미 갈린다.
+#:
+#: width는 다른 에이전트가 지금 "0 = 파일 자체 선 굵기에서 두께를 유도한다"는
+#: 뜻으로 의미를 바꾸는 중이다. 유도된 값이 아니라 **넘어온 값 그대로**(0이든
+#: 5든) 키에 쓴다 — 유도는 edges.py 안에서 일어나므로, 여기서 미리 계산해
+#: 끼워 넣으면 그 작업과 어긋날 수 있고 넘어온 값 그대로 쓰면 의미가 어느
+#: 쪽이든 항상 옳다.
+_PIXEL_SETTINGS = ("threshold", "gap", "width", "minLength", "lineAlpha")
+
+
+def _edge_settings_key(opts):
+    return tuple(opts.get(k) for k in _PIXEL_SETTINGS)
+
+
+def _cached_plan_overlays(session, views, opts):
+    """
+    plan_overlays를 세션당 메모이즈해서 부른다.
+
+    오버레이 하나는 그 뷰의 색 레이어·라인 레이어와 픽셀에 영향을 주는 설정
+    (threshold/gap/width/minLength/lineAlpha)만으로 정해진다 — 지금 화면에 뭐가
+    보이는지(visibleLayerIds)는 그 값에 관여하지 않는다. 눈은 "그려진 오버레이
+    중 무엇을 합성하는지"만 정할 뿐이다(render_preview의 시점-필터, render.py가
+    그리기 직전에 lineIds & visible로 한 번 더 거르는 것과는 다른 층이다). 그래서
+    같은 뷰·같은 설정이면 레이어 눈을 켰다 껐다 다시 렌더해도 결과가 같고, 다시
+    계산할 이유가 없다 — 이 캐시가 옳은 이유가 그것이다.
+
+    캐시는 세션 딕셔너리 위에 얹는다(session.py를 건드리지 않고 여기서 attach).
+    SessionStore.open은 경로와 mtime이 둘 다 같을 때만 세션을 재사용하고,
+    아티스트가 포토샵에서 저장하면 mtime이 바뀌어 완전히 새 세션 딕셔너리가
+    만들어진다(session.py의 open 참고) — 그러니 여기서 따로 무효화를 챙길 필요가
+    없다. 옛 세션이 LRU에 밀려 사라지면 그 딕셔너리를 참조하는 곳이 없어져
+    캐시도 함께 GC된다. 상한(OVERLAY_CACHE_PER_SESSION)은 그와 별개로, 같은
+    세션 안에서 설정을 계속 바꿔가며 미리보기를 켜켜이 쌓는 경우를 막는다.
+    """
+    cache = session.setdefault("_overlay_cache", OrderedDict())
+    settings_key = _edge_settings_key(opts)
+    plans = []
+    for view in views:
+        key = (tuple(view["colourIds"]), tuple(view["lineIds"]), settings_key)
+        cached = cache.get(key)
+        if cached is not None:
+            cache.move_to_end(key)
+            plans.extend(cached)
+            continue
+        made = plan_overlays(session, [view], opts)
+        cache[key] = made
+        while len(cache) > OVERLAY_CACHE_PER_SESSION:
+            cache.popitem(last=False)
+        plans.extend(made)
+    return plans
 
 
 def _emit(obj, out):
@@ -154,7 +223,7 @@ class Engine:
             # 그 낭비가 뒤에 온 다른 요청까지 물고 늘어진다. 그리기 시점 필터는
             # 그대로 둔다 — 호출자가 잊을 수 없는 안전망이다.
             views = [v for v in views if set(v["lineIds"]) & visible]
-            overlays = plan_overlays(s, views, opts)
+            overlays = _cached_plan_overlays(s, views, opts)
         return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
                                           line_color=lineColor,
                                           line_color_ids=lineColorIds,
@@ -234,7 +303,7 @@ class Engine:
             # 않는다 — export_psd 전체가 애초에 눈을 보지 않는다.
             views = find_views(s) + manual_views(
                 s, edgeLines.get("manualColourIds") or [], included)
-            attach_overlays(entries, plan_overlays(s, views, opts))
+            attach_overlays(entries, _cached_plan_overlays(s, views, opts))
         else:
             attach_overlays(entries, [])
 
