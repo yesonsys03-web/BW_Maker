@@ -11,9 +11,9 @@ def test_jpg_with_line_color_is_not_a_solid_block(session, plan, tmp_path):
     그 배열의 알파를 그냥 버리면 전면이 단색인 이미지가 나온다 — 기본 라인 색이
     #000000이므로 새까만 사각형이다. 흰 캔버스에 합성한 뒤 RGB로 바꿔야 한다.
     """
-    entries = plan([3, 4, 5])
+    entries = plan([3, 4, 5], line_color="#000000")
     out = tmp_path / "a.jpg"
-    export_raster(session, entries, out, "jpg", line_color="#000000")
+    export_raster(session, entries, out, "jpg")
     arr = np.array(Image.open(out).convert("RGB"))
     assert len(np.unique(arr.reshape(-1, 3), axis=0)) > 1, "단색 이미지가 나왔다"
     # 라인이 없는 자리는 흰 배경이어야 한다. 캔버스는 64x48인데 포함된 세 엔트리
@@ -26,9 +26,9 @@ def test_jpg_with_line_color_is_not_a_solid_block(session, plan, tmp_path):
 
 
 def test_png_keeps_a_transparent_background(session, plan, tmp_path):
-    entries = plan([3, 4, 5])
+    entries = plan([3, 4, 5], line_color="#000000")
     out = tmp_path / "a.png"
-    export_raster(session, entries, out, "png", line_color="#000000")
+    export_raster(session, entries, out, "png")
     img = Image.open(out)
     assert img.mode == "RGBA"
     alpha = np.array(img)[..., 3]
@@ -55,9 +55,11 @@ def test_raster_refuses_to_overwrite(session, plan, tmp_path):
 
 
 def test_raster_rejects_a_bad_line_color_before_writing(session, plan, tmp_path):
+    # 형식 오류가 나는 지점은 이제 계획을 세우는 assign_line_color다 —
+    # 내보내기가 시작조차 하지 않으므로 파일이 남을 수 없다.
     out = tmp_path / "a.png"
     with pytest.raises(ValueError):
-        export_raster(session, plan([3, 4, 5]), out, "png", line_color="빨강")
+        plan([3, 4, 5], line_color="빨강")
     assert not out.exists()
 
 

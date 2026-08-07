@@ -373,12 +373,20 @@ def session(fixture_psd):
 
 @pytest.fixture
 def plan(session):
-    """included id 목록과 operations로 엔트리를 만든다."""
-    from psd_engine.ops import build_export_plan, finalize_names
+    """
+    included id 목록과 operations로 엔트리를 만든다.
 
-    def make(included, operations=()):
+    색 통일까지 여기서 붙인다 — 실제 호출자(rpc.export_psd, batch)도 엔트리를
+    만든 직후에 그렇게 하고, entry_pixels는 `lineRgb`가 없으면 KeyError를 낸다.
+    line_color_ids 기본값 None은 "포함된 것 전부에 건다"는 뜻이다.
+    """
+    from psd_engine.ops import build_export_plan, finalize_names
+    from psd_engine.render import assign_line_color
+
+    def make(included, operations=(), line_color=None, line_color_ids=None):
         entries = build_export_plan(included, list(operations))
-        return finalize_names(entries, session["nodes_by_id"], "pathPrefix")
+        finalize_names(entries, session["nodes_by_id"], "pathPrefix")
+        return assign_line_color(entries, line_color, line_color_ids)
 
     return make
 

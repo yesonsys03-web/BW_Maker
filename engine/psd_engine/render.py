@@ -115,6 +115,38 @@ def apply_line_color(rgba, rgb):
     return out
 
 
+def assign_line_color(entries, line_color, line_color_ids=None):
+    """
+    엔트리마다 "여기 덮을 색"을 정해 `lineRgb`에 박아 둔다. 형식 오류는 여기서 난다.
+
+    **색을 엔트리에 실어 보내는 이유.** 내보내기와 검증이 반드시 같은 판단을 봐야
+    하기 때문이다. 예전에는 둘이 `line_color` 문자열을 따로 받아 각자 적용했고,
+    한쪽만 인자를 빠뜨리자 멀쩡한 산출물이 파일마다 "검증 실패"로 나왔다(verify.py
+    docstring에 그 사고가 적혀 있다). 이제 판단은 이 함수 한 번뿐이고 내보내기·
+    래스터·검증은 읽기만 하므로, 그런 식으로 갈라질 자리가 없다.
+
+    `line_color_ids`는 색 통일을 걸 레이어 id — **프리셋 규칙에 걸린 라인 레이어**다.
+    아티스트가 손으로 체크해 넣은 색 레이어는 여기 없으므로 원본 색이 남는다.
+    이것이 PresetDialog가 "모든 **라인 레이어**의 색을 덮습니다"라고 약속한 범위이고,
+    예전 구현은 포함된 레이어를 가리지 않고 전부 덮어 그 약속을 어겼다.
+    None이면 전부 건다 — 규칙을 모르는 호출자(배치처럼 매칭된 것만 내보내는 경로)용이다.
+
+    **병합 엔트리는 소스가 전부 대상일 때만 건다.** 색은 병합이 끝난 뒤 한 번에
+    덮는데, 그것이 레이어마다 덮고 병합한 것과 같아지려면 소스가 모두 같은 색이
+    되어야 하기 때문이다(entry_pixels 참고). 라인과 색 레이어를 손으로 한 엔트리에
+    묶은 경우에는 색 통일을 포기하고 원본 색을 지킨다 — 지우는 쪽이 아니라 남기는
+    쪽으로 기운다. 되돌리려면 병합을 풀면 된다.
+    """
+    rgb = parse_line_color(line_color)
+    ids = None if line_color_ids is None else set(line_color_ids)
+    for entry in entries:
+        hit = rgb is not None and (
+            ids is None or all(sid in ids for sid in entry["sourceIds"])
+        )
+        entry["lineRgb"] = rgb if hit else None
+    return entries
+
+
 def _mask_fast_ok(layer):
     """
     값싼 마스크 경로가 psd.composite와 같은 그림을 내는 것이 보장되는 형태인가.
@@ -840,19 +872,26 @@ def _preview_tile(session, layer_id, scale):
     return entry
 
 
-def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=None):
+def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=None,
+                   line_color_ids=None):
     """
     내보내기 결과 미리보기: 선택된 레이어의 픽셀을 문서 순서(아래→위)대로
     알파 합성한다. export_psd가 모든 레이어를 normal/255로 기록하므로 이것이
     내보낸 PSD가 실제로 보이게 될 모습이다.
 
-    line_color가 주어지면 합성이 끝난 뒤 한 번만 덮는다. 레이어마다 덮고 합성한
-    것과 결과가 동일하기 때문이다 — 모든 원본 RGB가 같은 값 C면 알파 오버의
-    결과도 항상 C다. 타일 캐시를 색깔별로 나눌 필요도 없어진다.
+    line_color는 **레이어마다** 건다(line_color_ids에 든 것만 — 뜻은
+    assign_line_color와 같다). 예전에는 합성이 끝난 캔버스에 한 번만 덮었는데,
+    그 지름길은 "모든 소스가 같은 색이 되므로 결과도 같은 색"이라는 등식에
+    기대고 있었다. 색 통일 대상이 일부뿐이면 그 등식이 깨지므로 지름길도 함께
+    사라진다 — 손으로 체크해 넣은 색 레이어까지 검게 칠하던 것이 그 결과였다.
+
+    타일 캐시는 여전히 색깔별로 나누지 않는다. 캐시에는 원본 픽셀만 담고 덮는
+    것은 합성 직전에 사본에 하므로, 캐시된 타일은 색 설정이 바뀌어도 그대로 쓴다.
 
     배경은 투명하게 둔다 — 흰색/체커/검정은 UI가 뒤에 깔아 고른다.
     """
     rgb = parse_line_color(line_color)
+    ids = None if line_color_ids is None else set(line_color_ids)
     psd = session["psd"]
     scale = preview_scale(psd, max_size)
     pw = max(1, round(psd.width * scale))
@@ -873,10 +912,10 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
             continue
         if (sx0, sy0, sx1, sy1) != (0, 0, img.width, img.height):
             img = img.crop((sx0, sy0, sx1, sy1))
+        if rgb is not None and (ids is None or lid in ids):
+            # 캐시된 타일은 건드리지 않는다 — apply_line_color가 사본을 만든다.
+            img = Image.fromarray(apply_line_color(np.asarray(img), rgb), "RGBA")
         canvas.alpha_composite(img, dest=(x0 + sx0, y0 + sy0))
-
-    if rgb is not None:
-        canvas = Image.fromarray(apply_line_color(np.asarray(canvas), rgb), "RGBA")
 
     return _save_png(canvas, out_dir, "preview")
 

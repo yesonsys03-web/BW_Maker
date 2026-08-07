@@ -399,7 +399,11 @@ test("thumbnails are requested only for the rows that are on screen", async () =
  * documentView([1,2,3] 전부 보임)를 벗어난 채로 열어야, 세는 엔진 호출이
  * renderDocumentPreview가 아니라 renderPreview로 고정된다.
  */
-function previewCanvasProps(overrides: { previewHiddenIds: number[]; onRenderingChange?: (busy: boolean) => void }) {
+function previewCanvasProps(overrides: {
+  previewHiddenIds: number[];
+  onRenderingChange?: (busy: boolean) => void;
+  matchedIds?: number[];
+}) {
   return {
     sessionId: 1,
     path: "/cuts/a.psd",
@@ -410,6 +414,7 @@ function previewCanvasProps(overrides: { previewHiddenIds: number[]; onRendering
     previewHiddenIds: overrides.previewHiddenIds,
     soloIds: [] as number[],
     lineColor: null,
+    matchedIds: overrides.matchedIds,
     paused: false,
     cache: new PreviewCache(),
     onRenderingChange: overrides.onRenderingChange ?? vi.fn(),
@@ -417,6 +422,27 @@ function previewCanvasProps(overrides: { previewHiddenIds: number[]; onRendering
     onError: vi.fn(),
   };
 }
+
+// 색 통일은 프리셋 규칙에 걸린 라인에만 걸려야 한다. 손으로 체크해 넣은 색
+// 레이어까지 덮으면 화면에서 새까맣게 보인다 — 썸네일은 원본 색이라 더 헷갈렸다.
+// 엔진에 넘기는 것은 "지금 그리는 것 중 규칙에 걸린 것"이다(lineColorIdsFor).
+test("the canvas tells the engine which layers the line color may touch", async () => {
+  engine.renderPreview.mockResolvedValue({ pngPath: "/tmp/p.png" });
+
+  render(
+    <PreviewCanvas
+      {...previewCanvasProps({ previewHiddenIds: [1], matchedIds: [2] })}
+      lineColor="#000000"
+    />
+  );
+
+  await waitFor(() => expect(engine.renderPreview).toHaveBeenCalled());
+  // visibleIds는 [2, 3]이고 그중 규칙에 걸린 것은 2뿐이다 — 3은 원본 색으로 남는다.
+  const [, visibleIds, , lineColor, lineColorIds] = engine.renderPreview.mock.calls[0];
+  expect(visibleIds).toEqual([2, 3]);
+  expect(lineColor).toBe("#000000");
+  expect(lineColorIds).toEqual([2]);
+});
 
 test("a burst of toggles behind an in-flight render collapses to exactly one more dispatch", async () => {
   const held: ReturnType<typeof deferred<{ pngPath: string }>>[] = [];

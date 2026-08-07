@@ -6,10 +6,9 @@ from PIL import Image
 
 from .paths import long_path
 from .raster import flatten_entries
-from .render import parse_line_color
 
 
-def verify_raster(session, entries, output_path, fmt, line_color=None):
+def verify_raster(session, entries, output_path, fmt):
     """
     `verify_export`와 같은 모양의 dict를 돌려준다 — 프런트의
     describeVerification이 그대로 읽어야 하기 때문이다.
@@ -22,7 +21,6 @@ def verify_raster(session, entries, output_path, fmt, line_color=None):
     소비자(verifyReport.ts, ExportDialog.tsx)가 거짓일 때만 렌더하므로 결과에
     레이어 수 이야기가 아예 나오지 않는다 — 그것이 맞는 표시다.
     """
-    line_rgb = parse_line_color(line_color)
     psd = session["psd"]
     name = os.path.basename(str(output_path))
 
@@ -31,7 +29,7 @@ def verify_raster(session, entries, output_path, fmt, line_color=None):
 
     check = {"name": name, "nameOk": True, "pixelChecked": False, "pixelOk": None}
     if fmt == "png" and canvas_ok:
-        expected = np.array(flatten_entries(session, entries, line_rgb))
+        expected = np.array(flatten_entries(session, entries))
         actual = np.array(img.convert("RGBA"))
         check["pixelChecked"] = True
         check["pixelOk"] = bool(

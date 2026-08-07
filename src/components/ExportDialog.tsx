@@ -14,6 +14,13 @@ interface ExportDialogProps {
   ops: OpsState;
   tree: TreeNode[] | undefined;
   preset: Preset | undefined;
+  /**
+   * 프리셋 규칙에 걸린 레이어 id(apply_preset의 matchedLayerIds). 색 통일은
+   * 그중 실제로 내보내는 것에만 걸린다 — 아티스트가 손으로 체크해 넣은 색
+   * 레이어는 원본 색으로 나가야 한다(엔진의 assign_line_color 참고).
+   * 아직 프리셋을 적용하지 않았으면 undefined이고, 그때는 예전처럼 전부 건다.
+   */
+  matchedIds: number[] | undefined;
   onPushOp: (op: Operation) => void;
   onClose: () => void;
   onSessionRefreshed: (path: string, result: OpenResult) => void;
@@ -46,6 +53,7 @@ export function ExportDialog({
   ops,
   tree,
   preset,
+  matchedIds,
   onPushOp,
   onClose,
   onSessionRefreshed,
@@ -183,7 +191,8 @@ export function ExportDialog({
         sessionId,
         (sid) =>
           exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true,
-                    normalizeColor ? lineColor : null, splitLayers, outputFormat),
+                    normalizeColor ? lineColor : null, splitLayers, outputFormat,
+                    matchedIds ?? null),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);

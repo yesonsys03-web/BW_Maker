@@ -125,13 +125,15 @@ export async function renderPreview(
   sessionId: number,
   visibleLayerIds: number[],
   maxSize: number,
-  lineColor: string | null = null
+  lineColor: string | null = null,
+  lineColorIds: number[] | null = null
 ): Promise<{ pngPath: string }> {
   return callEngine("render_preview", {
     sessionId,
     visibleLayerIds,
     maxSize,
     lineColor,
+    lineColorIds,
   }) as Promise<{ pngPath: string }>;
 }
 
@@ -177,7 +179,8 @@ export async function exportPsd(
   verify: boolean = true,
   lineColor: string | null = null,
   splitLayers: boolean = false,
-  outputFormat: OutputFormat = "psd"
+  outputFormat: OutputFormat = "psd",
+  lineColorIds: number[] | null = null
 ): Promise<ExportResult> {
   return callEngine("export_psd", {
     sessionId,
@@ -191,6 +194,7 @@ export async function exportPsd(
     lineColor,
     splitLayers,
     outputFormat,
+    lineColorIds,
   }) as Promise<ExportResult>;
 }
 

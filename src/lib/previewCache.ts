@@ -27,15 +27,45 @@ export function previewRenderSpec(
   includedIds: number[],
   previewHiddenIds: number[],
   soloIds: number[],
-  lineColor: string | null
-): { visibleIds: number[]; documentView: boolean; key: string | null } {
+  lineColor: string | null,
+  matchedIds: number[] | undefined
+): {
+  visibleIds: number[];
+  documentView: boolean;
+  lineColorIds: number[] | null;
+  key: string | null;
+} {
   const visibleIds = visibleIdsForPreview(tree, includedIds, previewHiddenIds, soloIds);
   const documentView = isDocumentView(tree, visibleIds);
   return {
     visibleIds,
     documentView,
-    key: previewCacheKey(file, documentView, visibleIds, lineColor),
+    lineColorIds: lineColorIdsFor(visibleIds, lineColor, matchedIds),
+    key: previewCacheKey(file, documentView, visibleIds, lineColor, matchedIds),
   };
+}
+
+/**
+ * 색 통일을 걸 레이어 id — 지금 그리는 것들 중 **프리셋 규칙에 걸린 라인**뿐이다.
+ * 아티스트가 손으로 체크해 넣은 색 레이어는 여기 없으므로 원본 색이 남는다
+ * (엔진의 assign_line_color가 내보내기 쪽에서 같은 판단을 한다).
+ *
+ * 그릴 것과 교집합을 내는 것은 두 가지를 한 번에 해결한다. 엔진에 보내는 목록이
+ * 짧아지고(납품 파일은 매칭만 600장 규모다), 캐시 키도 지금 그림에 실제로 영향을
+ * 주는 것만 담게 된다.
+ *
+ * `matchedIds`가 아직 없으면(프리셋을 적용하기 전) null을 준다 — 엔진에서 그것은
+ * "전부 건다"는 뜻이고, 색 통일을 켜둔 프리셋이 선택돼 있는 한 App이 곧 프리셋을
+ * 적용해 다시 그린다.
+ */
+export function lineColorIdsFor(
+  visibleIds: number[],
+  lineColor: string | null,
+  matchedIds: number[] | undefined
+): number[] | null {
+  if (lineColor === null || matchedIds === undefined) return null;
+  const matched = new Set(matchedIds);
+  return visibleIds.filter((id) => matched.has(id));
 }
 
 /** 캐시가 그림을 어느 파일의 어느 판(version)에 붙여둘지. */
@@ -65,16 +95,23 @@ export function previewCacheKey(
   file: PreviewFileId,
   documentView: boolean,
   visibleIds: number[],
-  lineColor: string | null
+  lineColor: string | null,
+  matchedIds: number[] | undefined
 ): string | null {
   if (file.mtime === undefined) return null;
   // 문서 보기는 visibleIds/lineColor를 쓰지 않지만 키에 남겨도 해롭지 않다
   // (같은 입력이면 같은 키다). 빠뜨렸을 때만 문제가 된다.
+  //
+  // 색 통일 **대상**도 키에 든다. 같은 레이어를 같은 색 설정으로 그려도 어느
+  // 것에 색을 거느냐에 따라 그림이 다르기 때문이다 — 프리셋을 적용하기 전후가
+  // 정확히 그 경우다.
+  const lineColorIds = lineColorIdsFor(visibleIds, lineColor, matchedIds);
   return [
     file.path,
     file.mtime,
     documentView ? "doc" : "composite",
     lineColor ?? "",
+    lineColorIds === null ? "all" : lineColorIds.join(","),
     visibleIds.join(","),
   ].join("\n");
 }

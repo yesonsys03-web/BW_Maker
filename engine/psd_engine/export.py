@@ -8,8 +8,7 @@ from PIL import Image
 
 from .patches import apply_pytoshop_patches
 from .paths import ensure_writable_path, long_path
-from .render import (PSD_MAX_DIMENSION, apply_line_color, extract_rgba, merge_rgba,
-                     parse_line_color)
+from .render import PSD_MAX_DIMENSION, apply_line_color, extract_rgba, merge_rgba
 
 
 def _output_version(output_path, width, height):
@@ -36,7 +35,12 @@ def _output_version(output_path, width, height):
     return enums.Version.version_1
 
 
-def entry_pixels(session, entry, line_rgb=None):
+def entry_pixels(session, entry):
+    """
+    엔트리의 픽셀. 덮을 색은 `entry["lineRgb"]`에서 읽는다 — assign_line_color가
+    미리 정해 둔 값이고, 없으면 KeyError로 드러난다(조용히 색 통일을 빠뜨리느니
+    호출자가 assign_line_color를 잊었다는 사실이 터져 나오는 편이 낫다).
+    """
     if len(entry["sourceIds"]) == 1:
         layer = session["layers_by_id"][entry["sourceIds"][0]]
         rgba, left, top = extract_rgba(layer), layer.left, layer.top
@@ -45,15 +49,15 @@ def entry_pixels(session, entry, line_rgb=None):
         rgba, left, top = merge_rgba(session["psd"], layers)
     # 병합 뒤에 덮는다. 소스가 서로 다른 색이어도 결과 알파는 같으므로 레이어마다
     # 먼저 덮고 병합한 것과 같은 그림이 되고, 병합 경로가 한 갈래로 유지된다.
-    return apply_line_color(rgba, line_rgb), left, top
+    # 이 등식이 성립하려면 소스가 **전부** 대상이어야 한다 — assign_line_color가
+    # 섞인 엔트리를 아예 대상에서 빼는 이유가 그것이다.
+    return apply_line_color(rgba, entry["lineRgb"]), left, top
 
 
 def export_psd(session, entries, output_path, embed_preview=True,
-               overwrite=False, progress=None, line_color=None):
+               overwrite=False, progress=None):
     if not entries:
         raise ValueError("no entries to export")
-    # 파일을 만들기 시작하기 전에 형식을 확인한다 — 절반 쓰다 실패하지 않도록.
-    line_rgb = parse_line_color(line_color)
     apply_pytoshop_patches()
     from pytoshop import enums
     from pytoshop.image_data import ImageData
@@ -72,7 +76,7 @@ def export_psd(session, entries, output_path, embed_preview=True,
     canvas = Image.new("RGBA", (W, H), (255, 255, 255, 255)) if embed_preview else None
 
     for i, entry in enumerate(entries):
-        rgba, left, top = entry_pixels(session, entry, line_rgb)
+        rgba, left, top = entry_pixels(session, entry)
         channels = {c: np.ascontiguousarray(rgba[..., c]) for c in range(3)}
         channels[-1] = np.ascontiguousarray(rgba[..., 3])
         images_bottom_to_top.append(nested_layers.Image(
@@ -139,7 +143,7 @@ def split_output_path(output_path, layer_name):
 
 
 def export_psd_split(session, entries, output_path, embed_preview=True,
-                     overwrite=False, progress=None, line_color=None):
+                     overwrite=False, progress=None):
     """
     엔트리마다 파일 하나로 내보낸다.
 
@@ -164,7 +168,7 @@ def export_psd_split(session, entries, output_path, embed_preview=True,
     total = len(targets)
     for i, (entry, path) in enumerate(targets):
         result = export_psd(session, [entry], path, embed_preview=embed_preview,
-                            overwrite=True, progress=None, line_color=line_color)
+                            overwrite=True, progress=None)
         outputs.append(result)
         if progress:
             progress("write", i + 1, total)

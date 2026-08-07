@@ -18,7 +18,8 @@ from .matching import (auto_merge_operations, auto_merge_preview,
 from .ops import build_export_plan, finalize_names
 from .raster import export_raster as _export_raster
 from .raster import export_raster_split as _export_raster_split
-from .render import render_document_preview, render_preview, render_thumbnails
+from .render import (assign_line_color, render_document_preview, render_preview,
+                     render_thumbnails)
 from .session import SessionStore
 from .verify import verify_export
 from .verify_raster import verify_raster
@@ -106,11 +107,13 @@ class Engine:
         out_dir = self._fresh_render_dir("thumbnails")
         return {"thumbs": render_thumbnails(s, layerIds, maxSize, out_dir)}
 
-    def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None):
+    def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None,
+                       lineColorIds=None):
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
         return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
-                                          line_color=lineColor)}
+                                          line_color=lineColor,
+                                          line_color_ids=lineColorIds)}
 
     # 이 둘은 세션이 아니라 트리를 받는다. 이름만 보고 묶는 계산이라 픽셀도 PSD도
     # 필요 없는데, 세션을 요구하면 그것이 축출됐을 때 700MB짜리 파일을 통째로 다시
@@ -156,7 +159,7 @@ class Engine:
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
                    embedPreview=True, overwrite=False, verify=True, lineColor=None,
-                   splitLayers=False, outputFormat="psd"):
+                   splitLayers=False, outputFormat="psd", lineColorIds=None):
         s = self.store.get(sessionId)
         included = sorted(includedIds)
         for lid in included:
@@ -169,6 +172,10 @@ class Engine:
         entries = finalize_names(
             build_export_plan(included, operations), s["nodes_by_id"], naming
         )
+        # 색 통일을 여기서 한 번만 정한다. 아래 내보내기·검증은 그 판단을 읽기만
+        # 하므로 둘이 갈라질 수 없다(assign_line_color 참고). 형식이 틀린 색은
+        # 파일을 만들기 전인 여기서 걸린다.
+        assign_line_color(entries, lineColor, lineColorIds)
 
         def progress(stage, current, total):
             _emit({"event": "progress", "stage": stage,
@@ -177,14 +184,12 @@ class Engine:
         if outputFormat in ("png", "jpg"):
             if splitLayers:
                 result = _export_raster_split(s, entries, outputPath, outputFormat,
-                                              overwrite=overwrite, progress=progress,
-                                              line_color=lineColor)
+                                              overwrite=overwrite, progress=progress)
                 if verify:
                     # 파일마다 그 파일에 들어간 엔트리 하나로 검증한다.
                     for entry, out in zip(entries, result["outputs"]):
                         out["verification"] = verify_raster(
-                            s, [entry], out["outputPath"], outputFormat,
-                            line_color=lineColor)
+                            s, [entry], out["outputPath"], outputFormat)
                     result["verification"] = {
                         "ok": all(o["verification"]["ok"] for o in result["outputs"]),
                         "canvasOk": all(o["verification"]["canvasOk"] for o in result["outputs"]),
@@ -196,21 +201,19 @@ class Engine:
                 result["outputPath"] = os.path.dirname(result["outputs"][0]["outputPath"])
                 return result
             result = _export_raster(s, entries, outputPath, outputFormat,
-                                    overwrite=overwrite, progress=progress,
-                                    line_color=lineColor)
+                                    overwrite=overwrite, progress=progress)
             if verify:
                 result["verification"] = verify_raster(s, entries, outputPath,
-                                                       outputFormat, line_color=lineColor)
+                                                       outputFormat)
             return result
 
         if splitLayers:
             result = _export_split(s, entries, outputPath, embed_preview=embedPreview,
-                                   overwrite=overwrite, progress=progress,
-                                   line_color=lineColor)
+                                   overwrite=overwrite, progress=progress)
             if verify:
                 # 파일마다 그 파일에 들어간 엔트리 하나로 검증한다.
                 for entry, out in zip(entries, result["outputs"]):
-                    out["verification"] = verify_export(s, [entry], out["outputPath"], line_color=lineColor)
+                    out["verification"] = verify_export(s, [entry], out["outputPath"])
                 result["verification"] = {
                     "ok": all(o["verification"]["ok"] for o in result["outputs"]),
                     "canvasOk": all(o["verification"]["canvasOk"] for o in result["outputs"]),
@@ -223,9 +226,9 @@ class Engine:
             return result
 
         result = _export(s, entries, outputPath, embed_preview=embedPreview,
-                         overwrite=overwrite, progress=progress, line_color=lineColor)
+                         overwrite=overwrite, progress=progress)
         if verify:
-            result["verification"] = verify_export(s, entries, outputPath, line_color=lineColor)
+            result["verification"] = verify_export(s, entries, outputPath)
         return result
 
     # ---- dispatch ----

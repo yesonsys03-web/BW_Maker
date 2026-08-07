@@ -455,6 +455,11 @@ function AppShell() {
   useEffect(() => {
     opsByPathRef.current = state.opsByPath;
   }, [state.opsByPath]);
+  /** 파일별 프리셋 매칭 결과. 색 통일을 어디에 걸지 정한다(previewCache의 lineColorIdsFor). */
+  const matchedIdsByPathRef = useRef(state.matchedIdsByPath);
+  useEffect(() => {
+    matchedIdsByPathRef.current = state.matchedIdsByPath;
+  }, [state.matchedIdsByPath]);
 
   /** 이 파일의 미리보기를 어떻게 그릴지 + 어느 키에 담을지. 아직 못 그리면 null. */
   const previewPlanFor = useCallback((file: FileEntry) => {
@@ -466,7 +471,8 @@ function AppShell() {
       ops.includedIds,
       ops.previewHiddenIds,
       ops.soloIds,
-      presetRef.current?.lineColor ?? null
+      presetRef.current?.lineColor ?? null,
+      matchedIdsByPathRef.current[file.path]
     );
   }, []);
 
@@ -530,7 +536,8 @@ function AppShell() {
             (s) =>
               plan.documentView
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
-                : renderPreview(s, plan.visibleIds, PREVIEW_MAX_SIZE, presetRef.current?.lineColor ?? null),
+                : renderPreview(s, plan.visibleIds, PREVIEW_MAX_SIZE,
+                                presetRef.current?.lineColor ?? null, plan.lineColorIds),
             (r) => {
               sid = r.sessionId;
               refreshSession(path, r);
@@ -788,6 +795,7 @@ function AppShell() {
           previewHiddenIds={ops.previewHiddenIds}
           soloIds={ops.soloIds}
           lineColor={selectedPreset?.lineColor ?? null}
+          matchedIds={state.activePath ? state.matchedIdsByPath[state.activePath] : undefined}
           paused={loading}
           cache={previewCacheRef.current}
           onRenderingChange={handleCanvasRendering}
@@ -878,6 +886,7 @@ function AppShell() {
           ops={ops}
           tree={activeFile.tree}
           preset={selectedPreset}
+          matchedIds={state.matchedIdsByPath[activeFile.path]}
           onPushOp={pushOp}
           onClose={() => setExportOpen(false)}
           onSessionRefreshed={refreshSession}

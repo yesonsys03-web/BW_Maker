@@ -5,7 +5,6 @@ from PIL import Image
 
 from .export import entry_pixels, split_output_path
 from .paths import ensure_writable_path, long_path
-from .render import parse_line_color
 
 #: JPEG의 축당 한계. PNG는 사실상 한계가 없고, PSD/PSB의 30,000은 이 경로와 무관하다.
 JPEG_MAX_DIMENSION = 65535
@@ -15,7 +14,7 @@ JPEG_MAX_DIMENSION = 65535
 JPEG_QUALITY = 95
 
 
-def flatten_entries(session, entries, line_rgb, progress=None):
+def flatten_entries(session, entries, progress=None):
     """
     엔트리를 문서 크기의 투명 RGBA 캔버스에 아래에서 위로 합성한다.
 
@@ -27,7 +26,7 @@ def flatten_entries(session, entries, line_rgb, progress=None):
     canvas = Image.new("RGBA", (psd.width, psd.height), (0, 0, 0, 0))
     total = len(entries) + 1
     for i, entry in enumerate(entries):
-        rgba, left, top = entry_pixels(session, entry, line_rgb)
+        rgba, left, top = entry_pixels(session, entry)
         canvas.alpha_composite(Image.fromarray(rgba), dest=(left, top))
         if progress:
             progress("compose", i + 1, total)
@@ -43,7 +42,7 @@ def _check_dimensions(fmt, width, height, output_path):
 
 
 def export_raster(session, entries, output_path, fmt, overwrite=False,
-                  progress=None, line_color=None):
+                  progress=None):
     """
     엔트리를 평탄화해 한 장의 PNG/JPG로 쓴다.
 
@@ -56,8 +55,6 @@ def export_raster(session, entries, output_path, fmt, overwrite=False,
     """
     if not entries:
         raise ValueError("no entries to export")
-    # 파일을 만들기 시작하기 전에 형식을 확인한다 — 절반 쓰다 실패하지 않도록.
-    line_rgb = parse_line_color(line_color)
     output_path = str(output_path)
     ensure_writable_path(output_path)
     if os.path.exists(long_path(output_path)) and not overwrite:
@@ -66,7 +63,7 @@ def export_raster(session, entries, output_path, fmt, overwrite=False,
     psd = session["psd"]
     _check_dimensions(fmt, psd.width, psd.height, output_path)
 
-    canvas = flatten_entries(session, entries, line_rgb, progress)
+    canvas = flatten_entries(session, entries, progress)
     total = len(entries) + 1
     if progress:
         progress("write", total, total)
@@ -87,7 +84,7 @@ def export_raster(session, entries, output_path, fmt, overwrite=False,
 
 
 def export_raster_split(session, entries, output_path, fmt, overwrite=False,
-                        progress=None, line_color=None):
+                        progress=None):
     """
     엔트리마다 이미지 하나로 내보낸다. 캔버스 크기는 매 파일 원본 그대로다 —
     나중에 다시 합칠 때 좌표가 맞아야 하기 때문이다.
@@ -110,7 +107,7 @@ def export_raster_split(session, entries, output_path, fmt, overwrite=False,
     total = len(targets)
     for i, (entry, path) in enumerate(targets):
         outputs.append(export_raster(session, [entry], path, fmt, overwrite=True,
-                                     progress=None, line_color=line_color))
+                                     progress=None))
         if progress:
             progress("write", i + 1, total)
     return {"outputs": outputs, "layerCount": len(entries)}

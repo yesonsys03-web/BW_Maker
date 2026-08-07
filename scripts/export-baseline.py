@@ -39,7 +39,7 @@ import numpy as np  # noqa: E402
 from psd_engine.export import entry_pixels, export_psd  # noqa: E402
 from psd_engine.matching import match_preset, preset_operations  # noqa: E402
 from psd_engine.ops import build_export_plan, finalize_names  # noqa: E402
-from psd_engine.render import parse_line_color  # noqa: E402
+from psd_engine.render import assign_line_color  # noqa: E402
 from psd_engine.session import SessionStore  # noqa: E402
 
 #: 앱이 실제로 쓰는 프리셋 파일. 기본 프리셋(merge="none")으로 재면 merge 경로를
@@ -118,11 +118,13 @@ def measure(path, preset, write_to=None):
                                  s["nodes_by_id"], preset["naming"])
         t_plan = time.perf_counter() - t
 
-        line_rgb = parse_line_color(preset.get("lineColor"))
+        # 배치와 같은 판단을 태운다 — 규칙에 걸린 것만 내보내므로 색 통일 대상도
+        # matched 전부다(psd_engine.batch와 같은 호출).
+        assign_line_color(entries, preset.get("lineColor"), matched)
         t = time.perf_counter()
         out_entries = []
         for e in entries:
-            rgba, left, top = entry_pixels(s, e, line_rgb)
+            rgba, left, top = entry_pixels(s, e)
             arr = np.ascontiguousarray(rgba)
             out_entries.append({
                 "name": e["finalName"],
@@ -155,7 +157,7 @@ def measure(path, preset, write_to=None):
             t = time.perf_counter()
             export_psd(s, entries, out_path,
                        embed_preview=preset.get("embedPreview", True),
-                       overwrite=True, line_color=preset.get("lineColor"))
+                       overwrite=True)
             result["timings"]["write"] = round(time.perf_counter() - t, 2)
             with open(out_path, "rb") as f:
                 result["fileSha256"] = hashlib.sha256(f.read()).hexdigest()

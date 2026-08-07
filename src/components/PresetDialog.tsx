@@ -347,8 +347,9 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           <code className="preset-color-value">{normalizeColor ? lineColor.toUpperCase() : "원본 유지"}</code>
         </label>
         <p className="preset-hint">
-          내보낼 때 모든 라인 레이어의 색을 한 색으로 덮습니다. 알파는 그대로 두므로 선 가장자리의
-          안티에일리어싱은 보존됩니다. 꺼두면 원본 레이어 색을 그대로 씁니다.
+          내보낼 때 <b>규칙에 걸린 라인 레이어</b>의 색을 한 색으로 덮습니다. 손으로 체크해 넣은
+          레이어(색 레이어 등)는 원본 색 그대로 나갑니다. 알파는 그대로 두므로 선 가장자리의
+          안티에일리어싱은 보존됩니다. 꺼두면 모두 원본 색을 씁니다.
         </p>
 
         <div className="modal-actions">

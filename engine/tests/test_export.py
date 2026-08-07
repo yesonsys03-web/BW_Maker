@@ -9,6 +9,7 @@ from pathlib import Path
 from psd_engine.export import (export_psd, export_psd_split, output_extension,
                                split_output_path)
 from psd_engine.ops import build_export_plan, finalize_names
+from psd_engine.render import assign_line_color
 from psd_engine.session import SessionStore
 from psd_engine.verify import verify_export
 
@@ -25,9 +26,11 @@ def off_canvas_session(off_canvas_psd):
     return store.get(store.open(off_canvas_psd))
 
 
-def _plan(session, included, operations):
+def _plan(session, included, operations, line_color=None, line_color_ids=None):
+    """conftest의 `plan` 픽스처와 같은 일 — 세션을 인자로 받는 판이다."""
     entries = build_export_plan(included, operations)
-    return finalize_names(entries, session["nodes_by_id"], "pathPrefix")
+    finalize_names(entries, session["nodes_by_id"], "pathPrefix")
+    return assign_line_color(entries, line_color, line_color_ids)
 
 
 def _ids(session, *names):
@@ -106,9 +109,9 @@ def test_verify_detects_layer_count_mismatch(session, tmp_path):
 def test_export_normalizes_line_color_across_layers(session, tmp_path):
     # 소스 라인은 요소마다 다른 색으로 그려져 있다(픽스처는 50 / 200). 색 통일을
     # 켜면 내보낸 PSD의 모든 레이어가 한 색이 되고, 알파는 손대지 않는다.
-    entries = _plan(session, [3, 4, 5], [])
+    entries = _plan(session, [3, 4, 5], [], line_color="#000000")
     out_path = tmp_path / "out.psd"
-    export_psd(session, entries, out_path, line_color="#000000")
+    export_psd(session, entries, out_path)
 
     out = PSDImage.open(out_path)
     for layer in out:
@@ -123,12 +126,38 @@ def test_export_keeps_alpha_when_normalizing_color(session, tmp_path):
     plain = _plan(session, [4], [])
     a_path, b_path = tmp_path / "plain.psd", tmp_path / "black.psd"
     export_psd(session, plain, a_path)
-    export_psd(session, _plan(session, [4], []), b_path, line_color="#123456")
+    export_psd(session, _plan(session, [4], [], line_color="#123456"), b_path)
 
     a = np.array(list(PSDImage.open(a_path))[0].topil().convert("RGBA"))
     b = np.array(list(PSDImage.open(b_path))[0].topil().convert("RGBA"))
     assert np.array_equal(a[..., 3], b[..., 3])
     assert (b[..., :3] == [0x12, 0x34, 0x56]).all()
+
+
+def test_export_keeps_the_color_of_a_layer_the_rule_did_not_match(session, tmp_path):
+    # 미리보기와 같은 규칙(test_render_preview_only_normalizes_the_matched_line_layers).
+    # 손으로 체크해 넣은 색 레이어(id 2 = fill, 128)는 원본 색으로 나가야 한다.
+    entries = _plan(session, [2, 4], [], line_color="#000000", line_color_ids=[4])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path)
+
+    by_name = {l.name: np.array(l.topil().convert("RGBA")) for l in PSDImage.open(out_path)}
+    line = by_name["BG_line"]
+    fill = by_name["BG_fill"]
+    assert (line[line[..., 3] > 0][:, :3] == 0).all(), "라인이 색 통일되지 않았다"
+    assert (fill[fill[..., 3] > 0][:, :3] == 128).all(), "규칙에 걸리지 않은 레이어가 덮였다"
+
+
+def test_merged_entry_keeps_its_colors_when_only_some_sources_matched(session, tmp_path):
+    # 라인(id 4, 50)과 색 레이어(id 2, 128)를 손으로 한 엔트리에 묶은 경우.
+    # 병합 뒤 한 번에 덮는 방식으로는 라인만 골라낼 수 없으므로 원본 색을 지킨다.
+    entries = _plan(session, [2, 4], [{"op": "merge", "layerIds": [2, 4], "name": "M"}],
+                    line_color="#000000", line_color_ids=[4])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path)
+
+    arr = np.array(list(PSDImage.open(out_path))[0].topil().convert("RGBA"))
+    assert set(np.unique(arr[..., 0]).tolist()) == {50, 128}
 
 
 def test_export_without_line_color_keeps_source_colors(session, tmp_path):
@@ -144,9 +173,10 @@ def test_export_without_line_color_keeps_source_colors(session, tmp_path):
 
 def test_export_rejects_a_malformed_line_color_before_writing(session, tmp_path):
     # 형식 오류는 파일을 절반 쓰다 터지는 게 아니라 시작 전에 드러나야 한다.
+    # 이제 그 지점은 계획을 세우는 assign_line_color이므로 내보내기가 시작조차 하지 않는다.
     out_path = tmp_path / "out.psd"
     with pytest.raises(ValueError, match="invalid line color"):
-        export_psd(session, _plan(session, [4], []), out_path, line_color="black")
+        _plan(session, [4], [], line_color="black")
     assert not out_path.exists()
 
 
@@ -200,8 +230,8 @@ def test_split_output_path_sanitizes_a_layer_name():
 
 
 def test_split_export_applies_line_color_like_the_single_file_path(session, tmp_path):
-    entries = _plan(session, [4, 5], [])
-    result = export_psd_split(session, entries, tmp_path / "s.psd", line_color="#000000")
+    entries = _plan(session, [4, 5], [], line_color="#000000")
+    result = export_psd_split(session, entries, tmp_path / "s.psd")
     for out in result["outputs"]:
         arr = np.array(list(PSDImage.open(out["outputPath"]))[0].topil().convert("RGBA"))
         painted = arr[..., 3] > 0
@@ -217,12 +247,13 @@ def test_split_export_rejects_an_empty_plan(session, tmp_path):
 # 틀린 것은 내보내기가 아니라 검증이었다: export는 모든 레이어의 RGB를 지정한
 # 색으로 덮어 쓰는데(알파는 그대로), verify는 line_color를 모른 채 원본의 원래
 # 색과 대조했다. 실측으로 알파 차이 0, RGB 차이 255 — 색만 통째로 어긋났다.
+# 이제 둘은 같은 엔트리의 `lineRgb`를 읽으므로 인자를 빠뜨려 갈라질 수 없다.
 def test_verify_accounts_for_the_line_color_that_export_applied(session, tmp_path):
-    entries = _plan(session, [3, 4, 5], [])
+    entries = _plan(session, [3, 4, 5], [], line_color="#000000")
     out_path = tmp_path / "out.psd"
-    export_psd(session, entries, out_path, line_color="#000000")
+    export_psd(session, entries, out_path)
 
-    v = verify_export(session, entries, out_path, line_color="#000000")
+    v = verify_export(session, entries, out_path)
 
     assert v["ok"] is True
     assert all(c["pixelOk"] for c in v["layers"])
@@ -230,11 +261,11 @@ def test_verify_accounts_for_the_line_color_that_export_applied(session, tmp_pat
 
 def test_verify_still_catches_a_wrong_color(session, tmp_path):
     # 색을 아는 것과 무엇이든 통과시키는 것은 다르다. 다른 색으로 나갔다면 잡아야 한다.
-    entries = _plan(session, [4], [])
+    # 산출물은 #123456으로 쓰고, 기대값은 #000000인 계획으로 대조한다.
     out_path = tmp_path / "out.psd"
-    export_psd(session, entries, out_path, line_color="#123456")
+    export_psd(session, _plan(session, [4], [], line_color="#123456"), out_path)
 
-    v = verify_export(session, entries, out_path, line_color="#000000")
+    v = verify_export(session, _plan(session, [4], [], line_color="#000000"), out_path)
 
     assert v["ok"] is False
     assert v["layers"][0]["pixelOk"] is False

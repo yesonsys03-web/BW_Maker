@@ -898,3 +898,61 @@ def test_render_preview_without_line_color_keeps_source_colors(fixture_psd, tmp_
     arr = np.array(im)
     assert arr[0, 0, 0] == 128
     assert arr[15, 15, 0] == 200
+
+
+# 아티스트가 라인이 아닌 색 레이어를 손으로 체크해 넣으면, 미리보기가 그것까지
+# 라인 색으로 칠해 화면에서 새까맣게 보였다(썸네일은 원본 색이라 더 헷갈렸다).
+# 색 통일은 프리셋 규칙에 걸린 라인 레이어에만 걸려야 한다.
+def test_render_preview_only_normalizes_the_matched_line_layers(fixture_psd, tmp_path):
+    from PIL import Image
+    s = _session(fixture_psd)
+    # id 2 = fill(128, 캔버스 전체), id 4 = line(50, 0,0..32,24). 배율은 1.0이다
+    # (문서 64x48이 max_size 256보다 작아 확대하지 않는다).
+    im = Image.open(render_preview(
+        s, [2, 4], max_size=256, out_dir=tmp_path,
+        line_color="#FF0000", line_color_ids=[4],
+    )).convert("RGBA")
+    arr = np.array(im)
+    assert tuple(arr[5, 5][:3]) == (255, 0, 0), "라인이 색 통일되지 않았다"
+    assert tuple(arr[40, 40][:3]) == (128, 128, 128), "규칙에 걸리지 않은 레이어가 덮였다"
+
+
+def test_render_preview_normalizes_everything_when_no_ids_are_given(fixture_psd, tmp_path):
+    # line_color_ids가 None이면 예전대로 전부 건다 — 규칙을 모르는 호출자용 기본값.
+    from PIL import Image
+    s = _session(fixture_psd)
+    im = Image.open(render_preview(
+        s, [2, 4], max_size=256, out_dir=tmp_path, line_color="#FF0000",
+    )).convert("RGBA")
+    arr = np.array(im)
+    painted = arr[..., 3] > 0
+    assert (arr[painted][:, 0] == 255).all()
+    assert (arr[painted][:, 1] == 0).all()
+
+
+def test_assign_line_color_marks_only_the_matched_sources():
+    from psd_engine.render import assign_line_color
+
+    entries = [{"sourceIds": [4]}, {"sourceIds": [2]}]
+    assign_line_color(entries, "#000000", [4])
+    assert entries[0]["lineRgb"] == (0, 0, 0)
+    assert entries[1]["lineRgb"] is None
+
+
+def test_assign_line_color_skips_a_merge_that_mixes_matched_and_unmatched():
+    # 색은 병합이 끝난 뒤 한 번에 덮으므로, 소스가 섞이면 라인만 골라 덮을 수
+    # 없다. 그때는 색 통일을 포기하고 원본 색을 지킨다(지우는 쪽이 아니라 남기는 쪽).
+    from psd_engine.render import assign_line_color
+
+    entries = [{"sourceIds": [4, 5]}, {"sourceIds": [4, 2]}]
+    assign_line_color(entries, "#000000", [4, 5])
+    assert entries[0]["lineRgb"] == (0, 0, 0)
+    assert entries[1]["lineRgb"] is None
+
+
+def test_assign_line_color_without_a_color_marks_nothing():
+    from psd_engine.render import assign_line_color
+
+    entries = [{"sourceIds": [4]}]
+    assign_line_color(entries, None, [4])
+    assert entries[0]["lineRgb"] is None

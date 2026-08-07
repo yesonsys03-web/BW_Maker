@@ -7,6 +7,7 @@ from .matching import match_preset, preset_operations
 from .ops import build_export_plan, finalize_names
 from .paths import ensure_writable_path
 from .raster import export_raster, export_raster_split
+from .render import assign_line_color
 from .session import SessionStore
 from .verify import verify_export
 from .verify_raster import verify_raster
@@ -25,6 +26,10 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
             build_export_plan(matched, operations),
             s["nodes_by_id"], preset["naming"],
         )
+        # 배치는 규칙에 걸린 것만 내보내므로 색 통일 대상도 그것들 전부다. 그래도
+        # matched를 명시해 넘긴다 — 대화형 경로(rpc.export_psd)와 같은 규칙을
+        # 같은 함수로 태우기 위해서다. 색 형식 오류는 파일을 만들기 전 여기서 난다.
+        assign_line_color(entries, preset.get("lineColor"), matched)
         fmt = preset.get("outputFormat", "psd")
         src = Path(path)
         out_dir = Path(output_dir) if output_dir else src.parent
@@ -35,17 +40,15 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
             if progress:
                 progress(str(path), stage, current, total)
 
-        line_color = preset.get("lineColor")
         split = preset.get("splitLayers")
 
         if fmt in ("png", "jpg"):
             if split:
                 result = export_raster_split(s, entries, out_path, fmt,
-                                             overwrite=overwrite, progress=cb,
-                                             line_color=line_color)
+                                             overwrite=overwrite, progress=cb)
                 for entry, out in zip(entries, result["outputs"]):
                     out["verification"] = verify_raster(s, [entry], out["outputPath"],
-                                                        fmt, line_color=line_color)
+                                                        fmt)
                 # rpc.py의 raster split 검증과 같은 모양(ok/canvasOk/layerCountOk/
                 # expectedLayers/actualLayers/layers)으로 맞춘다 — verifyReport.ts가
                 # v.layers를 읽으므로, ok 하나뿐인 dict는 실패 행을 펼치는 순간 죽는다.
@@ -60,17 +63,14 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
                 result["outputPath"] = str(out_dir)
             else:
                 result = export_raster(s, entries, out_path, fmt, overwrite=overwrite,
-                                       progress=cb, line_color=line_color)
-                verification = verify_raster(s, entries, out_path, fmt,
-                                             line_color=line_color)
+                                       progress=cb)
+                verification = verify_raster(s, entries, out_path, fmt)
         elif split:
             result = export_psd_split(s, entries, out_path,
                                       embed_preview=preset.get("embedPreview", True),
-                                      overwrite=overwrite, progress=cb,
-                                      line_color=line_color)
+                                      overwrite=overwrite, progress=cb)
             for entry, out in zip(entries, result["outputs"]):
-                out["verification"] = verify_export(s, [entry], out["outputPath"],
-                                                    line_color=line_color)
+                out["verification"] = verify_export(s, [entry], out["outputPath"])
             # rpc.py의 psd split 검증과 같은 모양으로 맞춘다 — 위 raster split과
             # 같은 이유(verifyReport.ts가 v.layers를 읽는다).
             verification = {
@@ -85,8 +85,8 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
         else:
             result = export_psd(s, entries, out_path,
                                 embed_preview=preset.get("embedPreview", True),
-                                overwrite=overwrite, progress=cb, line_color=line_color)
-            verification = verify_export(s, entries, out_path, line_color=line_color)
+                                overwrite=overwrite, progress=cb)
+            verification = verify_export(s, entries, out_path)
         return {
             "path": str(path), "ok": verification["ok"],
             "outputPath": result["outputPath"],
