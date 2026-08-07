@@ -509,6 +509,32 @@ def test_render_preview_recomputes_the_overlay_when_a_pixel_affecting_setting_ch
     assert len(calls) == 2, f"설정이 바뀌었는데도 캐시를 재사용했다: {len(calls)}번만 호출됨"
 
 
+def test_render_preview_recomputes_when_the_colour_mode_changes(tmp_path, monkeypatch):
+    # colourMode는 색 그림을 만드는 방법을 바꾸므로 그려지는 획도 바뀔 수 있다
+    # (클리핑을 지키는지가 갈린다). 캐시 키에서 빠져 있으면, 두 방법을 비교하려고
+    # 모드만 바꿔 다시 렌더한 사람이 **이전 모드의 오버레이를 그대로 보고**
+    # "차이 없음"이라는 틀린 판정을 내린다 — 비교하려고 만든 옵션이 비교를 막는다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "colourMode": "composite"})
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "colourMode": "paste"})
+
+    assert len(calls) == 2, (
+        f"모드가 바뀌었는데도 캐시를 재사용했다: {len(calls)}번만 호출됨")
+
+
 def test_render_preview_toggling_visibility_does_not_recompute_a_view_already_cached(
     tmp_path, monkeypatch
 ):

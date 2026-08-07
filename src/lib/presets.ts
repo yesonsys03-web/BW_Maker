@@ -20,6 +20,7 @@ export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"];
  */
 export const DEFAULT_EDGE_LINES: EdgeLines = {
   enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
+  colourMode: "composite",
 };
 
 export const DEFAULT_PRESET: Preset = {
@@ -191,6 +192,11 @@ function validatePreset(value: unknown, index: number): Preset {
     ) {
       throw new Error(`${prefix}.edgeLines.${key}: 0 이상의 정수가 아닙니다.`);
     }
+  }
+  // 저장된 프리셋에는 이 키가 없다(옵션이 생기기 전에 저장된 것들). 위의 스프레드가
+  // 기본값 composite로 메우므로, 모르는 값만 걷어내면 예전 프리셋은 예전 동작 그대로다.
+  if (edge.colourMode !== "composite" && edge.colourMode !== "paste") {
+    throw new Error(`${prefix}.edgeLines.colourMode: composite 또는 paste가 아닙니다.`);
   }
 
   return {

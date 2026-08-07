@@ -55,7 +55,11 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     splitLayers: false,       // 기본은 한 파일에 모두
     excludeTokens: ["col", "colour", "color"],  // line col 류는 색 지정이다
     outputFormat: "psd",      // 기본은 원본 따름
-    edgeLines: { enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64 },  // 기본은 꺼짐, width 0 = 자동
+    // 기본은 꺼짐, width 0 = 자동, colourMode는 지금까지의 정확한 경로
+    edgeLines: {
+      enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
+      colourMode: "composite",
+    },
   });
 });
 
@@ -125,12 +129,41 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
     splitLayers: true,
     outputFormat: "jpg",
     excludeTokens: ["fx", "temp"],
-    edgeLines: { enabled: true, threshold: 30, gap: 6, width: 7, minLength: 10, lineAlpha: 70 },
+    // colourMode는 기본값이 아닌 쪽을 넣는다 — 기본값이면 파서가 메워 넣은 것과
+    // 구분이 안 되어 "그대로 보존한다"를 실제로 재지 못한다.
+    edgeLines: {
+      enabled: true, threshold: 30, gap: 6, width: 7, minLength: 10, lineAlpha: 70,
+      colourMode: "paste",
+    },
   };
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([wellFormed]));
 
   await expect(loadPresets()).resolves.toEqual([wellFormed]);
+});
+
+test("a preset saved before colourMode existed loads with the composite path", async () => {
+  // 이미 저장된 프리셋에는 이 키가 없다. 없는 채로 열렸을 때 예전 동작(정확한
+  // 합성)으로 떨어져야 한다 — 여기서 paste로 떨어지면 아무도 고르지 않은 변경이
+  // 조용히 적용된다.
+  const old = {
+    ...DEFAULT_PRESET,
+    edgeLines: { enabled: true, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64 },
+  };
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([old]));
+
+  const loaded = await loadPresets();
+  expect(loaded[0].edgeLines.colourMode).toBe("composite");
+});
+
+test("loadPresets rejects an unknown colourMode instead of guessing", async () => {
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([
+    { ...DEFAULT_PRESET, edgeLines: { ...DEFAULT_PRESET.edgeLines, colourMode: "turbo" } },
+  ]));
+
+  await expect(loadPresets()).rejects.toThrow(/colourMode/);
 });
 
 test("savePresets ensures the app data directory exists then writes JSON", async () => {
@@ -406,5 +439,18 @@ test("the five numeric edge-line defaults match the engine's EDGE_DEFAULTS", () 
     expect(Number(m![1]), `${key}: 엔진과 DEFAULT_EDGE_LINES가 다르다`).toBe(
       DEFAULT_EDGE_LINES[key],
     );
+  }
+  // colourMode는 숫자가 아니라 문자열이라 따로 본다. 이 대조가 없으면 프런트가
+  // 엔진에 없는 값을 보내고도 양쪽 테스트가 모두 통과한다 — width 자동이 앱에서
+  // 한 번도 안 돌았던 것이 정확히 그 사고였다.
+  const mode = /"colourMode":\s*"(\w+)"/.exec(body);
+  expect(mode, "engine EDGE_DEFAULTS에 colourMode가 없다").not.toBeNull();
+  expect(mode![1], "colourMode: 엔진과 DEFAULT_EDGE_LINES가 다르다").toBe(
+    DEFAULT_EDGE_LINES.colourMode,
+  );
+  const modes = /COLOUR_MODES = \(([^)]*)\)/.exec(edgesSource);
+  expect(modes, "engine에 COLOUR_MODES가 없다").not.toBeNull();
+  for (const value of ["composite", "paste"]) {
+    expect(modes![1], `COLOUR_MODES에 ${value}가 없다`).toContain(`"${value}"`);
   }
 });

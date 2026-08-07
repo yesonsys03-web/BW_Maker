@@ -64,7 +64,11 @@ OVERLAY_CACHE_PER_SESSION = 8
 #: 5든) 키에 쓴다 — 유도는 edges.py 안에서 일어나므로, 여기서 미리 계산해
 #: 끼워 넣으면 그 작업과 어긋날 수 있고 넘어온 값 그대로 쓰면 의미가 어느
 #: 쪽이든 항상 옳다.
-_PIXEL_SETTINGS = ("threshold", "gap", "width", "minLength", "lineAlpha")
+#: colourMode도 여기 들어간다. 그리는 픽셀을 바꾸는 설정이면 예외 없이 키에 있어야
+#: 한다 — 빠진 채로 두면 같은 세션에서 모드만 바꿨을 때 이전 모드의 오버레이가 캐시에서
+#: 그대로 나오고, 두 방법을 비교하려던 사람은 "차이 없음"이라는 틀린 판정을 얻는다.
+#: 비교하려고 만든 옵션이 비교를 막는 셈이다.
+_PIXEL_SETTINGS = ("threshold", "gap", "width", "minLength", "lineAlpha", "colourMode")
 
 
 def _edge_settings_key(opts):

@@ -118,6 +118,16 @@ export interface EdgeLines {
   minLength: number;
   /** 기존 라인으로 칠 알파 문턱. 라인이 반투명이 많아 낮게 잡는다. */
   lineAlpha: number;
+  /**
+   * 뷰의 색 그림을 만드는 방법. 엔진 edges.COLOUR_MODES와 같은 값이어야 한다.
+   *
+   * `composite`가 지금까지의 동작이고 정확하다(포토샵 합성 모델 그대로).
+   * `paste`는 잎을 알파 합성만 해서 빠르다 — 실측 한 뷰에서 145.5초 → 19.2초.
+   * 대신 클리핑을 지키지 않아 색 그림이 갈릴 수 있다. 산출물인 검은 획은 같은
+   * 뷰에서 1.09%만 달랐는데, 그 차이가 가짜 획인지 무해한지는 사람이 봐야
+   * 하므로 당분간 고를 수 있게 둔다.
+   */
+  colourMode: "composite" | "paste";
 }
 
 export interface EngineError {

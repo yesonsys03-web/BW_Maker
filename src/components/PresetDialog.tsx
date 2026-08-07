@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { DEFAULT_EXCLUDE_TOKENS, DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS, OUTPUT_FORMAT_OPTIONS } from "../lib/presets";
-import type { OutputFormat, Preset } from "../lib/types";
+import type { EdgeLines, OutputFormat, Preset } from "../lib/types";
 
 export type PresetDialogMode = "edit" | "saveAs";
 
@@ -73,6 +73,10 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   // 실측에서 나온 기본값이라 preset.edgeLines에 그대로 남고, 저장 시 enabled만
   // 덮어써서 합친다.
   const [edgeEnabled, setEdgeEnabled] = useState(preset.edgeLines.enabled);
+  // 색 그림을 만드는 방법. 어느 쪽이 옳은지 아직 사람이 판정하는 중이라 노출한다
+  // (types.ts의 EdgeLines.colourMode 참고). 판정이 끝나면 이 컨트롤은 없앤다.
+  const [colourMode, setColourMode] =
+    useState<EdgeLines["colourMode"]>(preset.edgeLines.colourMode);
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [valueError, setValueError] = useState<string | null>(null);
@@ -127,7 +131,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       lineColor: normalizeColor ? lineColor : null,
       splitLayers,
       outputFormat,
-      edgeLines: { ...preset.edgeLines, enabled: edgeEnabled },
+      edgeLines: { ...preset.edgeLines, enabled: edgeEnabled, colourMode },
     };
   }
 
@@ -370,6 +374,24 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           이미 선이 있는 자리에는 긋지 않습니다. 배경(BG) 파일에는 쓰지 마세요 — 뷰·색 그룹
           구조가 있는 캐릭터 모델 전용입니다.
         </p>
+
+        {edgeEnabled && (
+          <label className="preset-field">
+            <span>색 그림 만드는 방법</span>
+            <select
+              value={colourMode}
+              onChange={(e) => setColourMode(e.target.value as EdgeLines["colourMode"])}
+            >
+              <option value="composite">정확 — 포토샵 합성 그대로 (기본)</option>
+              <option value="paste">빠름 — 레이어를 겹치기만 (클리핑 무시)</option>
+            </select>
+            <span className="preset-hint">
+              획을 찾으려고 만드는 중간 그림입니다. <b>빠름</b>은 실측에서 한 뷰가
+              145초 → 19초였지만 클리핑 레이어를 지키지 않습니다. 검은 획은 같은
+              뷰에서 1.09% 달랐습니다 — 두 결과를 미리보기로 비교해 보고 고르세요.
+            </span>
+          </label>
+        )}
 
         <div className="modal-actions">
           <button type="button" onClick={onCancel}>

@@ -35,7 +35,10 @@ const PRESET = {
   lineColor: null,
   splitLayers: true,
   excludeTokens: [],
-  edgeLines: { enabled: false, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64 },
+  edgeLines: {
+    enabled: false, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64,
+    colourMode: "composite" as const,
+  },
 };
 
 vi.mock("../lib/presets", async (orig) => ({

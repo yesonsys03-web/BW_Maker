@@ -14,7 +14,7 @@ const F4 = { path: "/a.psd", mtime: 400 };
 const F7 = { path: "/a.psd", mtime: 700 };
 
 /** 색 경계선 생성이 켜진 설정. 꺼짐(null)과의 키 차이를 확인하는 데만 쓴다. */
-const EDGE_ON: EdgeLines = { enabled: true, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64 };
+const EDGE_ON: EdgeLines = { enabled: true, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64, colourMode: "composite" };
 
 const pixel = (id: number, visible = true): TreeNode => ({
   id,
@@ -109,8 +109,8 @@ test("with edge lines on, different settings get different keys", () => {
 // 무엇이든 그림은 같다. 프리셋의 threshold/width 등을 손보는 동안 enabled를
 // 켜지 않았다면 캐시를 전부 버릴 이유가 없다 — 켰을 때만 다시 그리면 된다.
 test("with edge lines off, different numeric settings still get the same key", () => {
-  const edgeOffA: EdgeLines = { enabled: false, threshold: 10, gap: 4, width: 5, minLength: 8, lineAlpha: 64 };
-  const edgeOffB: EdgeLines = { enabled: false, threshold: 90, gap: 40, width: 50, minLength: 80, lineAlpha: 6 };
+  const edgeOffA: EdgeLines = { enabled: false, threshold: 10, gap: 4, width: 5, minLength: 8, lineAlpha: 64, colourMode: "composite" };
+  const edgeOffB: EdgeLines = { enabled: false, threshold: 90, gap: 40, width: 50, minLength: 80, lineAlpha: 6, colourMode: "composite" };
   expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOffA, [], [])).toBe(
     previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOffB, [], [])
   );

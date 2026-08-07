@@ -26,7 +26,26 @@ EDGE_DEFAULTS = {
                          # 8.0(기존 LINES 중앙값 5.0 대비 60% 굵음)이었다.
     "minLength": 8,     # 이보다 짧은 조각은 선이 아니라 점이다
     "lineAlpha": 64,    # 기존 라인으로 칠 알파 문턱. LINES가 79.7% 반투명이라 낮게 잡는다
+    "colourMode": "composite",  # 색 그림을 만드는 방법. "paste"는 A/B 비교용 — COLOUR_MODES 참고
 }
+
+#: 뷰의 색 그림을 만드는 두 가지 방법.
+#:
+#: `composite`가 기본이고 지금까지의 동작이다 — `psd.composite(force=True)`로
+#: 포토샵의 합성 모델(블렌드 모드·클리핑·마스크·그룹 불투명도)을 그대로 돌린다.
+#: 정확하지만 비싸다: 실측 한 뷰(33 Mpx, 잎 16개)에서 **145.5초**였고, 한 파일이
+#: 미리보기에서 15분을 먹었다.
+#:
+#: `paste`는 각 잎의 픽셀을 문서 순서대로 알파 합성만 한다. 같은 뷰에서 **19.2초**
+#: (8배), 잎이 적고 클리핑이 없는 뷰에서는 35~45배까지 벌어진다. 대신 **클리핑을
+#: 지키지 않는다** — 납품 폴더 83장 중 36장(43%)에 클리핑 잎이 있고, 그런 뷰에서는
+#: 색 그림이 실제로 갈린다(실측 한 뷰에서 알파 일치 58.7%, RGB 최대차 249).
+#:
+#: 그런데 이 기능의 산출물은 색 그림이 아니라 **검은 획**이고, 같은 뷰에서 획
+#: 픽셀은 16531 대 16712로 1.09%밖에 차이가 없었다. 그 1%가 가짜 획인지 아니면
+#: 무해한 자리인지는 픽셀 수로 가릴 수 없어서, 사람이 두 결과를 눈으로 비교할 수
+#: 있도록 옵션으로 둔다. 판정이 끝나면 둘 중 하나만 남기고 이 옵션은 없앤다.
+COLOUR_MODES = ("composite", "paste")
 
 #: 중앙차분이 몇 px 떨어진 픽셀끼리 비교할지 — 안티에일리어싱 전이가 이 폭
 #: 안에 있다고 본다. 문턱(threshold)이 아니라 이 반경이 진짜 손잡이다: 아티스트
@@ -412,6 +431,38 @@ def _paste_alpha(layers, box):
     return out
 
 
+def _paste_colour(colour_layers, box):
+    """색 잎들을 문서 순서대로 알파 합성한다 — `psd.composite`의 값싼 대체.
+
+    `colourMode="paste"`일 때만 쓴다. 무엇을 얻고 무엇을 잃는지는 COLOUR_MODES 참고.
+
+    `_paste_alpha`와 같은 이유로 `layer.topil()`이 아니라 `render.extract_rgba`를
+    쓴다 — `topil()`은 래스터 마스크를 적용하지 않아 가려진 자리가 불투명하게
+    남고, 그러면 실제로는 없는 색 경계가 생겨 그 자리에 가짜 획이 그어진다.
+    비교를 공정하게 하려면 이쪽도 마스크를 지켜야 한다.
+
+    바탕은 `psd.composite(color=1.0, alpha=0.0)`과 맞춰 흰색·투명으로 둔다.
+    """
+    left, top, right, bottom = box
+    canvas = Image.new("RGBA", (right - left, bottom - top), (255, 255, 255, 0))
+    for layer in colour_layers:
+        if not layer.visible or layer.bbox == (0, 0, 0, 0):
+            continue
+        arr = extract_rgba(layer)
+        lx, ly = layer.bbox[0] - left, layer.bbox[1] - top
+        # 잎이 박스 밖으로 나갈 수 있다(뷰포트는 합집합이지만 숨은 잎이 빠지면
+        # 어긋난다). alpha_composite는 범위를 벗어나면 예외를 내므로 겹치는
+        # 부분만 잘라 얹는다 — render.render_preview가 타일에 하는 것과 같다.
+        y0, x0 = max(0, ly), max(0, lx)
+        y1 = min(canvas.height, ly + arr.shape[0])
+        x1 = min(canvas.width, lx + arr.shape[1])
+        if y1 <= y0 or x1 <= x0:
+            continue
+        tile = Image.fromarray(arr[y0 - ly:y1 - ly, x0 - lx:x1 - lx], "RGBA")
+        canvas.alpha_composite(tile, dest=(x0, y0))
+    return np.array(canvas)
+
+
 #: 라인 잎 하나가 뷰 박스의 이 비율을 넘게 덮으면 선화가 아니라 채우기로 본다.
 #:
 #: 납품 폴더 100장을 전수로 재서 고른 값이다. `character._line_leaves`가 이름으로
@@ -475,12 +526,15 @@ def overlay_for_view(session, colour_ids, line_ids, opts):
     # 전부 걸린다 — `is_visible()`로 조상을 직접 훑는 것과 결과가 같다.
     # `render.py`의 기존 BG 경로(render_thumbnails)도 같은 이유로 `.visible`을
     # 쓴다.
-    img = session["psd"].composite(
-        viewport=box, force=True, color=1.0, alpha=0.0,
-        layer_filter=lambda l: l.visible and (id(l) in wanted or l.is_group()),
-    )
-    colour_rgba = np.array(img.convert("RGBA"))
     o = {**EDGE_DEFAULTS, **(opts or {})}
+    if o.get("colourMode") == "paste":
+        colour_rgba = _paste_colour(colour_layers, box)
+    else:
+        img = session["psd"].composite(
+            viewport=box, force=True, color=1.0, alpha=0.0,
+            layer_filter=lambda l: l.visible and (id(l) in wanted or l.is_group()),
+        )
+        colour_rgba = np.array(img.convert("RGBA"))
     line_alpha = _paste_alpha(
         _drop_filled(
             [layers_by_id[i] for i in line_ids], box, o["lineAlpha"]),

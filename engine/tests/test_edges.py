@@ -561,3 +561,62 @@ def test_drop_filled_keeps_a_line_that_is_dense_but_under_the_bound(monkeypatch)
 
     kept = _drop_filled([_FakeLayer("dense", 0, 0, dense)], (0, 0, 100, 100), 64)
     assert len(kept) == 1, "문턱 아래인데 버려졌다"
+
+
+def test_colour_mode_paste_gives_the_same_strokes_when_nothing_is_clipped(tmp_path):
+    # 두 방법이 같은 답에 도달해야 하는 경우를 못 박는다. 잎이 전부 Normal·
+    # 불투명도 255·클리핑 없음이면 포토샵의 합성 모델은 단순 source-over로
+    # 환원되므로, paste가 합성기와 같은 획을 내야 한다.
+    #
+    # 실파일에서는 이 조건이 늘 성립하지는 않는다 — 납품 폴더 83장 중 36장에
+    # 클리핑 잎이 있고, 그런 뷰에서는 색 그림이 실제로 갈린다(실측 알파 일치
+    # 58.7%). 그 경우 어느 쪽 획이 옳은지는 사람이 봐야 하므로 옵션으로 뒀다.
+    s = _two_tone_session(tmp_path)
+    view = find_views(s)[0]
+    a = overlay_for_view(s, view["colourIds"], view["lineIds"],
+                         {**EDGE_DEFAULTS, "colourMode": "composite"})
+    b = overlay_for_view(s, view["colourIds"], view["lineIds"],
+                         {**EDGE_DEFAULTS, "colourMode": "paste"})
+    assert a is not None and b is not None, "한쪽이 획을 아예 못 그렸다"
+    assert (a[0][..., 3] > 0).sum() > 0, "픽스처에 획이 없다 — 테스트가 무의미하다"
+    assert ((a[0][..., 3] > 0) == (b[0][..., 3] > 0)).all(), (
+        "클리핑이 없는데도 두 방법의 획이 갈렸다 "
+        f"(합성 {(a[0][..., 3] > 0).sum()}px, paste {(b[0][..., 3] > 0).sum()}px)")
+    assert (a[1], a[2]) == (b[1], b[2]), "오버레이 위치가 달라졌다"
+
+
+def test_colour_mode_defaults_to_the_composite_path(tmp_path):
+    # 기본값이 지금까지의 동작이어야 한다. 옵션을 안 주면 예전 결과 그대로다 —
+    # 프런트가 이 키를 안 실어 보내도 안전하다는 뜻이기도 하다.
+    assert EDGE_DEFAULTS["colourMode"] == "composite"
+    s = _two_tone_session(tmp_path)
+    view = find_views(s)[0]
+    opts_without = {k: v for k, v in EDGE_DEFAULTS.items() if k != "colourMode"}
+    a = overlay_for_view(s, view["colourIds"], view["lineIds"], opts_without)
+    b = overlay_for_view(s, view["colourIds"], view["lineIds"],
+                         {**EDGE_DEFAULTS, "colourMode": "composite"})
+    assert (a[0] == b[0]).all(), "키가 없을 때와 composite를 줬을 때가 다르다"
+
+
+def test_paste_colour_applies_the_layers_mask(tmp_path):
+    # topil()은 래스터 마스크를 적용하지 않는다. paste가 그걸 쓰면 가려진 자리가
+    # 불투명하게 남아, 실제로는 없는 색 경계가 생기고 그 자리에 가짜 획이 그어진다
+    # (_paste_alpha가 라인 쪽에서 이미 당한 것과 같은 함정이다).
+    from psd_engine.edges import _paste_colour
+
+    apply_pytoshop_patches()
+    fill = make_rgb_image("base", (200, 30, 60), 0, 0, 8, 8)
+    psd = nested_layers.nested_layers_to_psd(
+        [fill], color_mode=_pt_enums.ColorMode.rgb, size=(8, 8))
+    mask = np.zeros((8, 8), np.uint8)
+    mask[:, :4] = 255                      # 왼쪽 절반만 보이게
+    attach_mask(psd, "base", mask, left=0, top=0, default_color=0)
+    p = tmp_path / "masked_colour.psd"
+    with open(p, "wb") as f:
+        psd.write(f)
+    store = SessionStore()
+    s = store.get(store.open(str(p)))
+    layer = next(l for l in s["layers_by_id"].values() if l.name == "base")
+    out = _paste_colour([layer], (0, 0, 8, 8))
+    assert out[:, 4:, 3].max() == 0, "마스크로 가려진 자리가 불투명하게 남았다"
+    assert out[:, :4, 3].max() > 0, "마스크로 가려지지 않은 자리까지 지워졌다"
