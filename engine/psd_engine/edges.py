@@ -28,6 +28,15 @@ EDGE_DEFAULTS = {
     "lineAlpha": 64,    # 기존 라인으로 칠 알파 문턱. LINES가 79.7% 반투명이라 낮게 잡는다
 }
 
+#: 중앙차분이 몇 px 떨어진 픽셀끼리 비교할지 — 안티에일리어싱 전이가 이 폭
+#: 안에 있다고 본다. 문턱(threshold)이 아니라 이 반경이 진짜 손잡이다: 아티스트
+#: 파일 실측에서 머리 두 레이어는 RGB (157,140,113)과 (184,164,127)로 채널
+#: 최대 차 27이라 문턱 24를 원리상 넘지만, 그 차가 안티에일리어싱으로 2~3px에
+#: 걸쳐 퍼져 있어 바로 옆 픽셀끼리는 단계마다 9~13밖에 안 된다 — 문턱을 6까지
+#: 낮춰도 검출 수가 거의 안 바뀌었다(스텝 크기의 문제이지 문턱의 문제가
+#: 아니다). k=3만큼 떨어진 픽셀끼리 비교하면 전이 전체가 한 번에 잡힌다.
+ANTIALIAS_RADIUS = 3
+
 
 def colour_change(rgba, threshold):
     """
@@ -36,28 +45,65 @@ def colour_change(rgba, threshold):
     양쪽이 모두 불투명한 쌍만 본다. 색 vs 투명(실루엣)은 이미 라인이 그리는 자리이고,
     그것까지 잡으면 캐릭터 윤곽을 통째로 다시 긋게 된다.
 
-    차이가 나는 쌍에서 **왼쪽/위쪽 픽셀**을 경계로 삼는다. 어느 쪽을 골라도 획을
-    굵히는 단계에서 같은 자리를 덮으므로, 한쪽으로 정해 두기만 하면 된다.
+    바로 옆 픽셀이 아니라 ANTIALIAS_RADIUS(k)만큼 떨어진 픽셀끼리 비교한다(중앙차분).
+    안티에일리어싱에 걸쳐 나뉜 색 단차는 한 걸음씩 보면 문턱을 못 넘지만(모듈 상수
+    주석의 실측 참고), 양쪽 끝을 직접 비교하면 단차 전체가 한 번에 잡힌다.
+
+    그런데 이렇게 넓혀 비교하면 문턱을 넘는 자리가 전이 구간 폭만큼(최대 2k px)
+    "띠"로 부풀려진다. 그래서 축마다 **비최대 억제**를 거쳐 그 띠를 능선 한 줄로
+    되돌린다 — 차이값이 국소최댓값인 자리만 남긴다. 완전히 평평한 계단(안티에일리어싱
+    없는 하드 스텝)에서는 문턱을 넘는 값이 폭 2k짜리 고지를 이루어 국소최댓값이 여러
+    자리에서 동시에 성립할 수 있으므로, 왼쪽/위쪽 이웃보다는 **엄격히** 크고
+    오른쪽/아래쪽 이웃과는 같아도 되도록 비교를 비대칭으로 두어 고지에서 왼쪽/위쪽
+    (작은 인덱스) 한 자리만 고른다 — 옛 colour_change가 "차이가 나는 쌍에서 왼쪽/위쪽
+    픽셀"을 쓰던 것과 같은 방향이다. 이 비대칭이 없으면(양쪽 다 >=) 하드 스텝조차
+    폭 2k px 그대로 남아, 이미 정상 동작하던 파일까지 획 수가 거의 두 배로 뛴다.
     """
     rgb = rgba[..., :3].astype(np.int16)
     solid = rgba[..., 3] > 127
-    mask = np.zeros(solid.shape, bool)
-    colour = np.zeros(rgba.shape[:2] + (3,), np.uint8)
+    h, w = solid.shape
+    k = ANTIALIAS_RADIUS
+    mask = np.zeros((h, w), bool)
+    colour = np.zeros((h, w, 3), np.uint8)
 
     for axis in (0, 1):
-        a = rgb[:-1, :] if axis == 0 else rgb[:, :-1]
-        b = rgb[1:, :] if axis == 0 else rgb[:, 1:]
-        sa = solid[:-1, :] if axis == 0 else solid[:, :-1]
-        sb = solid[1:, :] if axis == 0 else solid[:, 1:]
-        hit = (np.abs(a - b).max(axis=2) > threshold) & sa & sb
+        n = h if axis == 0 else w
+        if n <= 2 * k:
+            continue  # 이 축에는 중앙차분을 계산할 폭이 없다
+
+        a = rgb[:n - 2 * k, :] if axis == 0 else rgb[:, :n - 2 * k]
+        b = rgb[2 * k:, :] if axis == 0 else rgb[:, 2 * k:]
+        sa = solid[:n - 2 * k, :] if axis == 0 else solid[:, :n - 2 * k]
+        sb = solid[2 * k:, :] if axis == 0 else solid[:, 2 * k:]
+        diff = np.abs(a - b).max(axis=2)
+        ok = sa & sb
         # 어두운 쪽 = 채널 합이 작은 쪽.
         darker = np.where((a.sum(axis=2) <= b.sum(axis=2))[..., None], a, b).astype(np.uint8)
+
+        # 비교한 두 픽셀(k만큼 떨어진)의 가운데 자리에 되돌려 놓는다.
+        d = np.zeros((h, w), np.int16)
+        d_ok = np.zeros((h, w), bool)
+        d_colour = np.zeros((h, w, 3), np.uint8)
         if axis == 0:
-            mask[:-1, :] |= hit
-            np.copyto(colour[:-1, :], darker, where=hit[..., None])
+            d[k:h - k, :] = diff
+            d_ok[k:h - k, :] = ok
+            d_colour[k:h - k, :] = darker
         else:
-            mask[:, :-1] |= hit
-            np.copyto(colour[:, :-1], darker, where=hit[..., None])
+            d[:, k:w - k] = diff
+            d_ok[:, k:w - k] = ok
+            d_colour[:, k:w - k] = darker
+
+        # 비최대 억제(위 docstring 참고): 왼쪽/위쪽보다 엄격히 크고 오른쪽/아래쪽과는
+        # 같아도 되는 비대칭 비교로, 평평한 고지에서 왼쪽/위쪽 한 자리만 남긴다.
+        peak = np.zeros((h, w), bool)
+        if axis == 0:
+            peak[1:-1, :] = (d[1:-1, :] > d[:-2, :]) & (d[1:-1, :] >= d[2:, :])
+        else:
+            peak[:, 1:-1] = (d[:, 1:-1] > d[:, :-2]) & (d[:, 1:-1] >= d[:, 2:])
+
+        hit = (d > threshold) & d_ok & peak
+        mask |= hit
+        np.copyto(colour, d_colour, where=hit[..., None])
     return mask, colour
 
 

@@ -11,40 +11,96 @@ def _rgba(rows, alpha=255):
 
 
 def test_colour_change_marks_the_seam_between_two_flat_regions():
-    # 왼쪽 두 칸 빨강, 오른쪽 두 칸 검정. 경계는 x=1 (차이가 나는 쌍의 왼쪽 픽셀).
+    # 왼쪽 6칸 빨강, 오른쪽 6칸 검정(옛 4칸 픽스처는 k=3 중앙차분이 계산할 폭이
+    # 없어 넓혔다 — "경계가 정확히 한 칸에 선다"는 동작 자체는 그대로다). 경계는
+    # x=3에 선다: 문턱을 넘는 값이 x=3..8(폭 2k=6) 고지를 이루고, 비최대 억제가
+    # 왼쪽/위쪽(작은 인덱스) 한 칸만 남긴다.
     red, black = [200, 20, 40], [10, 10, 10]
-    rgba = _rgba([[red, red, black, black]] * 3)
+    rgba = _rgba([[red] * 6 + [black] * 6] * 3)
     mask, _ = colour_change(rgba, EDGE_DEFAULTS["threshold"])
-    assert mask[:, 1].all(), "색이 갈리는 자리가 경계로 잡히지 않았다"
-    assert not mask[:, [0, 2, 3]].any(), "같은 색끼리 붙은 자리가 경계로 잡혔다"
+    assert mask[:, 3].all(), "색이 갈리는 자리가 경계로 잡히지 않았다"
+    other_cols = [c for c in range(12) if c != 3]
+    assert not mask[:, other_cols].any(), "같은 색끼리 붙은 자리가 경계로 잡혔다"
 
 
 def test_colour_change_ignores_a_difference_under_the_threshold():
+    # 4칸씩(옛 2칸 픽스처는 k=3 창이 계산될 폭이 없어 넓혔다) — 차이는 10 < 24로
+    # 어느 폭에서 비교하든 그대로다.
     a, b = [100, 100, 100], [110, 110, 110]      # 차이 10 < 24
-    rgba = _rgba([[a, a, b, b]] * 3)
+    rgba = _rgba([[a] * 4 + [b] * 4] * 3)
     mask, _ = colour_change(rgba, EDGE_DEFAULTS["threshold"])
     assert not mask.any()
 
 
 def test_colour_change_ignores_edges_against_transparency():
     # 실루엣(색 vs 투명)은 이미 라인이 그려주는 자리다. 여기서 잡으면 안 된다.
+    # 8칸(옛 4칸 픽스처는 k=3 창이 계산될 폭이 없어 넓혔다).
     red = [200, 20, 40]
-    rgba = _rgba([[red, red, red, red]] * 3)
-    rgba[:, 2:, 3] = 0
+    rgba = _rgba([[red] * 8] * 3)
+    rgba[:, 4:, 3] = 0
     mask, _ = colour_change(rgba, EDGE_DEFAULTS["threshold"])
     assert not mask.any()
 
 
 def test_colour_change_reports_the_darker_side_colour():
     # 시안의 빨간 획이 전부 어두운 영역 가장자리에 놓여 있었다 — 어두운 쪽을 쓴다.
+    # 6칸씩(옛 4칸 픽스처는 k=3 중앙차분이 계산할 폭이 없어 넓혔다) — 경계는
+    # x=3 한 칸(고지의 왼쪽 끝)에만 선다.
     light, dark = [200, 200, 200], [30, 20, 10]
-    rgba = _rgba([[light, light, dark, dark]] * 3)
+    rgba = _rgba([[light] * 6 + [dark] * 6] * 3)
     mask, colour = colour_change(rgba, EDGE_DEFAULTS["threshold"])
     assert (colour[mask] == dark).all()
 
 
-from psd_engine.edges import (build_overlay, drop_small, label_components,
-                              stroke_rgba, subtract_lines)
+def test_colour_change_detects_a_step_blurred_across_three_pixels():
+    # 아티스트 파일 실측(머리 두 레이어 RGB (157,140,113)/(184,164,127), 채널
+    # 최대 차 27로 문턱 24를 넘지만 안티에일리어싱으로 3px에 걸쳐 있어 인접
+    # 단계는 9~13밖에 안 된다)을 본뜬 픽스처. A→B 사이에 중간값 셋을 두어
+    # 인접 픽셀 단계는 전부 8(<24)이지만 A-B 총 차는 32(>24)다.
+    #
+    # RED(이 테스트를 고치기 전 옛 인접-비교 colour_change로 실측):
+    # mask.any() == False — 옛 코드는 인접 쌍만 보므로 8 < 24를 넘는 쌍이
+    # 하나도 없어 아무것도 못 찾는다. 이것이 아티스트 파일에서 머리가 빈
+    # 면으로 나가던 바로 그 버그다.
+    a, b = [100, 100, 100], [132, 100, 100]
+    mid = [[108, 100, 100], [116, 100, 100], [124, 100, 100]]   # 단계마다 8
+    row = [a] * 3 + mid + [b] * 3
+    rgba = _rgba([row] * 3)
+    mask, colour = colour_change(rgba, EDGE_DEFAULTS["threshold"])
+    assert mask.any(), "안티에일리어싱에 걸친 색 단차를 놓쳤다 — 아티스트의 버그"
+    # 어두운 쪽(채널 합이 작은 쪽) = a(300) < b(332).
+    assert (colour[mask] == a).all(), "경계 색이 어두운 쪽이 아니다"
+
+
+def test_colour_change_keeps_a_hard_step_thin_not_a_band_two_k_wide():
+    # 안티에일리어싱이 전혀 없는 완전한 계단에서도 경계는 얇아야 한다. 중앙차분만
+    # 쓰고 비최대 억제가 없으면, 문턱을 넘는 자리가 2*ANTIALIAS_RADIUS(=6)px 폭
+    # 고지를 이뤄 이미 정상 동작하던 파일까지 획 수가 거의 두 배로 뛴다(설계
+    # 문서 참고) — 비최대 억제가 그 고지를 능선 한 줄로 되돌린다.
+    red, black = [200, 20, 40], [10, 10, 10]
+    rgba = _rgba([[red] * 6 + [black] * 6] * 3)
+    mask, _ = colour_change(rgba, EDGE_DEFAULTS["threshold"])
+    hit_cols = np.nonzero(mask[0])[0]
+    assert hit_cols.size == 1, (
+        f"경계가 얇지 않다 — {hit_cols.size}칸이 걸렸다"
+        f"(2*ANTIALIAS_RADIUS={2 * ANTIALIAS_RADIUS}px 고지가 그대로 남았다는 신호)"
+    )
+
+
+def test_colour_change_still_ignores_colour_against_transparency_even_with_a_real_difference():
+    # 기존 실루엣 테스트는 양쪽이 우연히 같은 색이라(투명 쪽도 명목상 "red") 그
+    # 자체로는 색이 다른 게 아니어서 실루엣 판정을 강하게 겨누지 못한다. 여기서는
+    # 실제로 색이 갈리는 자리를 투명과 맞붙인다 — 반대쪽이 불투명이었다면 경계로
+    # 잡혔을 만큼 큰 차(190)를 준다.
+    red, black = [200, 20, 40], [10, 10, 10]
+    rgba = _rgba([[red] * 6 + [black] * 6] * 3)
+    rgba[:, 6:, 3] = 0                     # 검정 쪽 절반을 투명하게
+    mask, _ = colour_change(rgba, EDGE_DEFAULTS["threshold"])
+    assert not mask.any(), "불투명-투명 경계가 색 경계로 잡혔다"
+
+
+from psd_engine.edges import (ANTIALIAS_RADIUS, build_overlay, drop_small,
+                              label_components, stroke_rgba, subtract_lines)
 
 
 def test_subtract_lines_removes_the_boundary_that_already_has_a_line():
