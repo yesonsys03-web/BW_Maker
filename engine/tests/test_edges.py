@@ -138,6 +138,16 @@ def test_build_overlay_draws_where_no_line_covers_the_colour_change():
     assert out[10, 5, 3] > 0
 
 
+# 이 두 테스트는 reconnect_to_lines(커밋 1의 주제)만 겨눈다 — width는 5로 고정해
+# 둔다. EDGE_DEFAULTS를 그대로 쓰면(커밋 2 이후 width 기본값 0 = 자동) 여기서
+# "라인" 대신 쓴 두꺼운 사각 블록(예: 아래 60px짜리)이 진짜 라인처럼 측정되어
+# _auto_width가 아주 굵은 획을 고르고, 그 굵기 자체의 팽창만으로 두 어서션이 뜻과
+# 다른 이유로 통과/실패하게 된다 — reconnect 여부와 무관한 잡음이 섞인다. 커밋
+# 1 당시 실측한 RED/GREEN(고치기 전 out[13,9,3]==7, 고친 뒤 255)도 width=5에서 잰
+# 값이므로, 그 증거와 맞는 채로 두려면 여기서 width를 고정해야 한다.
+_RECONNECT_OPTS = {**EDGE_DEFAULTS, "width": 5}
+
+
 def test_build_overlay_reconnects_a_boundary_that_crosses_a_line():
     # 세로 색 경계(x=9)가 가로 라인(행 14~18, 5px)을 가로지른다. subtract_lines만
     # 쓰면 gap=4로 부풀린 행 10~22(13행) 전체가 지워져 양쪽 토막이 라인에서 gap만큼
@@ -150,7 +160,7 @@ def test_build_overlay_reconnects_a_boundary_that_crosses_a_line():
     rgba = _rgba([row] * height)
     line = np.zeros((height, width), np.uint8)
     line[14:19, :] = 255                  # 5px 두께 가로 라인, 전체 폭을 덮는다
-    out = build_overlay(rgba, line, EDGE_DEFAULTS)
+    out = build_overlay(rgba, line, _RECONNECT_OPTS)
     assert out[13, 9, 3] > 200, "라인 위쪽에서 경계가 gap만큼 뜬 채로 남았다"
     assert out[19, 9, 3] > 200, "라인 아래쪽에서 경계가 gap만큼 뜬 채로 남았다"
 
@@ -168,7 +178,7 @@ def test_build_overlay_does_not_redraw_a_boundary_running_parallel_under_a_line(
     rgba = _rgba([[red] * width] * 15 + [[black] * width] * 15)   # 경계는 행14
     line = np.zeros((height, width), np.uint8)
     line[12:17, 20:80] = 255
-    out = build_overlay(rgba, line, EDGE_DEFAULTS)
+    out = build_overlay(rgba, line, _RECONNECT_OPTS)
     assert out[14, 50, 3] == 0, "라인 아래 나란히 깔린 경계 한가운데가 되살아났다"
     assert out[..., 3].max() > 0, "다른 자리(라인 밖 구간)까지 사라졌다"
 
@@ -196,6 +206,67 @@ def test_reconnect_to_lines_follows_the_removed_path_back_to_a_surviving_piece()
     assert not out[10:23, 5].any(), "removed/lines 밖까지 되살아났다"
 
 
+def test_build_overlay_auto_width_makes_a_thicker_stroke_for_thicker_line_art():
+    # width=0(기본, 자동)일 때 획 굵기는 그 뷰 자신의 라인 굵기에서 나온다. 같은
+    # 색 경계(x=5)에, "그 뷰의 라인"에 해당하는 참고용 라인만 다르게 둔다 — 가로
+    # 런 길이 5px짜리(문서화한 실측: target 5 → width 3) vs 8px짜리(target 8 →
+    # width 5). 경계와 겹치지 않는 열(20~)에 둬서 subtract_lines/reconnect
+    # 결과 자체는 두 경우가 같고, 굵기 선택만 달라지게 한다.
+    red, black = [200, 20, 40], [10, 10, 10]
+    height, width = 40, 40
+    row = [red] * 6 + [black] * 34        # 경계는 x=5, 전체 높이
+    rgba = _rgba([row] * height)
+
+    thin = np.zeros((height, width), np.uint8)
+    thick = np.zeros((height, width), np.uint8)
+    for r in range(5, 35, 5):
+        thin[r, 20:25] = 255              # 5px 런
+        thick[r, 20:28] = 255             # 8px 런
+
+    assert _auto_width(thin, EDGE_DEFAULTS["lineAlpha"]) == 3
+    assert _auto_width(thick, EDGE_DEFAULTS["lineAlpha"]) == 5
+
+    out_thin = build_overlay(rgba, thin, EDGE_DEFAULTS)
+    out_thick = build_overlay(rgba, thick, EDGE_DEFAULTS)
+
+    def run_length(alpha_row, threshold=EDGE_DEFAULTS["lineAlpha"]):
+        idx = np.nonzero(alpha_row > threshold)[0]
+        return int(idx.max() - idx.min() + 1) if idx.size else 0
+
+    row_idx = 2   # 참고용 라인이 없는 행 — 경계 자체의 획 굵기만 잰다
+    thin_run = run_length(out_thin[row_idx, :, 3])
+    thick_run = run_length(out_thick[row_idx, :, 3])
+    assert thick_run > thin_run, (
+        f"굵은 라인art({thick_run}px) 획이 얇은 것({thin_run}px)보다 굵지 않았다"
+    )
+
+
+def test_build_overlay_a_nonzero_width_forces_that_value_regardless_of_line_art():
+    # width가 0이 아니면(오늘까지의 동작 그대로) 그 값을 그대로 강제한다 — 뷰의
+    # 라인 굵기가 무엇이든 무시한다. 위 테스트와 똑같은 얇은/굵은 참고 라인
+    # 두 장을 쓰되, 이번엔 opts에 명시적으로 width=3을 준다. 자동이었다면
+    # 서로 다른 굵기(3 vs 5)를 골랐을 두 입력이, 강제된 width에서는 완전히
+    # 같은 출력을 내야 한다 — 자동 로직이 아예 참조되지 않았다는 뜻이다.
+    red, black = [200, 20, 40], [10, 10, 10]
+    height, width = 40, 40
+    row = [red] * 6 + [black] * 34
+    rgba = _rgba([row] * height)
+
+    thin = np.zeros((height, width), np.uint8)
+    thick = np.zeros((height, width), np.uint8)
+    for r in range(5, 35, 5):
+        thin[r, 20:25] = 255
+        thick[r, 20:28] = 255
+
+    opts = {**EDGE_DEFAULTS, "width": 3}
+    out_thin = build_overlay(rgba, thin, opts)
+    out_thick = build_overlay(rgba, thick, opts)
+    assert np.array_equal(out_thin, out_thick), (
+        "명시적 width가 라인 굵기 자동 감지에 영향을 받았다"
+    )
+
+
+from psd_engine.edges import _auto_width
 from psd_engine.character import find_views
 from psd_engine.edges import overlay_for_view, plan_overlays
 from psd_engine.session import SessionStore

@@ -19,7 +19,11 @@ from .render import extract_rgba
 EDGE_DEFAULTS = {
     "threshold": 24,    # 이웃과의 RGB 최대 채널 차가 이보다 크면 색이 바뀐 것으로 본다
     "gap": 4,           # 기존 선을 이만큼 부풀려 뺀다
-    "width": 5,         # 획 굵기. LINES 실측 중앙값 4px, 25~75% 4~5px
+    "width": 0,         # 0 = 자동(_auto_width — 그 뷰 자신의 라인 굵기에서 유도).
+                         # 고정 굵기가 왜 안 되는지: 파일마다 LINES 실측 중앙값이
+                         # 다르다(예: 5,5,5,6 / 6,6,8,6,6,5,10 / 5,5,8) — 하나로
+                         # 맞는 상수가 없다. width=5 고정이었을 때 생성 획 중앙값은
+                         # 8.0(기존 LINES 중앙값 5.0 대비 60% 굵음)이었다.
     "minLength": 8,     # 이보다 짧은 조각은 선이 아니라 점이다
     "lineAlpha": 64,    # 기존 라인으로 칠 알파 문턱. LINES가 79.7% 반투명이라 낮게 잡는다
 }
@@ -212,6 +216,67 @@ def stroke_rgba(mask, labels, colour, width):
     return out
 
 
+#: line_alpha에 잴 라인이 하나도 없을 때(뷰에 라인 레이어가 없는 경우) 쓰는
+#: 기본값. 비교할 기준이 없을 때 가장 방어적인 선택은 이 기능이 자동 굵기를
+#: 갖기 전까지 모든 뷰가 실제로 썼던 굵기(옛 고정 기본값)를 그대로 쓰는 것이다.
+AUTO_WIDTH_FALLBACK = 5
+
+
+def _line_run_lengths(line_alpha, line_alpha_threshold):
+    """
+    line_alpha에서 문턱을 넘는 가로 런(run)들의 길이. 행마다 훑는다.
+
+    설계 문서 7절·이 파일의 실측 수치들이 전부 이 방법(가로 런 길이의 중앙값)으로
+    잰 것이다 — 여기서 잰 값도 그것들과 비교 가능해야 같은 잣대다.
+    """
+    lines = line_alpha > line_alpha_threshold
+    if lines.size == 0 or lines.shape[1] == 0:
+        return []
+    padded = np.zeros((lines.shape[0], lines.shape[1] + 2), bool)
+    padded[:, 1:-1] = lines
+    diff = np.diff(padded.astype(np.int8), axis=1)
+    # 한 행 안에서는 시작(diff==1)과 끝(diff==-1)이 x 오름차순으로 번갈아 나오므로,
+    # np.nonzero가 주는 순서 그대로 같은 행끼리 짝지으면 된다.
+    _, starts_x = np.nonzero(diff == 1)
+    _, ends_x = np.nonzero(diff == -1)
+    return (ends_x - starts_x).tolist()
+
+
+def _auto_width(line_alpha, line_alpha_threshold):
+    """
+    width=0(자동)일 때 획 굵기를 정한다 — 그 뷰 자신의 라인 굵기에서 유도한다.
+
+    라인 런 길이의 **중앙값**을 재서 목표로 삼는다. 채워진 영역(선이 아니라
+    면)이 섞이면 75%ile 같은 값은 크게 흔들린다 — 실측 한 뷰에서 75%ile이
+    57px까지 뛴 적이 있다. 중앙값은 그 자체로 버틴다: 채워진 런이 전체 런의
+    절반을 넘어야 중앙값이 그쪽으로 끌려가는데, 실측 뷰들에서 채워진 영역은
+    소수였다. 그래서 채워진 런을 따로 걸러내지 않는다 — 중앙값을 쓰는 것 자체가
+    그 방어다.
+
+    목표 중앙값에서 실제로 넣을 width로: stroke_rgba가 만드는 획의 중앙값은
+    width 자체가 아니라 width−2에 가깝게 나온다(실측: width 1→중앙값3,
+    3→5, 5→8 — _auto_width라는 이름과 달리 이 −2는 stroke_rgba 자체의
+    성질이 아니라 이 모듈의 경계 마스크가 완전히 1px 두께가 아니기 때문일
+    가능성이 높다: colour_change가 두 축을 따로 표시해 2px 두께가 되는
+    자리가 있고, 대각선 경계는 계단 모양이 되며, 둘 다 정사각형 팽창을 더
+    넓힌다 — 순수 1px 직선 마스크로 만든 합성 픽스처에서는 오프셋이 0이었다.
+    안티에일리어싱 폭이 더 넓다는 것도 그럴듯하지만 증명되지 않았고, 이쪽이
+    적어도 그만큼 설명이 된다. 원인은 미확정으로 남긴다).
+    식: width = odd_floor(round(target) − 2), 최소 1. _morph가 width를
+    홀수로 올림하므로(width 2와 3, 4와 5가 같은 결과) 실제로 고를 수 있는
+    획 중앙값은 대략 3, 5, 8, 10뿐이다 — 이 knob은 거칠고, 목표에 정확히
+    맞힐 수 없는 경우가 대부분이다. 가장 가까운 값을 고른다.
+    """
+    lengths = _line_run_lengths(line_alpha, line_alpha_threshold)
+    if not lengths:
+        return AUTO_WIDTH_FALLBACK
+    target = float(np.median(lengths))
+    candidate = round(target) - 2
+    if candidate % 2 == 0:
+        candidate -= 1
+    return max(1, candidate)
+
+
 def build_overlay(colour_rgba, line_alpha, opts):
     """
     합성된 색 그림과 그 자리의 기존 라인 알파에서 획 오버레이를 만든다.
@@ -234,7 +299,10 @@ def build_overlay(colour_rgba, line_alpha, opts):
     lines = line_alpha > o["lineAlpha"]
     mask = reconnect_to_lines(dropped, removed, lines, o["gap"])
     labels, count = label_components(mask)
-    return stroke_rgba(mask, labels, colour, o["width"])
+    # width=0(기본값)은 자동 — 이 뷰 자신의 라인 굵기에서 유도한다(_auto_width
+    # 문서 참고). 0이 아닌 값은 그대로 강제한다 — 지금까지의 동작 그대로다.
+    width = o["width"] or _auto_width(line_alpha, o["lineAlpha"])
+    return stroke_rgba(mask, labels, colour, width)
 
 
 def _union_bbox(layers):
