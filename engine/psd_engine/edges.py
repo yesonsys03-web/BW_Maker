@@ -254,6 +254,30 @@ def plan_overlays(session, views, opts):
     return plans
 
 
+def _composite_overlay(rgba, left, top, overlay, ox, oy):
+    """
+    두 RGBA를 캔버스 좌표 기준으로 알파 합성한다. 필요하면 캔버스를 넓힌다.
+
+    export.py의 entry_pixels(엔트리 픽셀 위에 획을 얹을 때)와 attach_overlays(같은
+    엔트리를 노리는 두 플랜을 합칠 때) 양쪽에서 쓰는, 배열 두 장과 오프셋만 다루는
+    순수 연산이다. 배열을 다루는 쪽은 edges.py이므로 여기 둔다 — export.py가
+    이것을 가져다 쓴다.
+
+    넓히는 것이 요점이다. 한쪽이 다른 쪽 bbox 밖으로 나가면, 잘라내는 대신 결과
+    캔버스를 두 bbox의 합집합으로 키운다.
+    """
+    from PIL import Image
+
+    h, w = rgba.shape[:2]
+    oh, ow = overlay.shape[:2]
+    nl, nt = min(left, ox), min(top, oy)
+    nr, nb = max(left + w, ox + ow), max(top + h, oy + oh)
+    canvas = Image.new("RGBA", (nr - nl, nb - nt), (0, 0, 0, 0))
+    canvas.alpha_composite(Image.fromarray(rgba, "RGBA"), dest=(left - nl, top - nt))
+    canvas.alpha_composite(Image.fromarray(overlay, "RGBA"), dest=(ox - nl, oy - nt))
+    return np.array(canvas), nl, nt
+
+
 def attach_overlays(entries, plans):
     """
     오버레이를 그 뷰의 라인 엔트리에 실어 둔다. 판단은 여기 한 번뿐이고
@@ -262,6 +286,15 @@ def attach_overlays(entries, plans):
     라인이 내보내기에 포함되지 않았으면 합칠 자리가 없으므로 그 뷰는 건너뛴다.
     아티스트가 라인을 체크하지 않았다는 뜻이고, 그때 획만 따로 내보내는 것은
     "최종 라인 레이어에 넣는다"는 이 기능의 목적과 어긋난다.
+
+    두 플랜이 같은 엔트리를 가리킬 수 있다 — 두 뷰의 라인 레이어를 한 엔트리로
+    합치는 merge 프리셋은 지금도 흔하고(예: LINE 하나로 병합), 수동 지정이 들어오면
+    자동 감지와 수동 지정이 같은 뷰를 각각 플랜으로 만들어 이 충돌이 일상이 된다.
+    그때 그냥 대입(`=`)하면 나중에 온 플랜이 먼저 온 플랜을 조용히 지운다 — 화면에
+    아무 표시도 없이 한 뷰의 획이 통째로 사라진다. 그래서 이미 오버레이가 있는
+    엔트리는 알파 합성으로 **더한다**. 합성은 같은 자리를 두 번 계산해 겹쳐도
+    획이 굵어지거나 짙어지지 않는다는 부수 효과도 준다 — 픽셀 최댓값이 아니라
+    알파로 섞이므로 이중 계산된 경계가 두꺼워지지 않는다.
     """
     for entry in entries:
         entry.setdefault("edgeOverlay", None)
@@ -270,5 +303,12 @@ def attach_overlays(entries, plans):
         target = next((e for e in entries if wanted & set(e["sourceIds"])), None)
         if target is None:
             continue
-        target["edgeOverlay"] = (plan["rgba"], plan["left"], plan["top"])
+        existing = target.get("edgeOverlay")
+        if existing is None:
+            target["edgeOverlay"] = (plan["rgba"], plan["left"], plan["top"])
+        else:
+            target["edgeOverlay"] = _composite_overlay(
+                existing[0], existing[1], existing[2],
+                plan["rgba"], plan["left"], plan["top"],
+            )
     return entries

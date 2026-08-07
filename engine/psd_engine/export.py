@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from .edges import _composite_overlay
 from .patches import apply_pytoshop_patches
 from .paths import ensure_writable_path, long_path
 from .render import PSD_MAX_DIMENSION, apply_line_color, extract_rgba, merge_rgba
@@ -58,25 +59,6 @@ def entry_pixels(session, entry):
     # 이 등식이 성립하려면 소스가 **전부** 대상이어야 한다 — assign_line_color가
     # 섞인 엔트리를 아예 대상에서 빼는 이유가 그것이다.
     return apply_line_color(rgba, entry["lineRgb"]), left, top
-
-
-def _composite_overlay(rgba, left, top, overlay, ox, oy):
-    """
-    획을 엔트리 픽셀 위에 알파 합성한다. 필요하면 캔버스를 넓힌다.
-
-    넓히는 것이 요점이다. 획은 라인 레이어 bbox 밖에 생길 수 있고(색 영역이 라인보다
-    넓은 자리), 잘라내면 그만큼 결과에서 사라진다.
-    """
-    from PIL import Image
-
-    h, w = rgba.shape[:2]
-    oh, ow = overlay.shape[:2]
-    nl, nt = min(left, ox), min(top, oy)
-    nr, nb = max(left + w, ox + ow), max(top + h, oy + oh)
-    canvas = Image.new("RGBA", (nr - nl, nb - nt), (0, 0, 0, 0))
-    canvas.alpha_composite(Image.fromarray(rgba, "RGBA"), dest=(left - nl, top - nt))
-    canvas.alpha_composite(Image.fromarray(overlay, "RGBA"), dest=(ox - nl, oy - nt))
-    return np.array(canvas), nl, nt
 
 
 def export_psd(session, entries, output_path, embed_preview=True,

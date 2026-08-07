@@ -470,3 +470,29 @@ def test_export_is_byte_identical_when_the_feature_is_off(session, tmp_path):
     attach_overlays(entries, [])
     export_psd(session, entries, b)
     assert a.read_bytes() == b.read_bytes()
+
+
+def test_attach_overlays_merges_two_plans_that_land_on_the_same_entry(session, tmp_path):
+    # merge 하나가 두 뷰의 라인을 한 엔트리로 합치면(오늘도 일어난다) 뒤 플랜이
+    # 앞 플랜을 덮어써 지워버리면 안 된다 — 둘 다 살아남아야 한다.
+    import numpy as np
+    from psd_engine.edges import attach_overlays
+
+    entries = _plan(session, [4, 5], [{"op": "merge", "layerIds": [4, 5], "name": "M"}])
+    first = np.zeros((4, 4, 4), np.uint8)
+    first[..., :3] = [11, 22, 33]
+    first[..., 3] = 255
+    second = np.zeros((4, 4, 4), np.uint8)
+    second[..., :3] = [44, 55, 66]
+    second[..., 3] = 255
+    attach_overlays(entries, [
+        {"lineIds": [4], "rgba": first, "left": 0, "top": 0},
+        {"lineIds": [5], "rgba": second, "left": 20, "top": 0},
+    ])
+
+    overlay, left, top = entries[0]["edgeOverlay"]
+    # 단순 덮어쓰기라면 결과는 second 하나(4x4, left=20)뿐이라 이 너비에 못 미친다.
+    assert overlay.shape[1] >= 24
+    assert left == 0 and top == 0
+    assert tuple(overlay[0, 0, :3]) == (11, 22, 33) and overlay[0, 0, 3] == 255
+    assert tuple(overlay[0, 20, :3]) == (44, 55, 66) and overlay[0, 20, 3] == 255
