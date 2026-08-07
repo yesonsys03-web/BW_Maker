@@ -138,6 +138,64 @@ def test_build_overlay_draws_where_no_line_covers_the_colour_change():
     assert out[10, 5, 3] > 0
 
 
+def test_build_overlay_reconnects_a_boundary_that_crosses_a_line():
+    # 세로 색 경계(x=9)가 가로 라인(행 14~18, 5px)을 가로지른다. subtract_lines만
+    # 쓰면 gap=4로 부풀린 행 10~22(13행) 전체가 지워져 양쪽 토막이 라인에서 gap만큼
+    # 뜬 채로 남는다 — 아티스트가 스크린샷으로 짚은 그 흰 틈이다. 고치기 전 실측:
+    # out[13,9,3]와 out[19,9,3] 모두 7 (거의 안 보이는 블러 자락일 뿐, 진짜 획이
+    # 아니다). 고친 뒤에는 255 — 라인 위아래 양쪽 모두 라인에 실제로 닿는다.
+    red, black = [200, 20, 40], [10, 10, 10]
+    height, width = 32, 20
+    row = [red] * 10 + [black] * 10       # 경계는 x=9 (colour_change: 다른 쌍의 왼쪽 픽셀)
+    rgba = _rgba([row] * height)
+    line = np.zeros((height, width), np.uint8)
+    line[14:19, :] = 255                  # 5px 두께 가로 라인, 전체 폭을 덮는다
+    out = build_overlay(rgba, line, EDGE_DEFAULTS)
+    assert out[13, 9, 3] > 200, "라인 위쪽에서 경계가 gap만큼 뜬 채로 남았다"
+    assert out[19, 9, 3] > 200, "라인 아래쪽에서 경계가 gap만큼 뜬 채로 남았다"
+
+
+def test_build_overlay_does_not_redraw_a_boundary_running_parallel_under_a_line():
+    # 가로 색 경계(행 14)가 그 위를 덮는 라인(행 12~16) 아래, 폭 100 중 60px
+    # (열 20~79)을 나란히 깔려 지나간다. gap이 있는 이유 자체가 이 구간을 다시
+    # 긋지 않는 것이다 — reconnect가 이 제약을 깨면 "지우지 않는다"로 퇴화한
+    # 것이다. 이 테스트는 고치기 전에도 이미 통과한다(그때도 여기는 안 그렸다) —
+    # 지키려는 것은 회귀이지, 재현하려는 버그가 아니다. 열 50(라인이 시작·끝나는
+    # 자리에서 각각 30px 이상 떨어진, 되살아난 가장자리보다 훨씬 안쪽)은 이 구간의
+    # 한가운데다.
+    red, black = [200, 20, 40], [10, 10, 10]
+    height, width = 30, 100
+    rgba = _rgba([[red] * width] * 15 + [[black] * width] * 15)   # 경계는 행14
+    line = np.zeros((height, width), np.uint8)
+    line[12:17, 20:80] = 255
+    out = build_overlay(rgba, line, EDGE_DEFAULTS)
+    assert out[14, 50, 3] == 0, "라인 아래 나란히 깔린 경계 한가운데가 되살아났다"
+    assert out[..., 3].max() > 0, "다른 자리(라인 밖 구간)까지 사라졌다"
+
+
+def test_reconnect_to_lines_follows_the_removed_path_back_to_a_surviving_piece():
+    # reconnect_to_lines를 직접 겨눈다 — stroke_rgba의 폭 팽창과 블러가 섞이면
+    # 살아난 마스크 자체와 그 언저리의 흐린 자락을 구분하기 어렵다. removed는
+    # 열 9의 행 10~22 (subtract_lines가 gap=4로 부풀려 지운 자리), lines는 그중
+    # 코어인 행 14~18. gap=4, overlap=2라 6단계 자란다: 아래쪽 살아남은 행9에서
+    # 행10~15까지, 위쪽 살아남은 행23에서 행22~17까지 — 가운데 행16만 lines 코어
+    # 안이라 이미 실제 라인이 덮고 있으므로 못 미쳐도 상관없다.
+    from psd_engine.edges import reconnect_to_lines
+
+    mask_after_drop = np.zeros((32, 20), bool)
+    mask_after_drop[0:10, 9] = True
+    mask_after_drop[23:32, 9] = True
+    removed = np.zeros((32, 20), bool)
+    removed[10:23, 9] = True
+    lines = np.zeros((32, 20), bool)
+    lines[14:19, :] = True
+    out = reconnect_to_lines(mask_after_drop, removed, lines, gap=4)
+    assert out[9:16, 9].all(), "라인 위쪽으로 이어진 부분이 되살아나지 않았다"
+    assert out[17:23, 9].all(), "라인 아래쪽으로 이어진 부분이 되살아나지 않았다"
+    # removed도 lines도 아닌 자리는 절대 되살아나지 않는다(다른 열).
+    assert not out[10:23, 5].any(), "removed/lines 밖까지 되살아났다"
+
+
 from psd_engine.character import find_views
 from psd_engine.edges import overlay_for_view, plan_overlays
 from psd_engine.session import SessionStore

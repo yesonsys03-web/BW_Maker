@@ -82,6 +82,47 @@ def subtract_lines(mask, line_alpha, gap, line_alpha_threshold):
     return mask & ~lines
 
 
+#: gap을 다 되살린 뒤에도 라인 쪽으로 더 파고들 여유(px). LINES는 불투명 픽셀의
+#: 79.7%가 반투명이라, lineAlpha 문턱(64)의 등고선은 실제로 눈에 보이는 라인
+#: 가장자리보다 안쪽에 있다 — 정확히 그 등고선에서 멈추면 붙어 보이지 않는다.
+#: 오버레이는 같은 자리에 같은 색으로 라인 위에 알파 합성되므로 몇 px 겹쳐도
+#: 해롭지 않고, 겹치지 않아 흰 틈이 남는 쪽이 더 나쁘다.
+RECONNECT_OVERLAP = 2
+
+
+def reconnect_to_lines(mask_after_drop, removed, lines, gap):
+    """
+    subtract_lines가 지운 자리 중, 살아남은 조각에서 실제로 이어지는 부분만 되살린다.
+
+    ``removed``(subtract_lines가 지운 자리 = 원래 경계였는데 라인 부풀린 자리와
+    겹쳐 빠진 곳)로만 되살리면, 라인과 나란히 오래 깔린 경계는 끝의 gap px만
+    살아나고 가운데는 그대로 지워진 채 남는다 — gap이 있는 이유 자체가 그것이므로
+    지켜야 한다. 하지만 라인을 가로지르거나 거기서 끝나는 경계는 지금 gap만큼
+    짧아진 채로 남아, 교차점·끝점마다 흰 틈이 생긴다(아티스트가 스크린샷으로
+    짚은 문제).
+
+    한 번에 반지름 gap짜리 정사각형으로 부풀리는 대신, **1px씩** ``removed |
+    lines``(지워진 자리 + 라인 코어 자체) 안으로만 다시 자라게 하고, 매 단계
+    그 영역과 다시 교집합을 구한다. 이렇게 하면 이미 살아있는 조각에서 그 영역을
+    따라 **실제로 이어진** 자리만 되살아난다 — 굽은 경계도 굽이를 따라간다.
+    한 번에 큰 정사각형으로 부풀리면 체비셰프 거리만으로 "가깝다"고 판단하므로,
+    영역이 굽어 있거나 끊어져 있을 때(예: 경계가 라인 아래에서 꺾이는 자리) 실제로는
+    이어지지 않은 자리까지 거리만 보고 건너뛰어 잘못 붙일 수 있다 — 굽이를 따라
+    가는 것이 아니라 가로질러 건너뛰는 것이다.
+
+    gap을 다 쓴 뒤에도 RECONNECT_OVERLAP만큼 더 자라게 둔다. 영역에 라인 코어
+    자체가 포함되어 있으므로, 이 마지막 몇 단계는 lineAlpha 등고선을 넘어 라인
+    안쪽까지 살짝 겹친다(모듈 상수 설명 참고).
+    """
+    target = removed | lines
+    if not target.any():
+        return mask_after_drop
+    grown = mask_after_drop
+    for _ in range(gap + RECONNECT_OVERLAP):
+        grown = mask_after_drop | (_morph(grown, 3, grow=True) & target)
+    return grown
+
+
 def label_components(mask):
     """
     8-이웃 연결 요소. 배경은 0.
@@ -178,15 +219,21 @@ def build_overlay(colour_rgba, line_alpha, opts):
     돌려주는 것은 입력과 같은 크기의 RGBA다. 그릴 것이 없으면 알파가 전부 0이다.
     """
     o = {**EDGE_DEFAULTS, **(opts or {})}
-    mask, colour = colour_change(colour_rgba, o["threshold"])
-    mask = subtract_lines(mask, line_alpha, o["gap"], o["lineAlpha"])
+    raw_mask, colour = colour_change(colour_rgba, o["threshold"])
+    subtracted = subtract_lines(raw_mask, line_alpha, o["gap"], o["lineAlpha"])
+    labels, count = label_components(subtracted)
+    dropped = drop_small(subtracted, labels, count, o["minLength"])
+    # subtract_lines가 지운 자리 중 살아남은 조각과 이어지는 부분을 되살린다
+    # (reconnect_to_lines 문서 참고) — 라인에 닿아야 할 경계가 gap만큼 뜬 채로
+    # 남는 것을 막는다. 되살아난 픽셀이 새 라벨을 만들 수도 있고(교차 반대편과
+    # 합쳐지는 경우) drop_small이 이미 버린 라벨과는 절대 안 이어지므로(그 라벨은
+    # dropped에서 이미 빠졌다), 처음부터 다시 라벨을 매겨야 한다 — drop_small
+    # 이전 라벨을 재활용하는 옛 최적화는 더 이상 맞지 않는다. 대상 픽셀 수는
+    # 여전히 경계 픽셀 규모(수천 개)라 비용은 무시할 만하다.
+    removed = raw_mask & ~subtracted
+    lines = line_alpha > o["lineAlpha"]
+    mask = reconnect_to_lines(dropped, removed, lines, o["gap"])
     labels, count = label_components(mask)
-    mask = drop_small(mask, labels, count, o["minLength"])
-    # drop_small이 돌려준 mask는 이미 "살아남은 라벨의 픽셀만 True"다. 다시
-    # label_components를 불러 처음부터 훑을 필요 없이, 곱해서 지워진 조각의 라벨만
-    # 0으로 죽이면 된다. 번호가 듬성듬성해져도 stroke_rgba는 존재하지 않는 라벨을
-    # 건너뛰므로(range 반복에서 빈 라벨은 continue) 문제가 없다.
-    labels = labels * mask
     return stroke_rgba(mask, labels, colour, o["width"])
 
 
