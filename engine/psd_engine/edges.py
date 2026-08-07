@@ -300,6 +300,10 @@ def attach_overlays(entries, plans):
         entry.setdefault("edgeOverlay", None)
     for plan in plans:
         wanted = set(plan["lineIds"])
+        # 문서 순서상 처음 걸리는 엔트리 하나에만 건다 — 잃는 획은 없다. 오버레이는
+        # 뷰 하나를 통째로 덮는 RGBA 한 장이고, 설계상 뷰당 출력 시트도 하나다.
+        # 그 뷰의 라인이 여러 엔트리에 나뉘어 있어도 어느 엔트리가 획을 실을지
+        # 결정될 뿐이지 획 자체가 어느 쪽에서도 사라지지 않는다.
         target = next((e for e in entries if wanted & set(e["sourceIds"])), None)
         if target is None:
             continue

@@ -472,6 +472,53 @@ def test_export_is_byte_identical_when_the_feature_is_off(session, tmp_path):
     assert a.read_bytes() == b.read_bytes()
 
 
+def test_verify_passes_when_an_edge_overlay_widens_the_entry(session, tmp_path):
+    # edgeOverlay가 소스 레이어 bbox 밖으로 엔트리를 넓혀도, entry_pixels를 통해
+    # 기대값을 다시 조립하므로 올바른 산출물은 통과해야 한다. entry_pixels를
+    # 거치기 전에는 원본 레이어(src.bbox, extract_rgba)와 그대로 대조해 bbox와
+    # 픽셀이 둘 다 어긋나 보였다 — verify.py 모듈 docstring이 적어 둔 색 통일
+    # 사고와 같은 모양의 두 번째 사고였다.
+    from psd_engine.edges import attach_overlays
+
+    entries = _plan(session, [4], [])
+    src = session["layers_by_id"][4]
+    overlay = np.zeros((4, 4, 4), np.uint8)
+    overlay[..., :3] = [1, 2, 3]
+    overlay[..., 3] = 255
+    attach_overlays(entries, [{"lineIds": [4], "rgba": overlay,
+                               "left": src.bbox[2] + 2, "top": src.bbox[1]}])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path)
+
+    v = verify_export(session, entries, out_path)
+    assert v["ok"] is True
+    assert v["layers"][0]["pixelOk"] is True
+
+
+def test_verify_still_catches_a_mismatched_edge_overlay(session, tmp_path):
+    # entry_pixels로 기대값을 조립한다고 무엇이든 통과시키면 안 된다 — 오버레이
+    # 내용이 실제 산출물과 다르면 여전히 잡아야 한다.
+    from psd_engine.edges import attach_overlays
+
+    entries_a = _plan(session, [4], [])
+    overlay_a = np.zeros((4, 4, 4), np.uint8)
+    overlay_a[..., :3] = [1, 2, 3]
+    overlay_a[..., 3] = 255
+    attach_overlays(entries_a, [{"lineIds": [4], "rgba": overlay_a, "left": 0, "top": 0}])
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries_a, out_path)
+
+    entries_b = _plan(session, [4], [])
+    overlay_b = np.zeros((4, 4, 4), np.uint8)
+    overlay_b[..., :3] = [9, 9, 9]
+    overlay_b[..., 3] = 255
+    attach_overlays(entries_b, [{"lineIds": [4], "rgba": overlay_b, "left": 0, "top": 0}])
+
+    v = verify_export(session, entries_b, out_path)
+    assert v["ok"] is False
+    assert v["layers"][0]["pixelOk"] is False
+
+
 def test_attach_overlays_merges_two_plans_that_land_on_the_same_entry(session, tmp_path):
     # merge 하나가 두 뷰의 라인을 한 엔트리로 합치면(오늘도 일어난다) 뒤 플랜이
     # 앞 플랜을 덮어써 지워버리면 안 된다 — 둘 다 살아남아야 한다.
