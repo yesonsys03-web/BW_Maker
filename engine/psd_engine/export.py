@@ -40,6 +40,9 @@ def entry_pixels(session, entry):
     엔트리의 픽셀. 덮을 색은 `entry["lineRgb"]`에서 읽는다 — assign_line_color가
     미리 정해 둔 값이고, 없으면 KeyError로 드러난다(조용히 색 통일을 빠뜨리느니
     호출자가 assign_line_color를 잊었다는 사실이 터져 나오는 편이 낫다).
+
+    생성된 색 경계 획(`edgeOverlay`)이 있으면 **색 통일보다 먼저** 합성한다. 그것도
+    라인이므로 색 통일 대상이고, 나중에 얹으면 혼자만 원본 색으로 남는다.
     """
     if len(entry["sourceIds"]) == 1:
         layer = session["layers_by_id"][entry["sourceIds"][0]]
@@ -47,11 +50,33 @@ def entry_pixels(session, entry):
     else:
         layers = [session["layers_by_id"][sid] for sid in entry["sourceIds"]]
         rgba, left, top = merge_rgba(session["psd"], layers)
+    overlay = entry.get("edgeOverlay")
+    if overlay is not None:
+        rgba, left, top = _composite_overlay(rgba, left, top, *overlay)
     # 병합 뒤에 덮는다. 소스가 서로 다른 색이어도 결과 알파는 같으므로 레이어마다
     # 먼저 덮고 병합한 것과 같은 그림이 되고, 병합 경로가 한 갈래로 유지된다.
     # 이 등식이 성립하려면 소스가 **전부** 대상이어야 한다 — assign_line_color가
     # 섞인 엔트리를 아예 대상에서 빼는 이유가 그것이다.
     return apply_line_color(rgba, entry["lineRgb"]), left, top
+
+
+def _composite_overlay(rgba, left, top, overlay, ox, oy):
+    """
+    획을 엔트리 픽셀 위에 알파 합성한다. 필요하면 캔버스를 넓힌다.
+
+    넓히는 것이 요점이다. 획은 라인 레이어 bbox 밖에 생길 수 있고(색 영역이 라인보다
+    넓은 자리), 잘라내면 그만큼 결과에서 사라진다.
+    """
+    from PIL import Image
+
+    h, w = rgba.shape[:2]
+    oh, ow = overlay.shape[:2]
+    nl, nt = min(left, ox), min(top, oy)
+    nr, nb = max(left + w, ox + ow), max(top + h, oy + oh)
+    canvas = Image.new("RGBA", (nr - nl, nb - nt), (0, 0, 0, 0))
+    canvas.alpha_composite(Image.fromarray(rgba, "RGBA"), dest=(left - nl, top - nt))
+    canvas.alpha_composite(Image.fromarray(overlay, "RGBA"), dest=(ox - nl, oy - nt))
+    return np.array(canvas), nl, nt
 
 
 def export_psd(session, entries, output_path, embed_preview=True,

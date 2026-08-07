@@ -2,6 +2,8 @@
 import traceback
 from pathlib import Path
 
+from .character import find_views
+from .edges import EDGE_DEFAULTS, attach_overlays, plan_overlays
 from .export import export_psd, export_psd_split, output_extension
 from .matching import match_preset, preset_operations
 from .ops import build_export_plan, finalize_names
@@ -30,6 +32,12 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
         # matched를 명시해 넘긴다 — 대화형 경로(rpc.export_psd)와 같은 규칙을
         # 같은 함수로 태우기 위해서다. 색 형식 오류는 파일을 만들기 전 여기서 난다.
         assign_line_color(entries, preset.get("lineColor"), matched)
+        edge = preset.get("edgeLines") or {}
+        if edge.get("enabled"):
+            attach_overlays(entries, plan_overlays(s, find_views(s),
+                                                   {**EDGE_DEFAULTS, **edge}))
+        else:
+            attach_overlays(entries, [])
         fmt = preset.get("outputFormat", "psd")
         src = Path(path)
         out_dir = Path(output_dir) if output_dir else src.parent

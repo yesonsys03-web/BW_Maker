@@ -413,3 +413,60 @@ def test_split_export_checks_every_name_before_writing_any(session, tmp_path):
     with pytest.raises(ValueError, match="파일 이름이 너무 깁니다"):
         export_psd_split(session, entries, out)
     assert set(tmp_path.iterdir()) == before
+
+
+def test_edge_overlay_is_composited_into_the_line_entry(session, tmp_path):
+    # 생성된 획은 그 뷰의 라인 엔트리에 합쳐 뷰당 한 장으로 나간다(설계 5절).
+    import numpy as np
+    from psd_engine.edges import attach_overlays
+
+    entries = _plan(session, [4], [])
+    overlay = np.zeros((6, 6, 4), np.uint8)
+    overlay[..., :3] = [10, 20, 30]
+    overlay[..., 3] = 255
+    attach_overlays(entries, [{"lineIds": [4], "rgba": overlay, "left": 0, "top": 0}])
+    assert entries[0]["edgeOverlay"] is not None
+
+    out_path = tmp_path / "out.psd"
+    export_psd(session, entries, out_path)
+    arr = np.array(list(PSDImage.open(out_path))[0].topil().convert("RGBA"))
+    assert (arr[0, 0, :3] == [10, 20, 30]).all(), "획이 합성되지 않았다"
+
+
+def test_an_overlay_outside_the_layer_bbox_widens_the_entry(session, tmp_path):
+    # 획은 라인 레이어 bbox 밖에도 생길 수 있다. 잘라내면 그만큼 사라진다.
+    import numpy as np
+    from psd_engine.edges import attach_overlays
+
+    entries = _plan(session, [4], [])
+    src = session["layers_by_id"][4]
+    overlay = np.zeros((4, 4, 4), np.uint8)
+    overlay[..., 3] = 255
+    attach_overlays(entries, [{"lineIds": [4], "rgba": overlay,
+                               "left": src.bbox[2] + 2, "top": src.bbox[1]}])
+    out_path = tmp_path / "wide.psd"
+    export_psd(session, entries, out_path)
+    layer = list(PSDImage.open(out_path))[0]
+    assert layer.bbox[2] >= src.bbox[2] + 6
+
+
+def test_attach_overlays_skips_a_view_whose_lines_are_not_exported(session, tmp_path):
+    # 라인을 체크하지 않았으면 합칠 엔트리가 없다. 조용히 건너뛴다.
+    import numpy as np
+    from psd_engine.edges import attach_overlays
+
+    entries = _plan(session, [4], [])
+    overlay = np.ones((4, 4, 4), np.uint8) * 255
+    attach_overlays(entries, [{"lineIds": [999], "rgba": overlay, "left": 0, "top": 0}])
+    assert entries[0].get("edgeOverlay") is None
+
+
+def test_export_is_byte_identical_when_the_feature_is_off(session, tmp_path):
+    # 기본값 꺼짐. 켜지 않으면 기존 산출물과 같아야 한다.
+    a, b = tmp_path / "a.psd", tmp_path / "b.psd"
+    export_psd(session, _plan(session, [3, 4, 5], []), a)
+    entries = _plan(session, [3, 4, 5], [])
+    from psd_engine.edges import attach_overlays
+    attach_overlays(entries, [])
+    export_psd(session, entries, b)
+    assert a.read_bytes() == b.read_bytes()

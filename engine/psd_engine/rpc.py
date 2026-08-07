@@ -11,6 +11,8 @@ import traceback
 from collections import deque
 from pathlib import Path
 
+from .character import find_views
+from .edges import EDGE_DEFAULTS, attach_overlays, plan_overlays
 from .export import export_psd as _export
 from .export import export_psd_split as _export_split
 from .matching import (auto_merge_operations, auto_merge_preview,
@@ -159,7 +161,8 @@ class Engine:
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
                    embedPreview=True, overwrite=False, verify=True, lineColor=None,
-                   splitLayers=False, outputFormat="psd", lineColorIds=None):
+                   splitLayers=False, outputFormat="psd", lineColorIds=None,
+                   edgeLines=None):
         s = self.store.get(sessionId)
         included = sorted(includedIds)
         for lid in included:
@@ -176,6 +179,13 @@ class Engine:
         # 하므로 둘이 갈라질 수 없다(assign_line_color 참고). 형식이 틀린 색은
         # 파일을 만들기 전인 여기서 걸린다.
         assign_line_color(entries, lineColor, lineColorIds)
+        # 색 경계선. 켜져 있을 때만 돈다 — 꺼져 있으면 엔트리가 그대로이므로
+        # 산출물이 이 기능 이전과 바이트 단위로 같다.
+        if edgeLines and edgeLines.get("enabled"):
+            opts = {**EDGE_DEFAULTS, **edgeLines}
+            attach_overlays(entries, plan_overlays(s, find_views(s), opts))
+        else:
+            attach_overlays(entries, [])
 
         def progress(stage, current, total):
             _emit({"event": "progress", "stage": stage,

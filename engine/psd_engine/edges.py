@@ -252,3 +252,23 @@ def plan_overlays(session, views, opts):
         plans.append({"lineIds": view["lineIds"], "rgba": rgba,
                       "left": left, "top": top})
     return plans
+
+
+def attach_overlays(entries, plans):
+    """
+    오버레이를 그 뷰의 라인 엔트리에 실어 둔다. 판단은 여기 한 번뿐이고
+    entry_pixels는 읽기만 한다 — 색 통일(lineRgb)과 같은 방식이다.
+
+    라인이 내보내기에 포함되지 않았으면 합칠 자리가 없으므로 그 뷰는 건너뛴다.
+    아티스트가 라인을 체크하지 않았다는 뜻이고, 그때 획만 따로 내보내는 것은
+    "최종 라인 레이어에 넣는다"는 이 기능의 목적과 어긋난다.
+    """
+    for entry in entries:
+        entry.setdefault("edgeOverlay", None)
+    for plan in plans:
+        wanted = set(plan["lineIds"])
+        target = next((e for e in entries if wanted & set(e["sourceIds"])), None)
+        if target is None:
+            continue
+        target["edgeOverlay"] = (plan["rgba"], plan["left"], plan["top"])
+    return entries
