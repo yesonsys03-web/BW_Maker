@@ -543,3 +543,21 @@ def test_attach_overlays_merges_two_plans_that_land_on_the_same_entry(session, t
     assert left == 0 and top == 0
     assert tuple(overlay[0, 0, :3]) == (11, 22, 33) and overlay[0, 0, 3] == 255
     assert tuple(overlay[0, 20, :3]) == (44, 55, 66) and overlay[0, 20, 3] == 255
+
+
+def test_two_overlays_on_one_entry_are_combined_not_replaced(session, tmp_path):
+    # 스펙 3.1: 수동은 자동에 보탠다. 덮어쓰면 자동 결과가 조용히 사라진다.
+    import numpy as np
+    from psd_engine.edges import attach_overlays
+
+    entries = _plan(session, [4], [])
+    a = np.zeros((4, 4, 4), np.uint8); a[..., 3] = 255; a[..., :3] = [10, 0, 0]
+    b = np.zeros((4, 4, 4), np.uint8); b[2:, :, 3] = 255; b[..., :3] = [0, 10, 0]
+    attach_overlays(entries, [
+        {"lineIds": [4], "rgba": a, "left": 0, "top": 0},
+        {"lineIds": [4], "rgba": b, "left": 0, "top": 8},
+    ])
+    rgba, left, top = entries[0]["edgeOverlay"]
+    assert rgba[..., 3].max() == 255
+    # 두 오버레이가 세로로 떨어져 있으므로 합친 것은 둘을 다 담을 만큼 커야 한다.
+    assert rgba.shape[0] >= 12, "두 번째 오버레이가 첫 번째를 덮어썼다"

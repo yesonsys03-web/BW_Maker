@@ -56,7 +56,97 @@ def find_views(session):
                 if colour_ids:
                     views.append({"name": name, "colourIds": colour_ids,
                                   "lineIds": line_ids})
+            # 무조건 재귀한다 — 색 그룹 이름을 가진 그룹 **안에** 또 색 그룹 이름을
+            # 가진 그룹이 중첩되면(예: COLORS 안의 FILLS 그룹) 가짜 뷰가 하나 더
+            # 나온다는 뜻이다. 그 뷰의 colourIds는 바깥 뷰가 이미 센 것의
+            # 부분집합이고 lineIds는 대개 비어 있다. 전수 조사 100장에는 없던
+            # 모양이라 여기서 고치지 않는다 — 수동 지정(manual_views)이 대비책이다.
+            # 회귀 테스트: test_character.py의
+            # test_a_colour_group_nested_inside_a_colour_group_does_not_make_a_second_view
+            # (xfail, strict=True) — 다음에 여섯 번째 색 그룹 이름을 추가하다 이걸
+            # 고치고 싶어지면 그 테스트가 먼저 알려준다.
             walk(child, child.name)
 
     walk(psd, "(root)")
+    return views
+
+
+def _parent_map(psd):
+    """id(자식) -> 부모 노드. `manual_views`가 고른 잎에서 부모(P)와 그 부모(V)를
+    거슬러 올라가려면 트리를 한 번 훑어 이 지도를 만들어야 한다 — psd-tools
+    레이어에는 부모 참조가 없다.
+
+    `find_views`와 같은 `session["psd"]`를 그대로 훑으므로 여기서 얻는 레이어
+    객체는 `session["layers_by_id"]`가 들고 있는 것과 `id()`가 같다(둘 다
+    `tree.build_tree`가 만든 같은 psd-tools 트리를 본다)."""
+    parent_of = {}
+
+    def walk(node):
+        for child in node:
+            parent_of[id(child)] = node
+            if child.is_group():
+                walk(child)
+
+    walk(psd)
+    return parent_of
+
+
+def manual_views(session, colour_ids, included_ids):
+    """
+    아티스트가 레이어 트리에서 직접 짚은 색 레이어(잎)로 뷰를 만든다.
+    `find_views`와 **같은 모양**을 돌려주고 같은 `overlay_for_view`를 탄다 —
+    경계 계산은 색 레이어 목록과 라인 목록만 받을 뿐 누가 골랐는지 묻지 않는다.
+
+    자동(find_views)은 "닫힌 이름 집합의 그룹"에서 시작해 그 부모를 뷰로 삼는다.
+    수동은 이름 검사를 뺀 같은 규칙이다 — 아티스트가 고르는 것은 잎이므로, 그
+    잎의 부모 그룹 P가 사실상의 색 그룹이고 뷰 V는 P의 부모다. 여러 잎이 같은
+    V 아래 있으면(서로 다른 P 아래여도) 한 뷰로 묶인다 — 뷰 하나에 오버레이
+    한 장이라는 설계(5절) 때문이다.
+
+    라인은 자동과 똑같이 V 바로 아래에서 이름에 line이 든 노드를 펼쳐 쓰되,
+    `included_ids`(내보내기에 이미 포함된 라인)와 교집합만 남긴다 — 체크하지
+    않은 라인 위에 획을 얹을 자리가 없다(edges.attach_overlays가 그런 뷰를
+    건너뛰는 것과 같은 이유).
+
+    `colour_ids`가 비면 `[]`를 돌려준다. `batch.py`는 아티스트가 짚을 수 없으므로
+    이 함수를 빈 목록으로 불러 자동 검출만 돌게 한다.
+    """
+    if not colour_ids:
+        return []
+
+    layers_by_id = session["layers_by_id"]
+    ids = {id(layer): lid for lid, layer in layers_by_id.items()}
+    parent_of = _parent_map(session["psd"])
+    included = set(included_ids)
+
+    # V(id(view_node)) -> {"name", "colourIds", "_node"}. 문서 순서를 지키려고
+    # 처음 등장한 순서를 order에 따로 적어 둔다(dict는 조회용).
+    order = []
+    grouped = {}
+    for lid in colour_ids:
+        layer = layers_by_id.get(lid)
+        if layer is None:
+            continue
+        parent = parent_of.get(id(layer))
+        if parent is None:
+            continue
+        view_node = parent_of.get(id(parent), session["psd"])
+        key = id(view_node)
+        if key not in grouped:
+            name = "(root)" if view_node is session["psd"] else view_node.name
+            grouped[key] = {"name": name, "colourIds": [], "_node": view_node}
+            order.append(key)
+        grouped[key]["colourIds"].append(lid)
+
+    views = []
+    for key in order:
+        v = grouped[key]
+        view_node = v["_node"]
+        line_ids = [
+            ids[id(l)]
+            for sib in view_node if _is_line_named(sib)
+            for l in _pixel_leaves(sib) if id(l) in ids
+        ]
+        line_ids = [lid for lid in line_ids if lid in included]
+        views.append({"name": v["name"], "colourIds": v["colourIds"], "lineIds": line_ids})
     return views

@@ -2,7 +2,7 @@
 import traceback
 from pathlib import Path
 
-from .character import find_views
+from .character import find_views, manual_views
 from .edges import EDGE_DEFAULTS, attach_overlays, plan_overlays
 from .export import export_psd, export_psd_split, output_extension
 from .matching import match_preset, preset_operations
@@ -34,8 +34,15 @@ def _process_one(store, path, preset, output_dir, overwrite, progress):
         assign_line_color(entries, preset.get("lineColor"), matched)
         edge = preset.get("edgeLines") or {}
         if edge.get("enabled"):
-            attach_overlays(entries, plan_overlays(s, find_views(s),
-                                                   {**EDGE_DEFAULTS, **edge}))
+            # 배치는 프리셋만 받고 아티스트가 파일마다 레이어를 짚을 수 없다 —
+            # manual_views(s, [], matched)는 colour_ids가 비어 있으므로 항상 []를
+            # 돌려주고(character.manual_views 참고), 그래서 여기서는 자동 검출만
+            # 돈다. find_views(s)만 부르지 않고 굳이 이 모양으로 맞춘 것은
+            # rpc.export_psd/render_preview와 같은 합집합 코드 경로를 타게 해서,
+            # 대화형 경로와 배치 경로가 갈라질 여지를 없애려는 것이다.
+            attach_overlays(entries, plan_overlays(
+                s, find_views(s) + manual_views(s, [], matched),
+                {**EDGE_DEFAULTS, **edge}))
         else:
             attach_overlays(entries, [])
         fmt = preset.get("outputFormat", "psd")

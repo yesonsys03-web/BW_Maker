@@ -11,7 +11,7 @@ import traceback
 from collections import deque
 from pathlib import Path
 
-from .character import find_views
+from .character import find_views, manual_views
 from .edges import EDGE_DEFAULTS, attach_overlays, plan_overlays
 from .export import export_psd as _export
 from .export import export_psd_split as _export_split
@@ -115,7 +115,13 @@ class Engine:
         out_dir = self._fresh_render_dir("preview")
         overlays = None
         if edgeLines and edgeLines.get("enabled"):
-            overlays = plan_overlays(s, find_views(s), {**EDGE_DEFAULTS, **edgeLines})
+            opts = {**EDGE_DEFAULTS, **edgeLines}
+            # 수동은 자동에 **보탠다**(설계 3.1). 자동 결과를 지우지 않는다.
+            # 미리보기의 "내보내기에 이미 포함된 라인"은 화면에 켜진 레이어,
+            # 즉 visibleLayerIds다.
+            views = find_views(s) + manual_views(
+                s, edgeLines.get("manualColourIds") or [], visibleLayerIds)
+            overlays = plan_overlays(s, views, opts)
         return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
                                           line_color=lineColor,
                                           line_color_ids=lineColorIds,
@@ -187,7 +193,10 @@ class Engine:
         # 산출물이 이 기능 이전과 바이트 단위로 같다.
         if edgeLines and edgeLines.get("enabled"):
             opts = {**EDGE_DEFAULTS, **edgeLines}
-            attach_overlays(entries, plan_overlays(s, find_views(s), opts))
+            # 수동은 자동에 **보탠다**(설계 3.1). 자동 결과를 지우지 않는다.
+            views = find_views(s) + manual_views(
+                s, edgeLines.get("manualColourIds") or [], included)
+            attach_overlays(entries, plan_overlays(s, views, opts))
         else:
             attach_overlays(entries, [])
 
