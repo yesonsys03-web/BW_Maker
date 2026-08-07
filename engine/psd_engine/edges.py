@@ -138,11 +138,24 @@ def stroke_rgba(mask, labels, colour, width):
     if not thick.any():
         return out
     # 조각별 대표색을 굵어진 영역 전체에 칠한다. 굵힌 뒤의 라벨은 원본 라벨을 같은
-    # 크기로 팽창시켜 얻는다 — MaxFilter가 라벨 번호에도 그대로 통한다.
-    grown = np.array(
-        Image.fromarray(labels.astype(np.int32), mode="I").filter(
-            ImageFilter.MaxFilter(width if width % 2 else width + 1))
-    )
+    # 크기로 팽창시켜 얻는다.
+    #
+    # 한 번에 큰 MaxFilter를 걸면 이웃 안에서 "가장 가까운" 라벨이 아니라 "가장 큰"
+    # 라벨이 이긴다. label_components가 라벨을 래스터 순서(위→아래, 왼→오른쪽)로
+    # 매기므로, 두 조각이 width px 안으로 붙어 있으면 이 편향은 늘 같은 방향으로
+    # 나타난다 — 항상 아래/오른쪽 조각이 경계 중간의 애매한 자리까지 차지한다.
+    # 대신 3×3 MaxFilter를 반경만큼 한 칸씩 돌리면서, 이미 라벨이 붙은 자리는
+    # 다시 덮지 않는다(`np.where(grown == 0, ...)`). 한 링(ring)씩 퍼지므로 어느
+    # 라벨이 먼저 도착하느냐가 곧 체비셰프 거리로 "더 가까운" 라벨이다 — thick를
+    # 만들 때 쓴 정사각형 커널과 같은 거리 척도라 서로 어긋나지 않는다. 반경은
+    # thick와 똑같이 (홀수로 올림한 width) // 2번 반복하면 된다(기본 width=5면 2회).
+    size = width if width % 2 else width + 1
+    grown = labels
+    for _ in range(size // 2):
+        step = np.array(
+            Image.fromarray(grown.astype(np.int32), mode="I").filter(ImageFilter.MaxFilter(3))
+        )
+        grown = np.where(grown == 0, step, grown)
     for lab in range(1, labels.max() + 1):
         src = labels == lab
         if not src.any():
@@ -163,7 +176,11 @@ def build_overlay(colour_rgba, line_alpha, opts):
     mask = subtract_lines(mask, line_alpha, o["gap"], o["lineAlpha"])
     labels, count = label_components(mask)
     mask = drop_small(mask, labels, count, o["minLength"])
-    labels, _ = label_components(mask)
+    # drop_small이 돌려준 mask는 이미 "살아남은 라벨의 픽셀만 True"다. 다시
+    # label_components를 불러 처음부터 훑을 필요 없이, 곱해서 지워진 조각의 라벨만
+    # 0으로 죽이면 된다. 번호가 듬성듬성해져도 stroke_rgba는 존재하지 않는 라벨을
+    # 건너뛰므로(range 반복에서 빈 라벨은 continue) 문제가 없다.
+    labels = labels * mask
     return stroke_rgba(mask, labels, colour, o["width"])
 
 

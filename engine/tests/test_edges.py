@@ -100,6 +100,26 @@ def test_stroke_rgba_thickens_the_line_and_carries_the_component_colour():
     assert tuple(out[5, 5, :3]) == (30, 20, 10)
 
 
+def test_stroke_rgba_assigns_contested_ground_to_the_nearer_component_not_the_larger_label():
+    # 라벨 1은 x=1, 라벨 2는 x=8. width=9(반지름 4)라 두 조각이 서로의 반경 안에 든다.
+    # x=4는 라벨 1까지 3px, 라벨 2까지 4px — 라벨 1이 더 가깝다. 그런데 한 번에 크게
+    # MaxFilter를 걸면 "가장 가까운" 라벨이 아니라 "가장 큰" 라벨이 이겨서 x=4가
+    # 라벨 2(아래/오른쪽) 색으로 칠해진다. label_components는 래스터 순서로 번호를
+    # 매기므로 이 편향은 늘 같은 방향(아래/오른쪽 라벨 승)으로 나타난다.
+    mask = np.zeros((1, 11), bool)
+    mask[0, 1] = True
+    mask[0, 8] = True
+    colour = np.zeros((1, 11, 3), np.uint8)
+    colour_a, colour_b = [10, 20, 30], [200, 210, 220]
+    colour[0, 1] = colour_a
+    colour[0, 8] = colour_b
+    labels, _ = label_components(mask)
+    assert labels[0, 1] != labels[0, 8]
+    out = stroke_rgba(mask, labels, colour, width=9)
+    assert tuple(out[0, 4, :3]) == tuple(colour_a), \
+        "라벨 1(x=1)에 더 가까운 x=4가 라벨 2(x=8)의 색으로 칠해졌다"
+
+
 def test_build_overlay_is_empty_when_every_boundary_already_has_a_line():
     red, black = [200, 20, 40], [10, 10, 10]
     rgba = _rgba([[red] * 6 + [black] * 6] * 12)
