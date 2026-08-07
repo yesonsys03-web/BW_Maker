@@ -67,6 +67,25 @@ test("renderPreview sends edgeLines as null when the feature itself is off, even
   expect(params.edgeLines).toBeNull();
 });
 
+// 미리보기와 내보내기가 같은 라인을 뺴는지가 이 기능의 핵심이다(rpc.py의
+// render_preview 주석 참고) — 엔진이 그걸 판단하려면 진짜 체크박스 포함
+// 목록(exportPsd가 받는 것과 같은 값)을 받아야 한다. visibleLayerIds(눈까지
+// 반영한 그리기용 목록)로는 대신할 수 없다.
+test("renderPreview sends the export inclusion list separately from the drawn (eye-filtered) set", async () => {
+  invokeMock.mockResolvedValue({ pngPath: "/tmp/p.png" });
+  await renderPreview(1, [10, 11], 1500, null, null, EDGE, [42], [10, 11, 12]);
+  const params = invokeMock.mock.calls[0][1].params;
+  expect(params.includedIds).toEqual([10, 11, 12]);
+  expect(params.visibleLayerIds).toEqual([10, 11]);
+});
+
+test("renderPreview defaults includedIds to null when omitted, so the engine falls back on its own", async () => {
+  invokeMock.mockResolvedValue({ pngPath: "/tmp/p.png" });
+  await renderPreview(1, [10], 1500, null, null, EDGE);
+  const params = invokeMock.mock.calls[0][1].params;
+  expect(params.includedIds).toBeNull();
+});
+
 test("exportPsd merges manualColourIds into the edgeLines payload the same way", async () => {
   invokeMock.mockResolvedValue({ outputPath: "/out.psd", layerCount: 1 });
   await exportPsd(1, [10], [], "original", "/out.psd", true, true, true, null, false, "psd", null, EDGE, [7, 8]);

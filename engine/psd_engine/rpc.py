@@ -110,7 +110,7 @@ class Engine:
         return {"thumbs": render_thumbnails(s, layerIds, maxSize, out_dir)}
 
     def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None,
-                       lineColorIds=None, edgeLines=None):
+                       lineColorIds=None, edgeLines=None, includedIds=None):
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
         overlays = None
@@ -121,25 +121,32 @@ class Engine:
             #
             # manual_views의 included_ids는 "내보내기에 이미 포함된 라인"을
             # 뜻한다(character.manual_views 참고) — export_psd는 실제 includedIds를
-            # 준다. 그런데 render_preview는 그 목록을 인자로 받지 않는다. 여기
-            # 있는 visibleLayerIds는 체크 ∩ 눈(솔로 중이면 체크와 무관한 솔로
-            # 목록)이다(src/lib/preview.ts의 visibleIdsForPreview) — 체크는
-            # 됐지만 눈으로만 숨긴 라인도 여기서는 "빠진" 것으로 보인다.
-            # 그걸 그대로 included_ids로 넘기면, 체크는 됐지만 숨겨 둔 라인
-            # 위에도 획을 겹쳐 그리게 된다 — 이 앱 다른 곳에서는 눈이 무엇이
-            # 그려지는지만 바꾸는데(export_psd는 눈을 아예 안 본다) 여기서만
-            # 계산 자체가 눈에 따라 달라지는 예외였다.
+            # 준다. render_preview도 이제 같은 것을 includedIds로 받는다
+            # (src/lib/engine.ts의 renderPreview → PreviewCanvas/App.tsx의
+            # ops.includedIds가 그대로 여기까지 온다).
             #
-            # 진짜 포함 목록이 없으므로 세션의 모든 레이어 id를 넘겨 그 교집합을
-            # 사실상 무력화한다 — 구조상 후보인 라인은 전부 "이미 있다"고 본다.
-            # 잔여 차이: 뷰의 색은 손으로 짚었는데 그 라인 그룹을 아예 체크
-            # 해제해 둔 조합에서는, 실제로는 내보내기에 없는 그 라인을 "있다"고
-            # 보아 획을 덜 그릴 수 있다 — 수동 지정과 라인 미체크를 같이 쓰는
-            # 조합은 드물다고 보고 받아들인다. 화면에 실제로 그려지는지는
-            # 여전히 render.render_preview의 그리기 시점 필터(lineIds & visible)가
-            # 정한다.
+            # 이걸 visibleLayerIds(체크 ∩ 눈, 솔로 중이면 솔로 목록)로 대신하면
+            # 안 된다 — 체크는 됐지만 눈으로만 숨긴 라인이 "빠진" 것으로 보여,
+            # 이 앱 다른 곳에서는 눈이 무엇이 그려지는지만 바꾸는데(export_psd는
+            # 눈을 아예 안 본다) 여기서만 계산 자체가 눈에 따라 달라지는 예외가
+            # 생긴다. 반대로 그 버그를 피하려고 세션의 모든 레이어 id를 넘기면
+            # (전 버전이 그랬다) 교집합이 사실상 무력화돼, 아티스트가 체크를
+            # 해제해 실제로는 내보내기에 없는 라인까지 "이미 있다"고 보아 획을
+            # 덜 그린다 — 미리보기가 내보내기보다 획이 적어 보이는 정확히 그
+            # 라인이 지워진다.
+            #
+            # includedIds가 있으면 그것을 그대로 쓴다. 없는 옛 호출(직접
+            # render_preview를 부르는 기존 테스트 등)은 이전처럼 세션의 모든
+            # 레이어 id로 근사한다 — 하위 호환을 위한 기본값일 뿐, 새 호출은
+            # 전부 진짜 목록을 넘긴다.
+            #
+            # visibleLayerIds(위 visible)는 이 계산에 관여하지 않는다 — 그건
+            # 무엇이 그려지는지(눈 포함)를 정하고, includedIds는 무엇이 "이미
+            # 있는 라인"인지를 정한다. 서로 다른 질문이라 한 값으로 합치면
+            # 안 된다.
+            included = includedIds if includedIds is not None else s["layers_by_id"].keys()
             views = find_views(s) + manual_views(
-                s, edgeLines.get("manualColourIds") or [], s["layers_by_id"].keys())
+                s, edgeLines.get("manualColourIds") or [], included)
             # render.render_preview가 그리기 직전에 이미 하는 lineIds & visible
             # 필터를 여기로 앞당긴다. plan_overlays 하나가 뷰당 0.9~11.6초라
             # (설계 9절) 다섯 뷰 모델에서 하나만 솔로해도 나머지 넷을 합성해

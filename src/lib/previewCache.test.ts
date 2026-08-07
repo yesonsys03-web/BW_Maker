@@ -37,7 +37,7 @@ test("the spec's key is the key for the visible set it computed", () => {
   const spec = previewRenderSpec(F7, tree, [1, 3], [3], [], "#000000", undefined, null, []);
 
   expect(spec.visibleIds).toEqual([1]);
-  expect(spec.key).toBe(previewCacheKey(F7, spec.documentView, [1], "#000000", undefined, null, []));
+  expect(spec.key).toBe(previewCacheKey(F7, spec.documentView, [1], "#000000", undefined, null, [], [1, 3]));
 });
 
 test("a partial line selection is a composite, not the stored document image", () => {
@@ -58,47 +58,50 @@ test("the same file state always plans the same key", () => {
 });
 
 test("the same render inputs produce the same key", () => {
-  expect(previewCacheKey(F1, false, [3, 1, 2], "#000000", undefined, null, [])).toBe(previewCacheKey(F1, false, [3, 1, 2], "#000000", undefined, null, []));
+  expect(previewCacheKey(F1, false, [3, 1, 2], "#000000", undefined, null, [], [])).toBe(
+    previewCacheKey(F1, false, [3, 1, 2], "#000000", undefined, null, [], [])
+  );
 });
 
 // 이 캐시가 존재하는 이유. 엔진 세션은 LRU(2개)에 밀려 수시로 새로 열리는데,
 // 그때마다 키가 달라지면 애써 만든 그림이 통째로 버려진다 — 세션 id로 키를
 // 잡았을 때 실제로 그랬고, 증상은 "다른 파일 갔다 오면 또 합성한다"였다.
 test("the same file keeps its key however many times its session is reopened", () => {
-  const before = previewCacheKey({ path: "/a.psd", mtime: 100 }, false, [1, 2], null, undefined, null, []);
-  const afterReopen = previewCacheKey({ path: "/a.psd", mtime: 100 }, false, [1, 2], null, undefined, null, []);
+  const before = previewCacheKey({ path: "/a.psd", mtime: 100 }, false, [1, 2], null, undefined, null, [], []);
+  const afterReopen = previewCacheKey({ path: "/a.psd", mtime: 100 }, false, [1, 2], null, undefined, null, [], []);
   expect(afterReopen).toBe(before);
 });
 
 // 반대쪽 보장. 아티스트가 포토샵에서 저장하면 그림이 달라지므로 다시 그려야 한다.
 test("a file saved since the render gets a different key", () => {
-  const before = previewCacheKey({ path: "/a.psd", mtime: 100 }, false, [1, 2], null, undefined, null, []);
-  const afterSave = previewCacheKey({ path: "/a.psd", mtime: 200 }, false, [1, 2], null, undefined, null, []);
+  const before = previewCacheKey({ path: "/a.psd", mtime: 100 }, false, [1, 2], null, undefined, null, [], []);
+  const afterSave = previewCacheKey({ path: "/a.psd", mtime: 200 }, false, [1, 2], null, undefined, null, [], []);
   expect(afterSave).not.toBe(before);
 });
 
 test("without a known mtime there is no key, so nothing is reused unverified", () => {
-  expect(previewCacheKey({ path: "/a.psd" }, false, [1], null, undefined, null, [])).toBeNull();
+  expect(previewCacheKey({ path: "/a.psd" }, false, [1], null, undefined, null, [], [])).toBeNull();
   expect(previewRenderSpec({ path: "/a.psd" }, [pixel(1)], [1], [], [], null, undefined, null, []).key).toBeNull();
 });
 
 test("every other input that changes the rendered image changes the key", () => {
-  const base = previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, []);
-  expect(previewCacheKey(F2, false, [1, 2], "#000000", undefined, null, [])).not.toBe(base); // 다른 파일
-  expect(previewCacheKey(F1, true, [1, 2], "#000000", undefined, null, [])).not.toBe(base); // 문서 보기
-  expect(previewCacheKey(F1, false, [1, 3], "#000000", undefined, null, [])).not.toBe(base); // 다른 레이어
-  expect(previewCacheKey(F1, false, [1, 2], null, undefined, null, [])).not.toBe(base); // 라인 색 없음
-  expect(previewCacheKey(F1, false, [1, 2], "#000000", [1], null, [])).not.toBe(base); // 색 통일 대상이 다름
-  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, EDGE_ON, [])).not.toBe(base); // 색 경계선 켜짐
-  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [1])).not.toBe(base); // 색 원본 수동 지정
+  const base = previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [], []);
+  expect(previewCacheKey(F2, false, [1, 2], "#000000", undefined, null, [], [])).not.toBe(base); // 다른 파일
+  expect(previewCacheKey(F1, true, [1, 2], "#000000", undefined, null, [], [])).not.toBe(base); // 문서 보기
+  expect(previewCacheKey(F1, false, [1, 3], "#000000", undefined, null, [], [])).not.toBe(base); // 다른 레이어
+  expect(previewCacheKey(F1, false, [1, 2], null, undefined, null, [], [])).not.toBe(base); // 라인 색 없음
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", [1], null, [], [])).not.toBe(base); // 색 통일 대상이 다름
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, EDGE_ON, [], [])).not.toBe(base); // 색 경계선 켜짐
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [1], [])).not.toBe(base); // 색 원본 수동 지정
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [], [9])).not.toBe(base); // 내보내기 포함 목록이 다름
 });
 
 // 켜져 있는 동안에는 다섯 수치 전부가 그림을 바꾸므로 키에 그대로 반영돼야
 // 한다.
 test("with edge lines on, different settings get different keys", () => {
   const edgeOnWide: EdgeLines = { ...EDGE_ON, width: 7 };
-  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, EDGE_ON, [])).not.toBe(
-    previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOnWide, [])
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, EDGE_ON, [], [])).not.toBe(
+    previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOnWide, [], [])
   );
 });
 
@@ -108,8 +111,8 @@ test("with edge lines on, different settings get different keys", () => {
 test("with edge lines off, different numeric settings still get the same key", () => {
   const edgeOffA: EdgeLines = { enabled: false, threshold: 10, gap: 4, width: 5, minLength: 8, lineAlpha: 64 };
   const edgeOffB: EdgeLines = { enabled: false, threshold: 90, gap: 40, width: 50, minLength: 80, lineAlpha: 6 };
-  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOffA, [])).toBe(
-    previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOffB, [])
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOffA, [], [])).toBe(
+    previewCacheKey(F1, false, [1, 2], "#000000", undefined, edgeOffB, [], [])
   );
 });
 
@@ -117,8 +120,18 @@ test("with edge lines off, different numeric settings still get the same key", (
 // 동안에도 키에 반영해야 한다 — 켤 때마다 다시 그려야 하는 상황을
 // 캐시가 감추면 안 된다("느린 편이 정확한 편보다 낫다").
 test("designating different colour source layers changes the key even with edge lines off", () => {
-  expect(previewCacheKey(F1, false, [1, 2], null, undefined, null, [1])).not.toBe(
-    previewCacheKey(F1, false, [1, 2], null, undefined, null, [2])
+  expect(previewCacheKey(F1, false, [1, 2], null, undefined, null, [1], [])).not.toBe(
+    previewCacheKey(F1, false, [1, 2], null, undefined, null, [2], [])
+  );
+});
+
+// includedIds도 같은 이유로 무조건 담는다(edgeColourIds 바로 위 주석 참고).
+// visibleIds만으로는 "체크됐지만 눈으로 숨김"과 "체크 해제"를 구분하지 못하는데,
+// manual_views는 그 둘을 다르게 취급한다(rpc.py의 render_preview 주석 참고) —
+// 이 값이 빠지면 한쪽이 다른 쪽의 캐시를 그대로 돌려받는다.
+test("a different export inclusion list changes the key even with edge lines off", () => {
+  expect(previewCacheKey(F1, false, [1, 2], null, undefined, null, [], [10])).not.toBe(
+    previewCacheKey(F1, false, [1, 2], null, undefined, null, [], [20])
   );
 });
 
@@ -144,22 +157,34 @@ test("the spec targets the same layers its key was built from", () => {
   const spec = previewRenderSpec(F7, tree, [1, 2, 3], [], [], "#000000", [2, 3], null, []);
   expect(spec.visibleIds).toEqual([1, 2, 3]);
   expect(spec.lineColorIds).toEqual([2, 3]);
-  expect(spec.key).toBe(previewCacheKey(F7, spec.documentView, [1, 2, 3], "#000000", [2, 3], null, []));
+  expect(spec.key).toBe(
+    previewCacheKey(F7, spec.documentView, [1, 2, 3], "#000000", [2, 3], null, [], [1, 2, 3])
+  );
+});
+
+// 준비 큐(App.tsx)와 화면(PreviewCanvas)이 같은 값을 다시 쓸 수 있도록 spec이
+// 그대로 되돌려준다 — engine.ts의 renderPreview 호출에 이 값이 필요하다.
+test("the spec carries the export inclusion list back out for the caller to resend", () => {
+  const tree = [pixel(1), pixel(2)];
+  const spec = previewRenderSpec(F7, tree, [1, 2], [], [], null, undefined, null, []);
+  expect(spec.includedIds).toEqual([1, 2]);
 });
 
 test("layer order matters — the engine stacks them in the order it is given", () => {
-  expect(previewCacheKey(F1, false, [1, 2], null, undefined, null, [])).not.toBe(previewCacheKey(F1, false, [2, 1], null, undefined, null, []));
+  expect(previewCacheKey(F1, false, [1, 2], null, undefined, null, [], [])).not.toBe(
+    previewCacheKey(F1, false, [2, 1], null, undefined, null, [], [])
+  );
 });
 
 test("one file's image is never served for another", () => {
   const cache = new PreviewCache();
-  cache.set(previewCacheKey(F1, false, [1], null, undefined, null, [])!, "data:a");
-  expect(cache.get(previewCacheKey(F2, false, [1], null, undefined, null, [])!)).toBeUndefined();
+  cache.set(previewCacheKey(F1, false, [1], null, undefined, null, [], [])!, "data:a");
+  expect(cache.get(previewCacheKey(F2, false, [1], null, undefined, null, [], [])!)).toBeUndefined();
 });
 
 test("a stored image comes back for the same key", () => {
   const cache = new PreviewCache();
-  const key = previewCacheKey(F1, false, [1], null, undefined, null, [])!;
+  const key = previewCacheKey(F1, false, [1], null, undefined, null, [], [])!;
   cache.set(key, "data:png");
   expect(cache.get(key)).toBe("data:png");
 });

@@ -44,6 +44,12 @@ export function previewRenderSpec(
   documentView: boolean;
   lineColorIds: number[] | null;
   edgeColourIds: number[];
+  /**
+   * 체크박스가 실제로 내보내기에 포함시킨 목록. 그대로 되돌려주는 이유는
+   * edgeColourIds와 같다 — App.tsx의 준비 큐가 renderPreview 호출에 이
+   * 값을 그대로 다시 쓴다(engine.ts의 renderPreview 주석 참고).
+   */
+  includedIds: number[];
   key: string | null;
 } {
   const visibleIds = visibleIdsForPreview(tree, includedIds, previewHiddenIds, soloIds);
@@ -53,7 +59,10 @@ export function previewRenderSpec(
     documentView,
     lineColorIds: lineColorIdsFor(visibleIds, lineColor, matchedIds),
     edgeColourIds,
-    key: previewCacheKey(file, documentView, visibleIds, lineColor, matchedIds, edgeLines, edgeColourIds),
+    includedIds,
+    key: previewCacheKey(
+      file, documentView, visibleIds, lineColor, matchedIds, edgeLines, edgeColourIds, includedIds
+    ),
   };
 }
 
@@ -111,7 +120,17 @@ export function previewCacheKey(
   matchedIds: number[] | undefined,
   edgeLines: EdgeLines | null,
   /** 색 경계선 생성의 수동 지정. previewRenderSpec의 같은 이름 인자 참고. */
-  edgeColourIds: number[]
+  edgeColourIds: number[],
+  /**
+   * 체크박스가 실제로 내보내기에 포함시킨 목록(engine.ts의 renderPreview
+   * 주석 참고). visibleIds로는 대신할 수 없다 — visibleIds는 이 값과 눈
+   * (previewHiddenIds)의 교집합이라, "체크됐지만 눈으로 숨김"과 "체크
+   * 해제"가 둘 다 그 레이어를 visibleIds에서 지운다. 그런데 엔진의
+   * manual_views는 이 값 자체(체크 여부)로 "이미 있는 라인"을 가르므로, 두
+   * 경우가 visibleIds는 같아도 그려지는 그림은 다를 수 있다 — 키가 그 차이를
+   * 못 담으면 하나가 다른 하나의 캐시를 그대로 돌려준다.
+   */
+  includedIds: number[]
 ): string | null {
   if (file.mtime === undefined) return null;
   // 문서 보기는 visibleIds/lineColor/edgeLines를 쓰지 않지만 키에 남겨도 해롭지
@@ -131,10 +150,11 @@ export function previewCacheKey(
   // 여기서까지 수치를 키에 실으면, 꺼둔 프리셋의 수치를 손보기만 해도 무관한
   // 캐시 항목이 몽땅 버려진다 — 상수 하나로 뭉뚱그린다.
   //
-  // edgeColourIds(수동 지정)도 켜짐 여부와 별개로 무조건 담는다 — EdgeLines가
-  // 꺼져 있는 동안에도 값을 남긴다. 지정을 바꾼 뒤 곧바로 켜는 순서로 쓰일 수
-  // 있어서, 꺼진 동안의 지정 변경을 키가 놓치면 켠 순간 옛 그림을 재사용하게
-  // 된다.
+  // edgeColourIds(수동 지정)와 includedIds(체크박스)는 둘 다 켜짐 여부와
+  // 별개로 무조건 담는다 — EdgeLines가 꺼져 있는 동안에도 값을 남긴다.
+  // 지정/체크를 바꾼 뒤 곧바로 켜는 순서로 쓰일 수 있어서, 꺼진 동안의 변경을
+  // 키가 놓치면 켠 순간 옛 그림을 재사용하게 된다. 위 주석대로 includedIds는
+  // visibleIds로 대신할 수 없으므로 따로 싣는다.
   const lineColorIds = lineColorIdsFor(visibleIds, lineColor, matchedIds);
   const edgeLinesKey = edgeLines !== null && edgeLines.enabled ? JSON.stringify(edgeLines) : "off";
   return [
@@ -146,6 +166,7 @@ export function previewCacheKey(
     visibleIds.join(","),
     edgeLinesKey,
     edgeColourIds.join(","),
+    includedIds.join(","),
   ].join("\n");
 }
 

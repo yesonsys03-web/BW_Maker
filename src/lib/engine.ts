@@ -130,6 +130,15 @@ export async function autoMergePreview(
  * (`edgeLines.manualColourIds`)은 여기서, payload를 만드는 이 자리에서만
  * 합친다. edgeLines가 꺼져 있으면(null) 엔진이 애초에 안 읽으므로 지정이
  * 있어도 그대로 null을 보낸다 — 기능이 꺼진 상태를 payload로 흉내내지 않는다.
+ *
+ * `includedIds`는 체크박스가 실제로 내보내기에 포함시킨 레이어 목록
+ * (opsReducer.ts의 같은 이름, exportPsd가 받는 것과 같은 값) — 엔진의
+ * `character.manual_views`가 "이미 있는 라인"을 판단하는 기준이다. 여기
+ * 넘기는 `visibleLayerIds`는 눈(previewHiddenIds)까지 반영한 **그리기용**
+ * 목록이라 다르다: 체크는 됐지만 눈으로 숨긴 라인은 visibleLayerIds에 없어도
+ * includedIds에는 있어야 한다 — 그래야 미리보기가 export와 같은 라인을
+ * 뺀다(rpc.py의 render_preview 주석 참고). 생략하면(null) 엔진은 이전
+ * 동작(세션 전체 레이어로 근사)으로 물러난다.
  */
 export async function renderPreview(
   sessionId: number,
@@ -138,7 +147,8 @@ export async function renderPreview(
   lineColor: string | null = null,
   lineColorIds: number[] | null = null,
   edgeLines: EdgeLines | null = null,
-  manualColourIds: number[] | null = null
+  manualColourIds: number[] | null = null,
+  includedIds: number[] | null = null
 ): Promise<{ pngPath: string }> {
   return callEngine("render_preview", {
     sessionId,
@@ -147,6 +157,7 @@ export async function renderPreview(
     lineColor,
     lineColorIds,
     edgeLines: edgeLines ? { ...edgeLines, manualColourIds: manualColourIds ?? [] } : null,
+    includedIds,
   }) as Promise<{ pngPath: string }>;
 }
 

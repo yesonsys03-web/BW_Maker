@@ -385,3 +385,61 @@ def test_render_preview_manual_path_treats_a_checked_line_as_covering_regardless
         "눈으로 숨긴 라인이 포함 안 된 것으로 보여, 그 라인이 이미 덮는 자리에도 "
         "획을 겹쳐 그리게 된다"
     )
+
+
+def test_render_preview_given_the_export_inclusion_list_agrees_with_export_on_which_lines_it_subtracts(
+    tmp_path, monkeypatch
+):
+    # 위 테스트는 includedIds를 안 주는 옛 호출이 여전히 전체 세션 근사로
+    # 동작하는지를 지킨다. 이 테스트는 새 인자 자체가 실제로 쓰이는지를 지킨다
+    # — includedIds가 오면 render_preview는 그것을 그대로 manual_views에
+    # 넘겨야 하고, 그 결과(체크된 라인은 빼고 체크 해제한 라인은 안 빼는 것)가
+    # export_psd가 만드는 것과 같아야 한다(설계 배경 참고). 체크 해제한 라인을
+    # 빼지 않으면 미리보기가 export보다 획이 많아지고, 실수로 계속 빼면
+    # 미리보기가 export보다 획이 적어진다 — 둘 다 이 기능이 고치려는 그 차이다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+    front_colour_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "dark" and l.parent.name == "COLORS" and l.parent.parent.name == "FRONT"
+    )
+
+    captured = []
+    real_manual_views = rpc.manual_views
+
+    def spy(session, colour_ids, included_ids):
+        views = real_manual_views(session, colour_ids, included_ids)
+        captured.append(views)
+        return views
+
+    monkeypatch.setattr(rpc, "manual_views", spy)
+
+    # 체크됨: export_psd라면 이 라인이 이미 있는 것으로 보고 빼야 한다.
+    engine.render_preview(
+        sid, visibleLayerIds=[front_line_id],
+        edgeLines={"enabled": True, "manualColourIds": [front_colour_id]},
+        includedIds=[front_line_id],
+    )
+    front_view = next(v for v in captured[-1] if v["name"] == "FRONT")
+    assert front_view["lineIds"] == [front_line_id], (
+        "체크된 라인을 빼지 않았다 — 미리보기가 export보다 획이 많아진다"
+    )
+
+    # 체크 해제됨: export_psd라면 이 라인은 산출물에 없으므로 빼면 안 된다.
+    engine.render_preview(
+        sid, visibleLayerIds=[front_line_id],
+        edgeLines={"enabled": True, "manualColourIds": [front_colour_id]},
+        includedIds=[],
+    )
+    front_view = next(v for v in captured[-1] if v["name"] == "FRONT")
+    assert front_view["lineIds"] == [], (
+        "체크 해제한 라인을 그대로 뺐다 — 그 라인은 실제로는 export에 없으므로 "
+        "미리보기가 export보다 획이 적어진다"
+    )

@@ -541,7 +541,8 @@ function AppShell() {
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
                 : renderPreview(s, plan.visibleIds, PREVIEW_MAX_SIZE,
                                 presetRef.current?.lineColor ?? null, plan.lineColorIds,
-                                presetRef.current?.edgeLines ?? null, plan.edgeColourIds),
+                                presetRef.current?.edgeLines ?? null, plan.edgeColourIds,
+                                plan.includedIds),
             (r) => {
               sid = r.sessionId;
               refreshSession(path, r);

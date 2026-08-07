@@ -115,6 +115,13 @@ interface RenderSpec {
   edgeLines: EdgeLines | null;
   /** 색 경계선 생성의 수동 지정(위 PreviewCanvasProps.edgeColourIds 참고). */
   edgeColourIds: number[];
+  /**
+   * 체크박스가 실제로 내보내기에 포함시킨 목록(위 PreviewCanvasProps.includedIds,
+   * engine.ts의 renderPreview 주석 참고) — manual_views가 "이미 있는 라인"을
+   * 가르는 기준이다. visibleIds(그리기용, 눈까지 반영)와는 다른 값이라 따로
+   * 싣는다.
+   */
+  includedIds: number[];
   /** 결과를 담을 캐시 키. 만들 수 없으면(mtime 미상) null. */
   cacheKey: string | null;
 }
@@ -392,7 +399,7 @@ export function PreviewCanvas({
     // 합성을 처음부터 다시 시킨다. 키에 sessionId가 들어 있으므로(previewCache
     // 참조) 살아 있는 바로 그 세션이 만든 그림만 재사용된다.
     const cacheKey = previewCacheKey(
-      { path, mtime }, documentView, visibleIds, lineColor, matchedIds, edgeLines, edgeColourIds
+      { path, mtime }, documentView, visibleIds, lineColor, matchedIds, edgeLines, edgeColourIds, includedIds
     );
     if (cacheKey) {
       const cached = cache.get(cacheKey);
@@ -410,6 +417,7 @@ export function PreviewCanvas({
       lineColorIds: lineColorIdsFor(visibleIds, lineColor, matchedIds),
       edgeLines,
       edgeColourIds,
+      includedIds,
       cacheKey,
     };
 
@@ -448,7 +456,7 @@ export function PreviewCanvas({
               next.documentView
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
                 : renderPreview(s, next.visibleIds, PREVIEW_MAX_SIZE, next.lineColor,
-                                next.lineColorIds, next.edgeLines, next.edgeColourIds),
+                                next.lineColorIds, next.edgeLines, next.edgeColourIds, next.includedIds),
             (result) => onSessionRefreshed(next.path, result)
           );
           const dataUrl = await loadPngDataUrl(pngPath);
@@ -481,7 +489,7 @@ export function PreviewCanvas({
     // visibleIds 대신 visibleKey에 의존한다 — 키가 같으면 내용이 같으므로 효과가
     // 들고 있는 배열이 한 세대 옛것이어도 렌더 결과는 동일하다. 위 visibleKey의
     // 주석에 왜 배열 정체로는 안 되는지 적어두었다.
-  }, [path, mtime, visibleKey, documentView, lineColor, matchedIds, edgeLines, edgeColourIds, paused, cache, showImage, onRenderingChange, onSessionRefreshed, onError]);
+  }, [path, mtime, visibleKey, documentView, lineColor, matchedIds, edgeLines, edgeColourIds, includedIds, paused, cache, showImage, onRenderingChange, onSessionRefreshed, onError]);
 
   // Callback ref (not a plain ref + mount-only effect): the viewport div only
   // exists once sessionId/visibleIds make this component render past the
