@@ -18,6 +18,17 @@ def make_image(name, value, x, y, w, h, alpha=255, visible=True, blend=None):
     )
 
 
+def make_rgb_image(name, rgb, x, y, w, h, alpha=255, visible=True):
+    """채널마다 다른 값을 넣는 픽셀 레이어. 색 경계 테스트에 쓴다 —
+    make_image는 세 채널이 같은 값이라 색이 갈리는 상황을 만들 수 없다."""
+    ch = {i: np.full((h, w), rgb[i], np.uint8) for i in range(3)}
+    ch[-1] = np.full((h, w), alpha, np.uint8)
+    return nested_layers.Image(
+        name=name, channels=ch, top=y, left=x, opacity=255, visible=visible,
+        blend_mode=enums.BlendMode.normal,
+    )
+
+
 def make_image16(name, value, x, y, w, h, alpha=65535, visible=True):
     """16비트 채널을 든 레이어. 실제 납품 폴더에 16비트 PSD가 섞여 있다."""
     px = np.full((h, w), value, np.uint16)
