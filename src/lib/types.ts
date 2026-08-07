@@ -98,6 +98,26 @@ export interface Preset {
    * engine/psd_engine/matching.py의 DEFAULT_EXCLUDE_TOKENS와 기본값이 같아야 한다.
    */
   excludeTokens: string[];
+  /**
+   * 캐릭터 모델 전용 색 경계선 생성. 색으로만 갈려 있고 선이 없는 경계에 획을
+   * 만들어 그 뷰의 라인 레이어에 합친다. 기본은 꺼짐이라 BG 프리셋은 영향받지 않는다.
+   * 기본값의 근거는 docs/superpowers/specs/2026-08-07-character-colour-boundary-lines-design.md 7절.
+   */
+  edgeLines: EdgeLines;
+}
+
+export interface EdgeLines {
+  enabled: boolean;
+  /** 이웃과의 RGB 최대 채널 차가 이보다 크면 색이 바뀐 것으로 본다. */
+  threshold: number;
+  /** 기존 선을 이만큼(반지름 px) 부풀려 뺀다. */
+  gap: number;
+  /** 획 굵기(px). */
+  width: number;
+  /** 이보다 짧은 조각은 점으로 보고 버린다. */
+  minLength: number;
+  /** 기존 라인으로 칠 알파 문턱. 라인이 반투명이 많아 낮게 잡는다. */
+  lineAlpha: number;
 }
 
 export interface EngineError {

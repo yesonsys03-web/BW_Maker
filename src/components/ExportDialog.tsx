@@ -192,7 +192,7 @@ export function ExportDialog({
         (sid) =>
           exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true,
                     normalizeColor ? lineColor : null, splitLayers, outputFormat,
-                    matchedIds ?? null),
+                    matchedIds ?? null, preset?.edgeLines ?? null),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);

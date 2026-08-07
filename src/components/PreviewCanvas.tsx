@@ -22,7 +22,7 @@ import {
 import { lineColorIdsFor, previewCacheKey, type PreviewCache } from "../lib/previewCache";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { FileStatus } from "../state/appStore";
-import type { EngineError, OpenResult, TreeNode } from "../lib/types";
+import type { EdgeLines, EngineError, OpenResult, TreeNode } from "../lib/types";
 
 interface PreviewCanvasProps {
   sessionId: number | undefined;
@@ -49,6 +49,12 @@ interface PreviewCanvasProps {
    * 원본 색으로 남아야 하기 때문이다(previewCache의 lineColorIdsFor 참고).
    */
   matchedIds: number[] | undefined;
+  /**
+   * 선택된 프리셋의 색 경계선 생성 설정. 켜져 있으면 미리보기도 내보내기 결과와
+   * 같은 그림이어야 하므로 여기에 반영한다 — 캐시 키에도 들어간다(아래
+   * RenderSpec.edgeLines), 설정이 바뀌면 그림이 달라지기 때문이다.
+   */
+  edgeLines: EdgeLines | null;
   /**
    * 로드 큐가 도는 동안 참. 그동안은 렌더를 걸지 않는다.
    *
@@ -96,6 +102,8 @@ interface RenderSpec {
   lineColor: string | null;
   /** 색 통일을 걸 레이어(previewCache의 lineColorIdsFor). null이면 전부. */
   lineColorIds: number[] | null;
+  /** 색 경계선 생성 설정. null이면 꺼짐. */
+  edgeLines: EdgeLines | null;
   /** 결과를 담을 캐시 키. 만들 수 없으면(mtime 미상) null. */
   cacheKey: string | null;
 }
@@ -121,6 +129,7 @@ export function PreviewCanvas({
   soloIds,
   lineColor,
   matchedIds,
+  edgeLines,
   paused,
   cache,
   onRenderingChange,
@@ -370,7 +379,7 @@ export function PreviewCanvas({
     // 효과가 화면의 이미지를 버리기 때문에, 이게 없으면 돌아올 때마다 같은
     // 합성을 처음부터 다시 시킨다. 키에 sessionId가 들어 있으므로(previewCache
     // 참조) 살아 있는 바로 그 세션이 만든 그림만 재사용된다.
-    const cacheKey = previewCacheKey({ path, mtime }, documentView, visibleIds, lineColor, matchedIds);
+    const cacheKey = previewCacheKey({ path, mtime }, documentView, visibleIds, lineColor, matchedIds, edgeLines);
     if (cacheKey) {
       const cached = cache.get(cacheKey);
       if (cached !== undefined) {
@@ -385,6 +394,7 @@ export function PreviewCanvas({
     const spec: RenderSpec = {
       path, visibleIds, documentView, lineColor,
       lineColorIds: lineColorIdsFor(visibleIds, lineColor, matchedIds),
+      edgeLines,
       cacheKey,
     };
 
@@ -423,7 +433,7 @@ export function PreviewCanvas({
               next.documentView
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
                 : renderPreview(s, next.visibleIds, PREVIEW_MAX_SIZE, next.lineColor,
-                                next.lineColorIds),
+                                next.lineColorIds, next.edgeLines),
             (result) => onSessionRefreshed(next.path, result)
           );
           const dataUrl = await loadPngDataUrl(pngPath);
@@ -456,7 +466,7 @@ export function PreviewCanvas({
     // visibleIds 대신 visibleKey에 의존한다 — 키가 같으면 내용이 같으므로 효과가
     // 들고 있는 배열이 한 세대 옛것이어도 렌더 결과는 동일하다. 위 visibleKey의
     // 주석에 왜 배열 정체로는 안 되는지 적어두었다.
-  }, [path, mtime, visibleKey, documentView, lineColor, matchedIds, paused, cache, showImage, onRenderingChange, onSessionRefreshed, onError]);
+  }, [path, mtime, visibleKey, documentView, lineColor, matchedIds, edgeLines, paused, cache, showImage, onRenderingChange, onSessionRefreshed, onError]);
 
   // Callback ref (not a plain ref + mount-only effect): the viewport div only
   // exists once sessionId/visibleIds make this component render past the

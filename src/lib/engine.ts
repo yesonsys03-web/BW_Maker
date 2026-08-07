@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   MergeRule,
+  EdgeLines,
   EngineError,
   OpenResult,
   Operation,
@@ -126,7 +127,8 @@ export async function renderPreview(
   visibleLayerIds: number[],
   maxSize: number,
   lineColor: string | null = null,
-  lineColorIds: number[] | null = null
+  lineColorIds: number[] | null = null,
+  edgeLines: EdgeLines | null = null
 ): Promise<{ pngPath: string }> {
   return callEngine("render_preview", {
     sessionId,
@@ -134,6 +136,7 @@ export async function renderPreview(
     maxSize,
     lineColor,
     lineColorIds,
+    edgeLines,
   }) as Promise<{ pngPath: string }>;
 }
 
@@ -180,7 +183,8 @@ export async function exportPsd(
   lineColor: string | null = null,
   splitLayers: boolean = false,
   outputFormat: OutputFormat = "psd",
-  lineColorIds: number[] | null = null
+  lineColorIds: number[] | null = null,
+  edgeLines: EdgeLines | null = null
 ): Promise<ExportResult> {
   return callEngine("export_psd", {
     sessionId,
@@ -195,6 +199,7 @@ export async function exportPsd(
     splitLayers,
     outputFormat,
     lineColorIds,
+    edgeLines,
   }) as Promise<ExportResult>;
 }
 

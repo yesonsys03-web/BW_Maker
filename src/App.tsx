@@ -472,7 +472,8 @@ function AppShell() {
       ops.previewHiddenIds,
       ops.soloIds,
       presetRef.current?.lineColor ?? null,
-      matchedIdsByPathRef.current[file.path]
+      matchedIdsByPathRef.current[file.path],
+      presetRef.current?.edgeLines ?? null
     );
   }, []);
 
@@ -537,7 +538,8 @@ function AppShell() {
               plan.documentView
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
                 : renderPreview(s, plan.visibleIds, PREVIEW_MAX_SIZE,
-                                presetRef.current?.lineColor ?? null, plan.lineColorIds),
+                                presetRef.current?.lineColor ?? null, plan.lineColorIds,
+                                presetRef.current?.edgeLines ?? null),
             (r) => {
               sid = r.sessionId;
               refreshSession(path, r);
@@ -796,6 +798,7 @@ function AppShell() {
           soloIds={ops.soloIds}
           lineColor={selectedPreset?.lineColor ?? null}
           matchedIds={state.activePath ? state.matchedIdsByPath[state.activePath] : undefined}
+          edgeLines={selectedPreset?.edgeLines ?? null}
           paused={loading}
           cache={previewCacheRef.current}
           onRenderingChange={handleCanvasRendering}

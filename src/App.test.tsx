@@ -415,6 +415,7 @@ function previewCanvasProps(overrides: {
     soloIds: [] as number[],
     lineColor: null,
     matchedIds: overrides.matchedIds,
+    edgeLines: null,
     paused: false,
     cache: new PreviewCache(),
     onRenderingChange: overrides.onRenderingChange ?? vi.fn(),

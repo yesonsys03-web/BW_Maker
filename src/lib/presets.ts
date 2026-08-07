@@ -1,11 +1,21 @@
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { exists, mkdir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
-import type { OutputFormat, Preset } from "./types";
+import type { EdgeLines, OutputFormat, Preset } from "./types";
 
 const PRESETS_FILENAME = "presets.json";
 
 /** 색 지정 레이어를 걸러내는 기본 어휘. 엔진 DEFAULT_EXCLUDE_TOKENS와 같다. */
 export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"];
+
+/**
+ * 색 경계선 생성 기본값. 엔진 EDGE_DEFAULTS(engine/psd_engine/edge_lines.py)와
+ * threshold/gap/width/minLength/lineAlpha가 같다 — enabled만 TS 쪽에만 있다
+ * (엔진은 edgeLines.get("enabled")로 켜짐 여부를 읽는다). 기본은 꺼짐이라
+ * BG 프리셋과 이미 저장된 모든 프리셋은 이 기능 도입 전과 똑같이 동작한다.
+ */
+export const DEFAULT_EDGE_LINES: EdgeLines = {
+  enabled: false, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64,
+};
 
 export const DEFAULT_PRESET: Preset = {
   name: "line 추출",
@@ -23,6 +33,7 @@ export const DEFAULT_PRESET: Preset = {
   splitLayers: false,
   outputFormat: "psd",
   excludeTokens: [...DEFAULT_EXCLUDE_TOKENS],
+  edgeLines: { ...DEFAULT_EDGE_LINES },
 };
 
 /** 색 통일을 켤 때 처음 제안하는 색. 라인 아트의 기본값. */
@@ -148,6 +159,18 @@ function validatePreset(value: unknown, index: number): Preset {
   if (v.outputFormat !== undefined && !OUTPUT_FORMATS.has(v.outputFormat as string)) {
     throw new Error(`${prefix}.outputFormat: "psd", "png", "jpg" 중 하나가 아닙니다.`);
   }
+  // edgeLines도 나중에 추가된 항목이라 그 이전 presets.json에는 없다. 없는 것은
+  // 꺼짐으로 읽는다 — 구버전 파일은 잘못된 것이 아니다. 반대로 들어있는데 형식이
+  // 어긋나면 통과시키지 않는다.
+  const edge = { ...DEFAULT_EDGE_LINES, ...((v.edgeLines as object | undefined) ?? {}) };
+  if (typeof edge.enabled !== "boolean") {
+    throw new Error(`${prefix}.edgeLines.enabled: boolean이 아닙니다.`);
+  }
+  for (const key of ["threshold", "gap", "width", "minLength", "lineAlpha"] as const) {
+    if (typeof edge[key] !== "number" || !Number.isFinite(edge[key]) || edge[key] < 0) {
+      throw new Error(`${prefix}.edgeLines.${key}: 0 이상의 숫자가 아닙니다.`);
+    }
+  }
 
   return {
     name: v.name,
@@ -169,6 +192,7 @@ function validatePreset(value: unknown, index: number): Preset {
     splitLayers: (v.splitLayers as boolean | undefined) ?? false,
     outputFormat: (v.outputFormat as OutputFormat | undefined) ?? "psd",
     excludeTokens: (v.excludeTokens as string[] | undefined) ?? [...DEFAULT_EXCLUDE_TOKENS],
+    edgeLines: edge,
   };
 }
 
@@ -176,6 +200,18 @@ function validatePreset(value: unknown, index: number): Preset {
 function validatePresetList(value: unknown): Preset[] {
   if (!Array.isArray(value)) throw new Error("presets.json: 최상위 값이 배열이 아닙니다.");
   return value.map((item, index) => validatePreset(item, index));
+}
+
+/**
+ * Parses and validates a raw presets.json string into Preset[], with no
+ * filesystem access. `loadPresets` below is this plus the disk read — pulled
+ * apart so validation rules (esp. the "missing key is fine, wrong-shaped key
+ * throws" family) can be exercised directly without going through Tauri fs
+ * mocks for every case.
+ */
+export function parsePresets(raw: string): Preset[] {
+  const parsed: unknown = JSON.parse(raw);
+  return validatePresetList(parsed);
 }
 
 /**
@@ -189,8 +225,7 @@ export async function loadPresets(): Promise<Preset[]> {
   const filePath = await presetsFilePath();
   if (!(await exists(filePath))) return [DEFAULT_PRESET];
   const raw = await readTextFile(filePath);
-  const parsed: unknown = JSON.parse(raw);
-  return validatePresetList(parsed);
+  return parsePresets(raw);
 }
 
 /**

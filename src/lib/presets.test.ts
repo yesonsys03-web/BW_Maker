@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   writeTextFile: (...a: unknown[]) => writeTextFileMock(...a),
 }));
 
-import { DEFAULT_PRESET, isValidLineColor, loadPresets, savePresets } from "./presets";
+import { DEFAULT_PRESET, isValidLineColor, loadPresets, parsePresets, savePresets } from "./presets";
 import type { Preset } from "./types";
 
 const APP_DATA_DIR = "/mock/appdata";
@@ -53,6 +53,7 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     splitLayers: false,       // 기본은 한 파일에 모두
     excludeTokens: ["col", "colour", "color"],  // line col 류는 색 지정이다
     outputFormat: "psd",      // 기본은 원본 따름
+    edgeLines: { enabled: false, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64 },  // 기본은 꺼짐
   });
 });
 
@@ -122,6 +123,7 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
     splitLayers: true,
     outputFormat: "jpg",
     excludeTokens: ["fx", "temp"],
+    edgeLines: { enabled: true, threshold: 30, gap: 6, width: 7, minLength: 10, lineAlpha: 70 },
   };
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([wellFormed]));
@@ -353,4 +355,24 @@ test("loadPresets rejects an unknown outputFormat rather than silently defaultin
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...DEFAULT_PRESET, outputFormat: "webp" }]));
 
   await expect(loadPresets()).rejects.toThrow(/outputFormat/);
+});
+
+test("a preset saved before this feature reads as edge lines off", () => {
+  // lineColor·outputFormat 때와 같은 규칙 — 구버전 파일은 잘못된 것이 아니다.
+  const { edgeLines, ...withoutEdges } = DEFAULT_PRESET;
+  const parsed = parsePresets(JSON.stringify([withoutEdges]));
+  expect(parsed[0].edgeLines.enabled).toBe(false);
+  expect(parsed[0].edgeLines.threshold).toBe(24);
+});
+
+test("edge line settings round-trip", () => {
+  const preset = { ...DEFAULT_PRESET, edgeLines: { ...DEFAULT_PRESET.edgeLines, enabled: true, width: 7 } };
+  const parsed = parsePresets(JSON.stringify([preset]));
+  expect(parsed[0].edgeLines.enabled).toBe(true);
+  expect(parsed[0].edgeLines.width).toBe(7);
+});
+
+test("a non-numeric edge line setting is rejected rather than coerced", () => {
+  const bad = { ...DEFAULT_PRESET, edgeLines: { ...DEFAULT_PRESET.edgeLines, width: "굵게" } };
+  expect(() => parsePresets(JSON.stringify([bad]))).toThrow(/edgeLines\.width/);
 });

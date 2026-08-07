@@ -1,5 +1,5 @@
 import { isDocumentView, visibleIdsForPreview } from "./preview";
-import type { TreeNode } from "./types";
+import type { EdgeLines, TreeNode } from "./types";
 
 /**
  * 렌더된 미리보기 이미지(data URL) 캐시 상한(문자 수). 초과하면 LRU로 버린다 —
@@ -28,7 +28,8 @@ export function previewRenderSpec(
   previewHiddenIds: number[],
   soloIds: number[],
   lineColor: string | null,
-  matchedIds: number[] | undefined
+  matchedIds: number[] | undefined,
+  edgeLines: EdgeLines | null
 ): {
   visibleIds: number[];
   documentView: boolean;
@@ -41,7 +42,7 @@ export function previewRenderSpec(
     visibleIds,
     documentView,
     lineColorIds: lineColorIdsFor(visibleIds, lineColor, matchedIds),
-    key: previewCacheKey(file, documentView, visibleIds, lineColor, matchedIds),
+    key: previewCacheKey(file, documentView, visibleIds, lineColor, matchedIds, edgeLines),
   };
 }
 
@@ -96,15 +97,21 @@ export function previewCacheKey(
   documentView: boolean,
   visibleIds: number[],
   lineColor: string | null,
-  matchedIds: number[] | undefined
+  matchedIds: number[] | undefined,
+  edgeLines: EdgeLines | null
 ): string | null {
   if (file.mtime === undefined) return null;
-  // 문서 보기는 visibleIds/lineColor를 쓰지 않지만 키에 남겨도 해롭지 않다
-  // (같은 입력이면 같은 키다). 빠뜨렸을 때만 문제가 된다.
+  // 문서 보기는 visibleIds/lineColor/edgeLines를 쓰지 않지만 키에 남겨도 해롭지
+  // 않다(같은 입력이면 같은 키다). 빠뜨렸을 때만 문제가 된다.
   //
   // 색 통일 **대상**도 키에 든다. 같은 레이어를 같은 색 설정으로 그려도 어느
   // 것에 색을 거느냐에 따라 그림이 다르기 때문이다 — 프리셋을 적용하기 전후가
   // 정확히 그 경우다.
+  //
+  // edgeLines도 켜짐 여부와 다섯 수치 전부가 그림을 바꾼다 — JSON.stringify로
+  // 통째로 담는다. 켰다 껐다 하거나 프리셋을 바꿨는데 캐시가 이전 그림을 그대로
+  // 돌려주면, 아티스트는 계속 옛 미리보기를 보면서 다른 설정을 확인했다고
+  // 믿게 된다. 느린 편이 그보다 낫다.
   const lineColorIds = lineColorIdsFor(visibleIds, lineColor, matchedIds);
   return [
     file.path,
@@ -113,6 +120,7 @@ export function previewCacheKey(
     lineColor ?? "",
     lineColorIds === null ? "all" : lineColorIds.join(","),
     visibleIds.join(","),
+    JSON.stringify(edgeLines),
   ].join("\n");
 }
 

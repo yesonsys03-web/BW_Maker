@@ -69,6 +69,10 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   // 그대로 남는다. 저장 시점에만 lineColor(문자열 | null)로 합친다.
   const [normalizeColor, setNormalizeColor] = useState(preset.lineColor !== null);
   const [lineColor, setLineColor] = useState(preset.lineColor ?? DEFAULT_LINE_COLOR);
+  // 색 경계선 생성은 켜짐 여부만 이 대화상자에 노출한다. 나머지 다섯 수치는
+  // 실측에서 나온 기본값이라 preset.edgeLines에 그대로 남고, 저장 시 enabled만
+  // 덮어써서 합친다.
+  const [edgeEnabled, setEdgeEnabled] = useState(preset.edgeLines.enabled);
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [valueError, setValueError] = useState<string | null>(null);
@@ -123,6 +127,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       lineColor: normalizeColor ? lineColor : null,
       splitLayers,
       outputFormat,
+      edgeLines: { ...preset.edgeLines, enabled: edgeEnabled },
     };
   }
 
@@ -350,6 +355,20 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           내보낼 때 <b>규칙에 걸린 라인 레이어</b>의 색을 한 색으로 덮습니다. 손으로 체크해 넣은
           레이어(색 레이어 등)는 원본 색 그대로 나갑니다. 알파는 그대로 두므로 선 가장자리의
           안티에일리어싱은 보존됩니다. 꺼두면 모두 원본 색을 씁니다.
+        </p>
+
+        <label className="preset-checkbox">
+          <input
+            type="checkbox"
+            checked={edgeEnabled}
+            onChange={(e) => setEdgeEnabled(e.currentTarget.checked)}
+          />
+          <span>색 경계선 생성 (캐릭터 모델)</span>
+        </label>
+        <p className="preset-hint">
+          색으로만 갈려 있고 선이 없는 경계에 획을 만들어 그 뷰의 라인 레이어에 합칩니다.
+          이미 선이 있는 자리에는 긋지 않습니다. 배경(BG) 파일에는 쓰지 마세요 — 뷰·색 그룹
+          구조가 있는 캐릭터 모델 전용입니다.
         </p>
 
         <div className="modal-actions">
