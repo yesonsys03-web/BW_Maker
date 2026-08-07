@@ -7,6 +7,7 @@
 scipy를 쓰지 않는다(엔진 venv에 없다). 모폴로지는 PIL, 연결 요소는 직접 구현한다.
 """
 import numpy as np
+from PIL import Image, ImageFilter
 
 #: 실측에 근거한 기본값. 설계 문서 7절 참고.
 EDGE_DEFAULTS = {
@@ -48,3 +49,119 @@ def colour_change(rgba, threshold):
             mask[:, :-1] |= hit
             np.copyto(colour[:, :-1], darker, where=hit[..., None])
     return mask, colour
+
+
+def _morph(mask, size, grow):
+    """PIL로 하는 팽창/침식. size는 홀수여야 한다."""
+    if size <= 1:
+        return mask
+    size = size if size % 2 else size + 1
+    f = ImageFilter.MaxFilter(size) if grow else ImageFilter.MinFilter(size)
+    return np.array(Image.fromarray((mask * 255).astype(np.uint8)).filter(f)) > 127
+
+
+def subtract_lines(mask, line_alpha, gap, line_alpha_threshold):
+    """
+    이미 선이 있는 자리를 뺀다.
+
+    알파 문턱으로 먼저 거르는 것이 중요하다. LINES는 불투명 픽셀의 79.7%가
+    반투명이라 "0이 아니면 선"으로 치면 흐린 자국까지 선이 되어, 그 아래 살아 있어야
+    할 색 경계가 통째로 사라진다.
+
+    gap은 반지름이다 — 선 굵기의 절반쯤을 잡아야 안티에일리어싱 자락까지 덮인다.
+    """
+    lines = line_alpha > line_alpha_threshold
+    if gap > 0:
+        lines = _morph(lines, gap * 2 + 1, grow=True)
+    return mask & ~lines
+
+
+def label_components(mask):
+    """
+    8-이웃 연결 요소. 배경은 0.
+
+    scipy.ndimage.label을 못 쓰므로 직접 훑는다. 대상은 경계 픽셀뿐이라(실측 한 뷰에
+    4천 개 수준) 파이썬 반복으로도 부담이 없다 — 캔버스 전체를 도는 것이 아니다.
+    """
+    labels = np.zeros(mask.shape, np.int32)
+    h, w = mask.shape
+    count = 0
+    ys, xs = np.nonzero(mask)
+    for sy, sx in zip(ys.tolist(), xs.tolist()):
+        if labels[sy, sx]:
+            continue
+        count += 1
+        stack = [(sy, sx)]
+        labels[sy, sx] = count
+        while stack:
+            y, x = stack.pop()
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not labels[ny, nx]:
+                        labels[ny, nx] = count
+                        stack.append((ny, nx))
+    return labels, count
+
+
+def drop_small(mask, labels, count, min_length):
+    """
+    픽셀 수가 min_length 미만인 조각을 버린다.
+
+    경계는 1px 폭이라 픽셀 수가 곧 길이에 가깝다. 길이를 따로 재지 않는 이유다.
+    """
+    if min_length <= 1 or count == 0:
+        return mask
+    sizes = np.bincount(labels.ravel(), minlength=count + 1)
+    keep = np.zeros(count + 1, bool)
+    keep[1:] = sizes[1:] >= min_length
+    return keep[labels]
+
+
+def stroke_rgba(mask, labels, colour, width):
+    """
+    경계를 width 굵기의 획으로 만든다. 색은 **조각마다 하나**로 정한다.
+
+    조각별로 색을 고르는 것은 굵히면서 생기는 문제를 피하려는 것이다 — 1px 경계에만
+    있던 색을 어떻게 바깥으로 퍼뜨릴지 정해야 하는데, 거리 변환은 scipy 없이 비싸다.
+    한 조각은 같은 두 색이 만나는 자리이므로 대표색 하나로 충분하다.
+
+    가장자리를 살짝 흐린다. LINES가 79.7% 반투명일 만큼 안티에일리어싱이 강해서,
+    딱딱한 획을 나란히 놓으면 그것만 튄다.
+    """
+    thick = _morph(mask, width, grow=True)
+    alpha = np.array(
+        Image.fromarray((thick * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8))
+    )
+    out = np.zeros(mask.shape + (4,), np.uint8)
+    out[..., 3] = alpha
+    if not thick.any():
+        return out
+    # 조각별 대표색을 굵어진 영역 전체에 칠한다. 굵힌 뒤의 라벨은 원본 라벨을 같은
+    # 크기로 팽창시켜 얻는다 — MaxFilter가 라벨 번호에도 그대로 통한다.
+    grown = np.array(
+        Image.fromarray(labels.astype(np.int32), mode="I").filter(
+            ImageFilter.MaxFilter(width if width % 2 else width + 1))
+    )
+    for lab in range(1, labels.max() + 1):
+        src = labels == lab
+        if not src.any():
+            continue
+        rep = np.median(colour[src], axis=0).astype(np.uint8)
+        out[(grown == lab) & thick, :3] = rep
+    return out
+
+
+def build_overlay(colour_rgba, line_alpha, opts):
+    """
+    합성된 색 그림과 그 자리의 기존 라인 알파에서 획 오버레이를 만든다.
+
+    돌려주는 것은 입력과 같은 크기의 RGBA다. 그릴 것이 없으면 알파가 전부 0이다.
+    """
+    o = {**EDGE_DEFAULTS, **(opts or {})}
+    mask, colour = colour_change(colour_rgba, o["threshold"])
+    mask = subtract_lines(mask, line_alpha, o["gap"], o["lineAlpha"])
+    labels, count = label_components(mask)
+    mask = drop_small(mask, labels, count, o["minLength"])
+    labels, _ = label_components(mask)
+    return stroke_rgba(mask, labels, colour, o["width"])

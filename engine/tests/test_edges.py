@@ -41,3 +41,78 @@ def test_colour_change_reports_the_darker_side_colour():
     rgba = _rgba([[light, light, dark, dark]] * 3)
     mask, colour = colour_change(rgba, EDGE_DEFAULTS["threshold"])
     assert (colour[mask] == dark).all()
+
+
+from psd_engine.edges import (build_overlay, drop_small, label_components,
+                              stroke_rgba, subtract_lines)
+
+
+def test_subtract_lines_removes_the_boundary_that_already_has_a_line():
+    mask = np.zeros((9, 9), bool)
+    mask[4, :] = True                       # 가로 경계 한 줄
+    line = np.zeros((9, 9), np.uint8)
+    line[4, 0:3] = 255                      # 그중 왼쪽 세 칸에만 이미 선이 있다
+    out = subtract_lines(mask, line, gap=1, line_alpha_threshold=64)
+    assert not out[4, 0:3].any(), "이미 선이 있는 자리가 남았다"
+    assert out[4, 6:].any(), "선이 없는 자리까지 지워졌다"
+
+
+def test_subtract_lines_uses_the_alpha_threshold_not_mere_presence():
+    # LINES는 불투명 픽셀의 79.7%가 반투명이다. 문턱을 넘지 못하는 흐린 자국은
+    # 선으로 치지 않아야 그 아래 색 경계가 살아남는다.
+    mask = np.zeros((5, 5), bool)
+    mask[2, :] = True
+    faint = np.full((5, 5), 10, np.uint8)
+    out = subtract_lines(mask, faint, gap=0, line_alpha_threshold=64)
+    assert out[2, :].all()
+
+
+def test_label_components_separates_two_disconnected_runs():
+    mask = np.zeros((5, 9), bool)
+    mask[1, 0:3] = True
+    mask[3, 5:9] = True
+    labels, count = label_components(mask)
+    assert count == 2
+    assert labels[1, 0] != labels[3, 5]
+    assert labels[0, 0] == 0, "배경이 라벨을 받았다"
+
+
+def test_drop_small_removes_specks_and_keeps_real_strokes():
+    mask = np.zeros((5, 20), bool)
+    mask[1, 0:2] = True                     # 2px 점
+    mask[3, 5:18] = True                    # 13px 획
+    labels, count = label_components(mask)
+    out = drop_small(mask, labels, count, min_length=8)
+    assert not out[1, :].any()
+    assert out[3, 5:18].all()
+
+
+def test_stroke_rgba_thickens_the_line_and_carries_the_component_colour():
+    mask = np.zeros((11, 11), bool)
+    mask[5, 2:9] = True
+    colour = np.zeros((11, 11, 3), np.uint8)
+    colour[5, 2:9] = [30, 20, 10]
+    labels, _ = label_components(mask)
+    out = stroke_rgba(mask, labels, colour, width=5)
+    assert out.shape == (11, 11, 4)
+    assert out[3, 5, 3] > 0 and out[7, 5, 3] > 0, "굵어지지 않았다"
+    assert out[0, 0, 3] == 0, "빈 곳까지 칠해졌다"
+    assert tuple(out[5, 5, :3]) == (30, 20, 10)
+
+
+def test_build_overlay_is_empty_when_every_boundary_already_has_a_line():
+    red, black = [200, 20, 40], [10, 10, 10]
+    rgba = _rgba([[red] * 6 + [black] * 6] * 12)
+    line = np.zeros((12, 12), np.uint8)
+    line[:, 3:9] = 255                       # 경계(x=5)를 넉넉히 덮는다
+    out = build_overlay(rgba, line, EDGE_DEFAULTS)
+    assert out[..., 3].max() == 0
+
+
+def test_build_overlay_draws_where_no_line_covers_the_colour_change():
+    red, black = [200, 20, 40], [10, 10, 10]
+    rgba = _rgba([[red] * 6 + [black] * 6] * 20)
+    line = np.zeros((20, 12), np.uint8)
+    out = build_overlay(rgba, line, EDGE_DEFAULTS)
+    assert out[..., 3].max() > 0
+    assert out[10, 5, 3] > 0
