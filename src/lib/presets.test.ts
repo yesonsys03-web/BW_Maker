@@ -1,4 +1,6 @@
 import { beforeEach, expect, test, vi } from "vitest";
+// 엔진 소스를 그대로 읽어 두 언어의 기본값을 대조한다(아래 마지막 테스트).
+import edgesSource from "../../engine/psd_engine/edges.py?raw";
 
 const appDataDirMock = vi.fn();
 const joinMock = vi.fn();
@@ -18,7 +20,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   writeTextFile: (...a: unknown[]) => writeTextFileMock(...a),
 }));
 
-import { DEFAULT_PRESET, isValidLineColor, loadPresets, parsePresets, savePresets } from "./presets";
+import { DEFAULT_EDGE_LINES, DEFAULT_PRESET, isValidLineColor, loadPresets, parsePresets, savePresets } from "./presets";
 import type { Preset } from "./types";
 
 const APP_DATA_DIR = "/mock/appdata";
@@ -53,7 +55,7 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     splitLayers: false,       // 기본은 한 파일에 모두
     excludeTokens: ["col", "colour", "color"],  // line col 류는 색 지정이다
     outputFormat: "psd",      // 기본은 원본 따름
-    edgeLines: { enabled: false, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64 },  // 기본은 꺼짐
+    edgeLines: { enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64 },  // 기본은 꺼짐, width 0 = 자동
   });
 });
 
@@ -390,4 +392,19 @@ test.each([
 ])("a non-object top-level edgeLines (%s) is rejected rather than spread into defaults", (_label, value) => {
   const bad = { ...DEFAULT_PRESET, edgeLines: value };
   expect(() => parsePresets(JSON.stringify([bad]))).toThrow(/edgeLines/);
+});
+
+test("the five numeric edge-line defaults match the engine's EDGE_DEFAULTS", () => {
+  // 이 둘이 갈라지면 조용히 틀린 그림이 나온다. 실제로 갈라진 적이 있다 —
+  // 엔진이 width:0(자동)으로 바뀐 뒤에도 여기가 5로 남아, 프런트가 다섯 수치를
+  // 항상 실어 보내는 탓에 화면에서는 자동이 한 번도 돌지 않았다. 타입도 테스트도
+  // 그걸 잡지 못했다. 두 파일을 직접 대조하는 것만이 잡는다.
+  const body = edgesSource.slice(edgesSource.indexOf("EDGE_DEFAULTS = {"));
+  for (const key of ["threshold", "gap", "width", "minLength", "lineAlpha"] as const) {
+    const m = new RegExp(`"${key}":\\s*(-?\\d+)`).exec(body);
+    expect(m, `engine EDGE_DEFAULTS에 ${key}가 없다`).not.toBeNull();
+    expect(Number(m![1]), `${key}: 엔진과 DEFAULT_EDGE_LINES가 다르다`).toBe(
+      DEFAULT_EDGE_LINES[key],
+    );
+  }
 });

@@ -12,9 +12,14 @@ export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"];
  * threshold/gap/width/minLength/lineAlpha가 같다 — enabled만 TS 쪽에만 있다
  * (엔진은 edgeLines.get("enabled")로 켜짐 여부를 읽는다). 기본은 꺼짐이라
  * BG 프리셋과 이미 저장된 모든 프리셋은 이 기능 도입 전과 똑같이 동작한다.
+ *
+ * `width: 0`은 **자동**이다 — 그 뷰 자신의 라인 굵기에서 유도한다. 이 값들이
+ * 엔진 기본값과 같아야 하는 이유가 여기서 드러난다: 프런트는 다섯 수치를 **항상**
+ * 실어 보내므로, 여기 0이 아닌 값이 있으면 엔진의 자동 판정을 매번 덮어쓴다.
+ * 한동안 여기만 5로 남아 있어서 엔진이 자동을 지원해도 화면에서는 늘 5가 강제됐다.
  */
 export const DEFAULT_EDGE_LINES: EdgeLines = {
-  enabled: false, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64,
+  enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
 };
 
 export const DEFAULT_PRESET: Preset = {
