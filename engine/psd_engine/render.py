@@ -873,7 +873,7 @@ def _preview_tile(session, layer_id, scale):
 
 
 def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=None,
-                   line_color_ids=None):
+                   line_color_ids=None, edge_overlays=None):
     """
     내보내기 결과 미리보기: 선택된 레이어의 픽셀을 문서 순서(아래→위)대로
     알파 합성한다. export_psd가 모든 레이어를 normal/255로 기록하므로 이것이
@@ -915,6 +915,29 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
         if rgb is not None and (ids is None or lid in ids):
             # 캐시된 타일은 건드리지 않는다 — apply_line_color가 사본을 만든다.
             img = Image.fromarray(apply_line_color(np.asarray(img), rgb), "RGBA")
+        canvas.alpha_composite(img, dest=(x0 + sx0, y0 + sy0))
+
+    # 생성된 색 경계 획. 내보내기에서는 라인 엔트리에 합쳐지므로 여기서도 라인과
+    # 같은 자리에 놓이면 되는데, 라인이 스택 맨 위인 경우가 대부분이라 마지막에
+    # 얹는다. 미리보기 배율로 줄여서 얹는다.
+    for overlay in edge_overlays or []:
+        arr = overlay["rgba"]
+        if rgb is not None:
+            arr = apply_line_color(arr, rgb)
+        h, w = arr.shape[:2]
+        x0, y0 = round(overlay["left"] * scale), round(overlay["top"] * scale)
+        tw = max(1, round((overlay["left"] + w) * scale) - x0)
+        th = max(1, round((overlay["top"] + h) * scale) - y0)
+        img = Image.fromarray(arr, "RGBA")
+        if (tw, th) != img.size:
+            img = img.resize((tw, th), Image.LANCZOS)
+        sx0, sy0 = max(0, -x0), max(0, -y0)
+        sx1 = img.width - max(0, x0 + img.width - pw)
+        sy1 = img.height - max(0, y0 + img.height - ph)
+        if sx1 <= sx0 or sy1 <= sy0:
+            continue
+        if (sx0, sy0, sx1, sy1) != (0, 0, img.width, img.height):
+            img = img.crop((sx0, sy0, sx1, sy1))
         canvas.alpha_composite(img, dest=(x0 + sx0, y0 + sy0))
 
     return _save_png(canvas, out_dir, "preview")

@@ -110,12 +110,16 @@ class Engine:
         return {"thumbs": render_thumbnails(s, layerIds, maxSize, out_dir)}
 
     def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None,
-                       lineColorIds=None):
+                       lineColorIds=None, edgeLines=None):
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
+        overlays = None
+        if edgeLines and edgeLines.get("enabled"):
+            overlays = plan_overlays(s, find_views(s), {**EDGE_DEFAULTS, **edgeLines})
         return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
                                           line_color=lineColor,
-                                          line_color_ids=lineColorIds)}
+                                          line_color_ids=lineColorIds,
+                                          edge_overlays=overlays)}
 
     # 이 둘은 세션이 아니라 트리를 받는다. 이름만 보고 묶는 계산이라 픽셀도 PSD도
     # 필요 없는데, 세션을 요구하면 그것이 축출됐을 때 700MB짜리 파일을 통째로 다시

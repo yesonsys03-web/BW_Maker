@@ -956,3 +956,26 @@ def test_assign_line_color_without_a_color_marks_nothing():
     entries = [{"sourceIds": [4]}]
     assign_line_color(entries, None, [4])
     assert entries[0]["lineRgb"] is None
+
+
+def test_render_preview_draws_the_edge_overlays_it_is_given(fixture_psd, tmp_path):
+    # 화면에서 확인할 수 없으면 내보내기 전에 알 방법이 없다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    overlay = np.zeros((8, 8, 4), np.uint8)
+    overlay[..., :3] = [255, 0, 0]
+    overlay[..., 3] = 255
+    png = render_preview(s, [4], max_size=256, out_dir=tmp_path,
+                         edge_overlays=[{"rgba": overlay, "left": 0, "top": 0,
+                                         "lineIds": [4]}])
+    arr = np.array(Image.open(png).convert("RGBA"))
+    assert tuple(arr[2, 2][:3]) == (255, 0, 0)
+
+
+def test_render_preview_without_overlays_is_unchanged(fixture_psd, tmp_path):
+    from PIL import Image
+    s = _session(fixture_psd)
+    a = np.array(Image.open(render_preview(s, [2, 5], 256, tmp_path)).convert("RGBA"))
+    b = np.array(Image.open(
+        render_preview(s, [2, 5], 256, tmp_path, edge_overlays=[])).convert("RGBA"))
+    assert np.array_equal(a, b)
