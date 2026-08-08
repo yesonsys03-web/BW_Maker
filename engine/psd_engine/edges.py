@@ -377,6 +377,15 @@ def drop_small(mask, labels, count, min_length):
     return keep[labels]
 
 
+#: 알파에 거는 가우시안 블러(σ=0.8)가 thick 밖으로 번지는 폭(px).
+#:
+#: 라벨을 이만큼 더 키우지 않으면 그 자락이 색 없이 (0,0,0)으로 남아 모든 생성 획에
+#: 검은 후광이 둘린다 — 실측 한 뷰에서 알파>0 픽셀의 42.1%가 그랬고 평균 알파 32.4,
+#: 그 100%가 thick 밖이었다. 지금 획이 진해 보이는 이유의 일부가 이것이라, 고치면
+#: 획이 **옅어진다**. 그건 의도된 결과다.
+BLUR_REACH = 2
+
+
 def stroke_rgba(mask, labels, colour, width):
     """
     경계를 width 굵기의 획으로 만든다. 색은 **조각마다 하나**로 정한다.
@@ -410,17 +419,18 @@ def stroke_rgba(mask, labels, colour, width):
     # thick와 똑같이 (홀수로 올림한 width) // 2번 반복하면 된다(기본 width=5면 2회).
     size = width if width % 2 else width + 1
     grown = labels
-    for _ in range(size // 2):
+    for _ in range(size // 2 + BLUR_REACH):
         step = np.array(
             Image.fromarray(grown.astype(np.int32), mode="I").filter(ImageFilter.MaxFilter(3))
         )
         grown = np.where(grown == 0, step, grown)
+    painted = alpha > 0
     for lab in range(1, labels.max() + 1):
         src = labels == lab
         if not src.any():
             continue
         rep = np.median(colour[src], axis=0).astype(np.uint8)
-        out[(grown == lab) & thick, :3] = rep
+        out[(grown == lab) & painted, :3] = rep
     return out
 
 

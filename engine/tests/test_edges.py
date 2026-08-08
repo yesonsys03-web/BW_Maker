@@ -720,6 +720,25 @@ def test_colour_mode_defaults_to_the_composite_path(tmp_path):
     assert (a[0] == b[0]).all(), "키가 없을 때와 composite를 줬을 때가 다르다"
 
 
+def test_stroke_rgba_paints_every_pixel_it_makes_visible():
+    # 알파는 블러로 thick 밖까지 넓어지는데 색은 thick 안에만 칠하면, 자락이
+    # (0,0,0)으로 남아 모든 생성 획에 **검은 후광**이 둘린다. 실측 한 뷰에서
+    # 알파>0 픽셀 10204개 중 4296개(42.1%)가 그랬고 전부 thick 밖이었다.
+    from psd_engine.edges import label_components, stroke_rgba
+
+    mask = np.zeros((16, 16), bool)
+    mask[:, 8] = True
+    labels, _ = label_components(mask)
+    colour = np.zeros((16, 16, 3), np.uint8)
+    colour[mask] = [150, 140, 110]
+    out = stroke_rgba(mask, labels, colour, 5)
+    visible = out[..., 3] > 0
+    unpainted = visible & (out[..., :3].max(2) == 0)
+    assert visible.any(), "픽스처에 획이 없다 — 테스트가 무의미하다"
+    assert not unpainted.any(), (
+        f"알파는 있는데 색이 안 칠해진 픽셀이 {int(unpainted.sum())}개다 — 검은 후광")
+
+
 def test_paste_colour_applies_the_layers_mask(tmp_path):
     # topil()은 래스터 마스크를 적용하지 않는다. paste가 그걸 쓰면 가려진 자리가
     # 불투명하게 남아, 실제로는 없는 색 경계가 생기고 그 자리에 가짜 획이 그어진다
