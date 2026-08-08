@@ -193,8 +193,11 @@ function validatePreset(value: unknown, index: number): Preset {
       throw new Error(`${prefix}.edgeLines.${key}: 0 이상의 정수가 아닙니다.`);
     }
   }
-  // 저장된 프리셋에는 이 키가 없다(옵션이 생기기 전에 저장된 것들). 위의 스프레드가
-  // 기본값 composite로 메우므로, 모르는 값만 걷어내면 예전 프리셋은 예전 동작 그대로다.
+  // 저장된 프리셋에는 이 두 키가 없다(각 옵션이 생기기 전에 저장된 것들). 위의
+  // 스프레드가 둘 다 기본값으로 메운다 — colourMode는 composite라 예전 프리셋이
+  // 예전 동작 그대로지만, edgeMode는 일부러 그렇지 않다. 기본값이 region(새 검출)
+  // 이라, edgeMode가 없던 예전 프리셋은 이제 새 검출을 쓴다 — region이 옛 change를
+  // 밀어낸 이유가 바로 아티스트가 change를 결함으로 신고했기 때문이다(설계 문서 3절).
   if (edge.colourMode !== "composite" && edge.colourMode !== "paste") {
     throw new Error(`${prefix}.edgeLines.colourMode: composite 또는 paste가 아닙니다.`);
   }

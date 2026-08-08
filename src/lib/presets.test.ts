@@ -158,6 +158,25 @@ test("a preset saved before colourMode existed loads with the composite path", a
   expect(loaded[0].edgeLines.colourMode).toBe("composite");
 });
 
+test("a preset saved after colourMode existed but before edgeMode did loads with the region path", async () => {
+  // 실제로 있었을 모양: colourMode가 생긴 뒤, edgeMode가 생기기 전에 저장된
+  // 프리셋이라 edgeLines에 colourMode는 있고 edgeMode만 없다. 없는 채로 열렸을
+  // 때 region(새 검출)으로 떨어져야 한다 — colourMode 때와 달리 여기서는 일부러
+  // "예전 그대로"가 아니다(위 edgeMode 검증 앞 주석 참고).
+  const old = {
+    ...DEFAULT_PRESET,
+    edgeLines: {
+      enabled: true, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
+      colourMode: "composite",
+    },
+  };
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([old]));
+
+  const loaded = await loadPresets();
+  expect(loaded[0].edgeLines.edgeMode).toBe("region");
+});
+
 test("loadPresets rejects an unknown colourMode instead of guessing", async () => {
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([

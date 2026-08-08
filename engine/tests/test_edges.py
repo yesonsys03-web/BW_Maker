@@ -778,6 +778,44 @@ def test_stroke_rgba_paints_a_fringe_pixel_from_the_nearer_fragment():
         "라벨2(x=27)에 더 가까운 x=24가 검거나 라벨1 색으로 칠해졌다"
 
 
+def test_stroke_rgba_paints_a_diagonal_junction_with_no_black_halo():
+    # 위 두 후광 테스트(수직/수평 픽스처)는 축에 나란한 마스크만 겨눈다. 실제
+    # region_boundary 출력은 굽고 대각선이고, 세 영역이 만나는 자리에는 이음매가
+    # 생긴다 — _morph의 정사각 커널과 stroke_rgba의 링 팽창이 대각선으로 꺾이는
+    # 자리에서도 검은 후광 없이 칠하는지는 축에 나란한 픽스처로는 안 잰다.
+    #
+    # 조각 A는 (5,5)에서 (11,11)까지 내려가는 대각선, 조각 B는 (13,11)에서
+    # (19,5)까지 반대 방향으로 꺾이는 대각선이다 — 둘이 꼭짓점 근처에서 각을
+    # 이루며 만나되(두 끝점이 (11,11)·(13,11)로 가깝다) 서로 안 닿아 label_
+    # components가 둘을 별개 조각으로 가른다(실측: count==2). width=5(반지름 2)라
+    # thick끼리도 안 닿고, 그 사이는 BLUR_REACH가 더한 링이 있어야만 칠해진다
+    # (실측: BLUR_REACH=0으로 두면 이 마스크에서 271개 보이는 픽셀 중 129개가
+    # 알파는 있는데 색은 (0,0,0)인 채로 남는다).
+    red_side, blue_side = [10, 20, 30], [200, 210, 220]
+    h, w = 40, 40
+    mask = np.zeros((h, w), bool)
+    colour = np.zeros((h, w, 3), np.uint8)
+    seg_a = [(r, r) for r in range(5, 12)]
+    seg_b = [(r, 24 - r) for r in range(13, 20)]
+    for r, c in seg_a:
+        mask[r, c] = True
+        colour[r, c] = red_side
+    for r, c in seg_b:
+        mask[r, c] = True
+        colour[r, c] = blue_side
+
+    labels, count = label_components(mask)
+    assert count == 2, "픽스처가 한 조각으로 붙었다 — 두 대표색을 겨눌 수 없다"
+
+    out = stroke_rgba(mask, labels, colour, width=5)
+    visible = out[..., 3] > 0
+    unpainted = visible & (out[..., :3].max(2) == 0)
+    assert visible.any(), "픽스처에 획이 없다 — 테스트가 무의미하다"
+    assert not unpainted.any(), (
+        f"대각선 이음매에 알파는 있는데 색이 안 칠해진 픽셀이 {int(unpainted.sum())}개다"
+        " — 검은 후광")
+
+
 def test_paste_colour_applies_the_layers_mask(tmp_path):
     # topil()은 래스터 마스크를 적용하지 않는다. paste가 그걸 쓰면 가려진 자리가
     # 불투명하게 남아, 실제로는 없는 색 경계가 생기고 그 자리에 가짜 획이 그어진다
