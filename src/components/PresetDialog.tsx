@@ -77,6 +77,10 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   // (types.ts의 EdgeLines.colourMode 참고). 판정이 끝나면 이 컨트롤은 없앤다.
   const [colourMode, setColourMode] =
     useState<EdgeLines["colourMode"]>(preset.edgeLines.colourMode);
+  // 색 경계를 찾는 방법. 어느 쪽이 옳은지 아직 사람이 판정하는 중이라 노출한다
+  // (types.ts의 EdgeLines.edgeMode 참고). 판정이 끝나면 이 컨트롤은 없앤다.
+  const [edgeMode, setEdgeMode] =
+    useState<EdgeLines["edgeMode"]>(preset.edgeLines.edgeMode);
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [valueError, setValueError] = useState<string | null>(null);
@@ -131,7 +135,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       lineColor: normalizeColor ? lineColor : null,
       splitLayers,
       outputFormat,
-      edgeLines: { ...preset.edgeLines, enabled: edgeEnabled, colourMode },
+      edgeLines: { ...preset.edgeLines, enabled: edgeEnabled, colourMode, edgeMode },
     };
   }
 
@@ -376,21 +380,39 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
         </p>
 
         {edgeEnabled && (
-          <label className="preset-field">
-            <span>색 그림 만드는 방법</span>
-            <select
-              value={colourMode}
-              onChange={(e) => setColourMode(e.target.value as EdgeLines["colourMode"])}
-            >
-              <option value="composite">정확 — 포토샵 합성 그대로 (기본)</option>
-              <option value="paste">빠름 — 레이어를 겹치기만 (클리핑 무시)</option>
-            </select>
-            <span className="preset-hint">
-              획을 찾으려고 만드는 중간 그림입니다. <b>빠름</b>은 실측에서 한 뷰가
-              145초 → 19초였지만 클리핑 레이어를 지키지 않습니다. 검은 획은 같은
-              뷰에서 1.09% 달랐습니다 — 두 결과를 미리보기로 비교해 보고 고르세요.
-            </span>
-          </label>
+          <>
+            <label className="preset-field">
+              <span>색 그림 만드는 방법</span>
+              <select
+                value={colourMode}
+                onChange={(e) => setColourMode(e.target.value as EdgeLines["colourMode"])}
+              >
+                <option value="composite">정확 — 포토샵 합성 그대로 (기본)</option>
+                <option value="paste">빠름 — 레이어를 겹치기만 (클리핑 무시)</option>
+              </select>
+              <span className="preset-hint">
+                획을 찾으려고 만드는 중간 그림입니다. <b>빠름</b>은 실측에서 한 뷰가
+                145초 → 19초였지만 클리핑 레이어를 지키지 않습니다. 검은 획은 같은
+                뷰에서 1.09% 달랐습니다 — 두 결과를 미리보기로 비교해 보고 고르세요.
+              </span>
+            </label>
+
+            <label className="preset-field">
+              <span>색 경계 찾는 방법</span>
+              <select
+                value={edgeMode}
+                onChange={(e) => setEdgeMode(e.target.value as EdgeLines["edgeMode"])}
+              >
+                <option value="region">영역 — 색 영역을 나눠 경계를 두름 (기본)</option>
+                <option value="change">예전 — 픽셀 색차의 능선</option>
+              </select>
+              <span className="preset-hint">
+                <b>영역</b>이 획의 지글거림을 없앤 방법입니다. 대신 획이 파일에 따라
+                5~91% 더 그어집니다 — 늘어난 자리가 맞는지 미리보기로 확인해 보세요.
+                <b>예전</b>은 되돌아가 비교할 자리로 남겨 둔 것입니다.
+              </span>
+            </label>
+          </>
         )}
 
         <div className="modal-actions">
