@@ -9,7 +9,7 @@
 (`edges.colour_change`). 계단과 잔가시는 그 두 단계의 부산물이다. 부풀리기 전 1px 마스크를
 그려보면 바로 보인다 — 끊기고, 겹줄이 나고, 가시가 돋는다.
 
-프로토타입 `.superpowers/sdd/2026-08-08-colour-region-stroke/segment-stroke.py`가 세 방식을
+프로토타입 `.superpowers/sdd/colour-region-stroke-prototype/segment-stroke.py`가 세 방식을
 같은 크롭에 놓고 세 줄(문맥 / 알파 / **부풀리기 전 1px 마스크**)로 그린다. 판정은 셋째 줄에서
 났다. 지글거린다고 지목된 파일에서 지금 방식의 중심선은 조각나 있고, 분할은 이어진 한 줄이다.
 

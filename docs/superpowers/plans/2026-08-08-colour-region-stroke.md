@@ -869,7 +869,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 스펙 7절의 열린 것들을 닫는다. **코드 변경은 프로토타입을 엔진 함수로 갈아끼우는 것 하나뿐이고, 나머지는 눈으로 보는 일이다.** 그림 없이 통과시키면 안 된다 — 조각 수는 지글거림의 지표가 아니다.
 
 **Files:**
-- Modify: `.superpowers/sdd/2026-08-08-colour-region-stroke/segment-stroke.py` (자체 구현을 엔진 것으로 교체)
+- Modify: `.superpowers/sdd/colour-region-stroke-prototype/segment-stroke.py` (자체 구현을 엔진 것으로 교체)
 
 **Interfaces:**
 - Consumes: `psd_engine.edges.segment_colours`, `psd_engine.edges.region_boundary`
@@ -904,7 +904,7 @@ Expected: `붙어있음` — 안 나오면 외장 볼륨을 먼저 마운트한�
 ```bash
 cd /Users/usabatch/coding/psd_line_export
 for V in 0 1 2; do
-  engine/.venv/bin/python .superpowers/sdd/2026-08-08-colour-region-stroke/segment-stroke.py \
+  engine/.venv/bin/python .superpowers/sdd/colour-region-stroke-prototype/segment-stroke.py \
     001 --view $V --size 96 --zoom 8
 done
 ```
@@ -920,7 +920,7 @@ done
 ```bash
 cd /Users/usabatch/coding/psd_line_export
 for X in 0 1400 2800 4200 5600 7000 8400 9800; do
-  engine/.venv/bin/python .superpowers/sdd/2026-08-08-colour-region-stroke/segment-stroke.py \
+  engine/.venv/bin/python .superpowers/sdd/colour-region-stroke-prototype/segment-stroke.py \
     020 --view 0 --crop 700 $X 1400 --zoom 1
 done
 ```
@@ -928,7 +928,7 @@ done
 그 그림들에서 **색이 완만하게 변하는 면**을 찾아 좌표를 읽고, 그 자리를 확대한다(`700`과 `X`를 읽은 값으로 바꾼다):
 
 ```bash
-engine/.venv/bin/python .superpowers/sdd/2026-08-08-colour-region-stroke/segment-stroke.py \
+engine/.venv/bin/python .superpowers/sdd/colour-region-stroke-prototype/segment-stroke.py \
   020 --view 0 --crop 700 8400 160 --zoom 6
 ```
 
@@ -942,15 +942,15 @@ engine/.venv/bin/python .superpowers/sdd/2026-08-08-colour-region-stroke/segment
 
 ```bash
 cd /Users/usabatch/coding/psd_line_export
-engine/.venv/bin/python .superpowers/sdd/2026-08-08-colour-region-stroke/segment-stroke.py \
+engine/.venv/bin/python .superpowers/sdd/colour-region-stroke-prototype/segment-stroke.py \
   001 --view 0 --colour-mode composite --crop 812 693 96 --zoom 8
 ```
 
 출력 파일 이름에 크롭 좌표가 들어가므로 `paste` 그림을 덮어쓴다 — **먼저 이름을 바꿔 둔다**:
 
 ```bash
-mv .superpowers/sdd/2026-08-08-colour-region-stroke/out/seg_001_v0_812_693_96.png \
-   .superpowers/sdd/2026-08-08-colour-region-stroke/out/seg_001_v0_812_693_96_paste.png
+mv .superpowers/sdd/colour-region-stroke-prototype/out/seg_001_v0_812_693_96.png \
+   .superpowers/sdd/colour-region-stroke-prototype/out/seg_001_v0_812_693_96_paste.png
 ```
 
 두 장을 나란히 놓고 획이 갈리는지 본다. 갈리면 그 사실을 스펙 7절에 적는다 — 이 작업에서 고칠 것은 아니다(`colourMode` 판정은 별개 축이다).
