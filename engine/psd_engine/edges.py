@@ -111,6 +111,51 @@ def segment_colours(rgba, floor=FLAT_COLOUR_FLOOR):
     return labels, flats
 
 
+def region_boundary(labels, flats, threshold):
+    """
+    라벨이 바뀌는 자리와, 그 자리에 쓸 색(두 대표색 중 어두운 쪽)을 돌려준다.
+
+    `colour_change`와 같은 모양을 돌려주므로 `build_overlay`의 하류가 그대로 붙는다.
+    자리는 두 픽셀 중 왼쪽/위쪽, 색은 어두운 쪽(채널 합이 작은 쪽)으로 규칙도 같다.
+
+    **비최대 억제가 없다.** 라벨 경계는 이미 1px이다 — 중앙차분으로 띠를 부풀린 뒤
+    억제로 능선을 되찾는 두 단계가 여기서는 필요 없고, 계단과 잔가시가 그 두 단계의
+    부산물이었다.
+
+    **색차 게이트는 빼면 안 된다.** 분할은 완만한 그라데이션을 양자화 단계마다 갈라
+    놓으므로, 게이트가 없으면 아티스트가 아무 경계도 못 보는 자리에 등고선을 긋는다.
+    지금까지의 colour_change에는 원리상 없던 결함이다(걸음당 색차가 문턱을 못 넘어
+    아무것도 안 그렸다). 실측에서 인접 쌍 92~308개 중 6~118개를 기각한다.
+
+    투명(라벨 -1)과 맞닿은 자리는 실루엣이라 잡지 않는다. 이미 라인이 그리는 자리다.
+    """
+    h, w = labels.shape
+    mask = np.zeros((h, w), bool)
+    colour = np.zeros((h, w, 3), np.uint8)
+    if len(flats) == 0:
+        return mask, colour
+    pair = np.abs(flats[:, None, :] - flats[None, :, :]).max(2)
+    sums = flats.sum(1)
+    darker = np.where((sums[:, None] <= sums[None, :])[..., None],
+                      flats[:, None, :], flats[None, :, :]).astype(np.uint8)
+    for axis in (0, 1):
+        a = labels[:-1, :] if axis == 0 else labels[:, :-1]
+        b = labels[1:, :] if axis == 0 else labels[:, 1:]
+        # 경계 픽셀에서만 색차를 조회한다. 전체 크기로 pair[a, b]를 만들면 33 Mpx
+        # 뷰에서 수십 MB짜리 중간 배열이 축마다 생긴다.
+        ys, xs = np.nonzero((a >= 0) & (b >= 0) & (a != b))
+        if len(ys) == 0:
+            continue
+        av, bv = a[ys, xs], b[ys, xs]
+        hit = pair[av, bv] > threshold
+        if not hit.any():
+            continue
+        ys, xs, av, bv = ys[hit], xs[hit], av[hit], bv[hit]
+        mask[ys, xs] = True
+        colour[ys, xs] = darker[av, bv]
+    return mask, colour
+
+
 def colour_change(rgba, threshold):
     """
     이웃과 색이 달라지는 자리와, 그 자리에 쓸 색(양쪽 중 어두운 쪽)을 돌려준다.

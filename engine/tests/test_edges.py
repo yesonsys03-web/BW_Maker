@@ -1,6 +1,6 @@
 import numpy as np
 
-from psd_engine.edges import EDGE_DEFAULTS, colour_change, segment_colours
+from psd_engine.edges import EDGE_DEFAULTS, colour_change, region_boundary, segment_colours
 
 
 def _rgba(rows, alpha=255):
@@ -77,6 +77,57 @@ def test_segment_colours_handles_a_fully_transparent_view():
     labels, flats = segment_colours(rgba)
     assert (labels == -1).all()
     assert flats.shape == (0, 3)
+
+
+def test_region_boundary_marks_one_pixel_at_the_seam():
+    # 라벨 경계는 이미 1px이다 — 비최대 억제가 필요 없고, 계단과 잔가시를 만들던
+    # 두 단계가 여기서 통째로 사라진다. 경계는 두 색이 실제로 맞닿는 x=5에 선다
+    # (colour_change는 중앙차분 k=3의 고지 왼쪽 끝인 x=3에 세운다).
+    red, black = [200, 20, 40], [10, 10, 10]
+    rgba = _rgba([[red] * 6 + [black] * 6] * 4)
+    labels, flats = segment_colours(rgba)
+    mask, _ = region_boundary(labels, flats, EDGE_DEFAULTS["threshold"])
+    assert mask[:, 5].all(), "색이 갈리는 자리가 경계로 잡히지 않았다"
+    other = [c for c in range(12) if c != 5]
+    assert not mask[:, other].any(), "경계가 한 칸을 넘어 번졌다"
+
+
+def test_region_boundary_gates_a_difference_under_the_threshold():
+    # 게이트가 없으면 분할은 완만한 그라데이션을 양자화 단계마다 갈라, 아티스트가
+    # 아무 경계도 못 보는 자리에 등고선을 긋는다 — colour_change에는 원리상 없던
+    # 결함이다. 실측에서 이 게이트는 인접 쌍 92~308개 중 6~118개를 기각한다.
+    a, b = [100, 100, 100], [110, 110, 110]      # 차이 10 < 24
+    rgba = _rgba([[a] * 6 + [b] * 6] * 4)
+    labels, flats = segment_colours(rgba)
+    assert len(flats) == 2, "두 색이 각자 영역이 돼야 게이트를 시험할 수 있다"
+    mask, _ = region_boundary(labels, flats, EDGE_DEFAULTS["threshold"])
+    assert not mask.any(), "문턱 아래인데 획을 그었다 — 그라데이션에 등고선이 생긴다"
+
+
+def test_region_boundary_ignores_the_silhouette():
+    red = [200, 20, 40]
+    rgba = _rgba([[red] * 8] * 4)
+    rgba[:, 4:, 3] = 0
+    labels, flats = segment_colours(rgba)
+    mask, _ = region_boundary(labels, flats, EDGE_DEFAULTS["threshold"])
+    assert not mask.any(), "실루엣을 경계로 잡았다 — 캐릭터 윤곽을 다시 긋게 된다"
+
+
+def test_region_boundary_uses_the_darker_of_the_two_regions():
+    # colour_change와 같은 규칙이라 하류(stroke_rgba의 조각별 대표색)가 그대로 붙는다.
+    red, black = [200, 20, 40], [10, 10, 10]
+    rgba = _rgba([[red] * 6 + [black] * 6] * 4)
+    labels, flats = segment_colours(rgba)
+    mask, colour = region_boundary(labels, flats, EDGE_DEFAULTS["threshold"])
+    assert (colour[mask] == np.array(black, np.uint8)).all(), "어두운 쪽을 안 골랐다"
+
+
+def test_region_boundary_handles_a_view_with_no_flat_colours():
+    rgba = _rgba([[[0, 0, 0]] * 4] * 4, alpha=0)
+    labels, flats = segment_colours(rgba)
+    mask, colour = region_boundary(labels, flats, EDGE_DEFAULTS["threshold"])
+    assert not mask.any()
+    assert colour.shape == (4, 4, 3)
 
 
 def test_colour_change_reports_the_darker_side_colour():
