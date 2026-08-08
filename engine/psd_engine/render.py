@@ -433,7 +433,8 @@ def _composite_order(psd):
     return order
 
 
-def _plain(layer, allow_passthrough=False, allow_mask_opacity=False):
+def _plain(layer, allow_passthrough=False, allow_mask_opacity=False,
+           allow_clipping=False):
     """
     psd.composite가 이 레이어에 하는 일 중 빠른 경로가 재현하지 않는 것이 하나라도
     있으면 False. 하나라도 걸리면 예전 경로로 떨어진다 — 빠르게 하려다 그림을
@@ -489,7 +490,11 @@ def _plain(layer, allow_passthrough=False, allow_mask_opacity=False):
     # 이 구분이 이득의 대부분이다. 처음에는 has_clip_layers()도 막았는데, 실제
     # 납품 PSD에서 병합 4건에 걸린 가드 316건 중 309건이 그것이어서 빠른 경로를
     # 탄 병합이 하나도 없었다(1.4배에 그쳤다).
-    if layer.clipping:
+    #
+    # allow_clipping은 **_fast_mergeable이 base를 확인한 클리핑 잎에만** 준다.
+    # 그때는 빠른 경로가 그 잎을 본 패스에서 그리지 않고 base의 색 위에 얹으므로
+    # (_clipped_colour), composite가 하는 일과 같아진다.
+    if layer.clipping and not allow_clipping:
         return False
     if layer.mask is not None and not layer.mask.disabled and not allow_mask_opacity:
         return False
@@ -509,7 +514,7 @@ def _plain(layer, allow_passthrough=False, allow_mask_opacity=False):
     return True
 
 
-def _fast_mergeable(psd, layers):
+def _fast_mergeable(psd, layers, allow_clipping=False):
     """
     레이어들과 그 조상 그룹이 전부 '평범'하면 빠른 경로를 쓸 수 있다.
 
@@ -520,6 +525,31 @@ def _fast_mergeable(psd, layers):
 
     풀린 4건은 3~6배 빨라졌다(그 파일들의 픽셀 시간 합 32.3초 → 7.7초). 그중
     가장 큰 것이 VtINTVoxOffice006의 'BG' 9장 11.6초 → 1.8초다.
+
+    **`allow_clipping`은 오버레이 전용이다. 내보내기는 주지 않는다.**
+    병합 대상 안에 base와 그 클리핑 잎이 함께 있으면 `_clipped_colour`가
+    psd.composite의 `_apply_clip_layers`(606행)를 그대로 돌린다. 캐릭터 오버레이에서
+    이것이 유일하게 남은 가드였고, 풀고 나니 샘플 넷의 뷰 17개 중 막혀 있던 5개가
+    3.7~4.7배 빨라지면서 획 RGBA는 17/17 바이트 동일이었다
+    (edges._composite_colour 참고).
+
+    **내보내기에 주지 않는 이유는 클리핑 코드가 아니라 이 빠른 경로 자체다.**
+    `_merge_rgba_fast`는 잎을 하나의 누적기에 평평하게 union하는데 psd.composite는
+    그룹마다 0부터 union한 뒤 그 결과를 부모에 다시 union한다. float32에서 괄호가
+    마지막 비트를 바꾸므로 두 결과는 원리적으로 비트 동일이 아니다 — 지금 이 경로를
+    타는 병합들에서 경험적으로 같을 뿐이다. 클리핑을 열어 병합 3건이 처음 이 경로를
+    타자 바로 갈렸다(납품 26장 대조에서 271/1210/124px, 대부분 알파). 한 픽셀에서
+    확인한 값:
+
+        평평하게 접기 0.984014928 / 트리대로 접기 0.984014750 / psd-tools 0.984014750
+
+    클리핑 잎을 아예 빼도 그 갈림이 그대로라 클리핑 코드는 무죄다. 고치려면 그룹
+    트리를 재현해야 하고 그건 Compositor를 다시 쓰는 일이다. 그때까지 내보내기의
+    인구는 이미 대조로 검증된 것만 유지한다.
+
+    base를 이 집합에서 못 찾은 클리핑 잎은 `allow_clipping`이어도 거절한다 — 그
+    base가 집합 밖의 **그룹**이면 composite는 그 그룹의 합성 결과 위에 잎을 얹는데
+    빠른 경로에는 그 그룹이 없다.
 
     **이것으로 풀리지 않는 쪽을 적어 둔다.** 남은 느린 405.2 Mpx의 대부분은 잎이
     아니라 **조상 그룹**이 막고 있다(ancestor:mask 132.3 Mpx, ancestor:opacity
@@ -534,8 +564,26 @@ def _fast_mergeable(psd, layers):
 
     if psd.color_mode != ColorMode.RGB:
         return False
+    # 이 집합 안에서 누가 누구의 클리핑 잎인가. base를 못 찾은 클리핑 잎은 아래에서
+    # 거절한다 — base가 이 집합 밖의 **그룹**이면 psd.composite는 그 그룹의 합성
+    # 결과 위에 이 잎을 얹는데, 빠른 경로에는 그 그룹이 없어 조용히 빠진다.
+    # base가 잎이면 필터에서 함께 걸려 양쪽 다 안 그리므로 문제가 없지만, 둘을
+    # 여기서 가릴 수 없으니 안전한 쪽으로 판단한다.
+    clipped = {id(c) for l in layers if l.has_clip_layers() for c in l.clip_layers}
     for layer in layers:
-        if layer.is_group() or not _plain(layer, allow_mask_opacity=True):
+        if layer.is_group():
+            return False
+        if layer.clipping:
+            if not allow_clipping:
+                return False
+            if id(layer) not in clipped:
+                return False
+            # 클리핑의 클리핑은 옮기지 않았다(_apply_clip_layers는 재귀한다).
+            if layer.has_clip_layers():
+                return False
+            if not _plain(layer, allow_mask_opacity=True, allow_clipping=True):
+                return False
+        elif not _plain(layer, allow_mask_opacity=True):
             return False
         cur = layer.parent
         while cur is not None and cur is not psd:
@@ -544,6 +592,122 @@ def _fast_mergeable(psd, layers):
                 return False
             cur = cur.parent
     return True
+
+
+def _layer_source(layer, box):
+    """
+    apply(342~353행)가 레이어 하나에서 뽑는 값들을 **box 좌표계**로 돌려준다.
+    box와 겹치지 않거나 그릴 픽셀이 없으면 None.
+
+        (src, shape_raw, shape_s, alpha_s, y0, x0)
+
+    `shape_raw`는 마스크도 불투명도도 걸기 **전**의 shape다 — _get_object가
+    `alpha = shape * 1.0`으로 떠 두는 바로 그 배열이고, 클리핑 잎을 얹을 때
+    하위 Compositor의 _alpha_0가 된다.
+
+    box 밖은 잘라낸다. _get_object의 paste가 그 자리에 shape 0을 깔고, shape도
+    alpha도 0인 자리에서 _apply_source는 색도 알파도 바꾸지 않기 때문이다 —
+    마스크 bbox가 레이어보다 커도 그 바깥을 버려도 되는 것과 같은 이유다.
+    음수로 슬라이스하면 예외 없이 배열 반대쪽 끝을 집어 엉뚱한 자리에 그린다.
+    """
+    from psd_tools.constants import Tag
+
+    bbox = layer.bbox
+    if bbox == (0, 0, 0, 0):
+        return None
+    src = layer.numpy("color")
+    if src is None:
+        return None
+    shape = layer.numpy("shape")
+    if shape is None:
+        shape = np.ones(src.shape[:2] + (1,), dtype=np.float32)
+    # _get_mask(621행). composite는 마스크를 뷰포트 전체에 붙이지만 여기서는 레이어
+    # bbox에만 붙인다.
+    shape_mask = 1.0
+    if layer.mask is not None and not layer.mask.disabled:
+        shape_mask = _mask_shape(layer, bbox)
+    h, w = src.shape[:2]
+    y0, x0 = bbox[1] - box[1], bbox[0] - box[0]
+    cy0, cx0 = max(0, -y0), max(0, -x0)
+    cy1 = h - max(0, y0 + h - (box[3] - box[1]))
+    cx1 = w - max(0, x0 + w - (box[2] - box[0]))
+    if cy1 <= cy0 or cx1 <= cx0:
+        return None
+    if (cy0, cx0, cy1, cx1) != (0, 0, h, w):
+        src, shape = src[cy0:cy1, cx0:cx1], shape[cy0:cy1, cx0:cx1]
+        if isinstance(shape_mask, np.ndarray):
+            shape_mask = shape_mask[cy0:cy1, cx0:cx1]
+        y0, x0 = y0 + cy0, x0 + cx0
+
+    # _get_const(675행). 그리고 apply(348~352행) — _get_mask의 opacity는 언제나
+    # 1.0이라 상수로 적는다. 곱하는 순서를 그대로 지킨다.
+    shape_const = layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) / 255.0
+    opacity_const = layer.opacity / 255.0
+    mask = _scale(_scale(shape_mask, 1.0), opacity_const)
+    shape_s = _scale(_scale(shape, shape_mask), shape_const)
+    # 마스크만 있고 불투명도가 255면 mask가 shape_mask 그대로다 — 그때 alpha_s는
+    # shape_s와 값이 같으므로 배열 하나를 더 만들지 않는다. 마스크도 불투명도도
+    # 없으면 둘 다 shape 그 자체라 (shape_s - alpha_s)가 정확히 0이 되고, 예전
+    # 식과 비트까지 같은 결과가 나온다.
+    alpha_s = shape_s if mask is shape_mask else \
+        _scale(_scale(shape, mask), shape_const)
+    return src, shape, shape_s, alpha_s, y0, x0
+
+
+def _clipped_colour(src, shape_raw, rect, clips):
+    """
+    _apply_clip_layers(606행)를 base 레이어의 그림 위에서 그대로 돌린다.
+
+    돌려주는 것은 **색뿐**이다. psd-tools도 하위 Compositor의 `_color`만 가져가고
+    base의 shape·alpha는 건드리지 않으므로, 클리핑은 base가 이미 덮은 자리의 색만
+    바꾼다.
+
+    하위 Compositor는 base의 색과 **마스크 전 shape**로 초기화된다
+    (`Compositor(viewport, color, alpha)` — 280~316행). 그래서 `_alpha_0`가 0이
+    아니고, 본 패스처럼 `_alpha == _alpha_g`로 줄일 수 없다 — `_alpha`와 `_alpha_g`를
+    따로 들고 간다.
+
+    base의 bbox(=`rect`) 밖은 볼 필요가 없다. 하위 Compositor는 뷰포트 전체를
+    쓰지만 그 결과 중 base의 shape가 0인 자리는 곧이어 base의 _apply_source가
+    통째로 버린다.
+
+    같은 이유로 **클리핑 잎의 bbox 밖도 건드리지 않는다.** 거기서 psd-tools는
+    색을 우리와 다르게 만든다 — shape도 alpha도 0이라 식이 `divide(a_prev*c_b,
+    a_prev)`로 줄고, base의 알파가 0인 픽셀에서는 그것이 `divide(0, 0)`이라
+    utils.divide가 **1.0(흰색)**을 넣는다. 그런데 base의 `alpha_0`가 곧 마스크 전
+    shape이므로 그 자리는 `shape_s`도 0이고, base가 이 색으로 캔버스에 보태는 것이
+    아무것도 없다. 그래서 그 흰색을 재현하지 않아도 결과가 같다 —
+    clip_layer_psd의 base가 알파 0..255 그라데이션이라 이 자리가 실제로 있고,
+    test_merge_rgba_lays_a_clipping_target_onto_its_base가 그 위에서 두 경로를
+    겨룬다.
+    """
+    from psd_tools.composite import utils
+
+    colour = src.copy()
+    alpha_0 = shape_raw
+    alpha_cur = shape_raw.copy()          # 하위 Compositor의 _alpha
+    alpha_g = np.zeros_like(shape_raw)    # 하위 Compositor의 _alpha_g
+    for clip in clips:
+        got = _layer_source(clip, rect)
+        if got is None:
+            continue
+        c_src, _raw, shape_s, alpha_s, y0, x0 = got
+        h, w = c_src.shape[:2]
+        at = (slice(y0, y0 + h), slice(x0, x0 + w))
+        a_prev = alpha_cur[at]
+        a_g = utils.union(alpha_g[at], alpha_s)
+        a_new = utils.union(alpha_0[at], a_g)
+        c_b = colour[at]
+        # blend는 NORMAL만 통과하므로 blend_fn(color_b, color)는 color 그대로다.
+        colour_t = (shape_s - alpha_s) * a_prev * c_b + alpha_s * (
+            (1.0 - a_prev) * c_src + a_prev * c_src
+        )
+        colour[at] = utils.clip(
+            utils.divide((1.0 - shape_s) * a_prev * c_b + colour_t, a_new)
+        )
+        alpha_g[at] = a_g
+        alpha_cur[at] = a_new
+    return colour
 
 
 def _merge_rgba_fast(psd, layers, viewport):
@@ -565,64 +729,42 @@ def _merge_rgba_fast(psd, layers, viewport):
     마스크와 불투명도를 함께 곱한다(alpha *= shape_mask * opacity_mask *
     opacity_const). 그래서 alpha 쪽 마스크는 곱해진 shape가 아니라 원래 shape에
     걸린다. 마지막으로 둘 다 fill opacity(shape_const)를 곱해 _apply_source로 간다.
+    그 대목은 `_layer_source`에 있다 — 클리핑 잎도 같은 계산을 거치기 때문이다.
+
+    **클리핑 잎은 본 패스에서 빠지고 base의 색 위에 얹힌다**(`_clipped_colour`).
+    _fast_mergeable이 base를 확인한 잎만 여기 들어온다.
     """
     from psd_tools.api import pil_io
     from psd_tools.composite import utils
-    from psd_tools.constants import Resource, Tag
+    from psd_tools.constants import Resource
 
     left, top, right, bottom = viewport
     # psd.composite(color=1.0, alpha=0.0)의 시작 상태와 같다.
     color = np.ones((bottom - top, right - left, 3), dtype=np.float32)
     alpha_g = np.zeros((bottom - top, right - left, 1), dtype=np.float32)
 
+    ids = {id(l) for l in layers}
     order = _composite_order(psd)
     for layer in sorted(layers, key=lambda l: order[id(l)]):
-        bbox = layer.bbox
-        if bbox == (0, 0, 0, 0):
+        # 클리핑 잎은 본 패스에서 안 그린다(apply 329행) — base의 색 위에 얹힌다.
+        if layer.clipping:
             continue
-        src = layer.numpy("color")
-        if src is None:
+        got = _layer_source(layer, viewport)
+        if got is None:
             continue
-        shape = layer.numpy("shape")
-        if shape is None:
-            shape = np.ones(src.shape[:2] + (1,), dtype=np.float32)
-        # _get_mask(621행). composite는 마스크를 병합 뷰포트 전체에 붙이지만 여기서는
-        # 레이어 bbox에만 붙인다 — bbox 밖은 _get_object의 shape가 0이라(paste의
-        # 기본 배경) shape_s도 alpha_s도 0이고, 그 자리에서 apply는 색도 알파도
-        # 바꾸지 않는다. 마스크 bbox가 레이어보다 커도 그 바깥은 버려도 되는 이유다.
-        shape_mask = 1.0
-        if layer.mask is not None and not layer.mask.disabled:
-            shape_mask = _mask_shape(layer, bbox)
+        src, shape_raw, shape_s, alpha_s, y0, x0 = got
         h, w = src.shape[:2]
-        y0, x0 = bbox[1] - top, bbox[0] - left
-        # merge_rgba가 뷰포트를 캔버스로 자른 경우에는 레이어가 뷰포트 밖으로
-        # 걸칠 수 있다. 겹치는 부분만 남긴다 — 음수로 슬라이스하면 예외 없이 배열
-        # 반대쪽 끝을 집어 엉뚱한 자리에 그린다.
-        cy0, cx0 = max(0, -y0), max(0, -x0)
-        cy1 = h - max(0, y0 + h - (bottom - top))
-        cx1 = w - max(0, x0 + w - (right - left))
-        if cy1 <= cy0 or cx1 <= cx0:
-            continue
-        if (cy0, cx0, cy1, cx1) != (0, 0, h, w):
-            src, shape = src[cy0:cy1, cx0:cx1], shape[cy0:cy1, cx0:cx1]
-            if isinstance(shape_mask, np.ndarray):
-                shape_mask = shape_mask[cy0:cy1, cx0:cx1]
-            h, w = src.shape[:2]
-            y0, x0 = y0 + cy0, x0 + cx0
         box = (slice(y0, y0 + h), slice(x0, x0 + w))
 
-        # _get_const(675행). 그리고 apply(348~352행) — _get_mask의 opacity는 언제나
-        # 1.0이라 상수로 적는다. 곱하는 순서를 그대로 지킨다.
-        shape_const = layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) / 255.0
-        opacity_const = layer.opacity / 255.0
-        mask = _scale(_scale(shape_mask, 1.0), opacity_const)
-        shape_s = _scale(_scale(shape, shape_mask), shape_const)
-        # 마스크만 있고 불투명도가 255면 mask가 shape_mask 그대로다 — 그때 alpha_s는
-        # shape_s와 값이 같으므로 배열 하나를 더 만들지 않는다. 마스크도 불투명도도
-        # 없으면 둘 다 shape 그 자체라 (shape_s - alpha_s)가 정확히 0이 되고, 예전
-        # 식과 비트까지 같은 결과가 나온다.
-        alpha_s = shape_s if mask is shape_mask else \
-            _scale(_scale(shape, mask), shape_const)
+        # apply(344~346행) — 마스크·불투명도를 걸기 **전에** 클리핑을 얹는다.
+        # 필터가 통과시키지 않는 클리핑 잎은 하위 Compositor에서도 걸리므로
+        # (_apply_clip_layers가 같은 filter를 물려준다) 이 집합 안의 것만 본다.
+        if layer.has_clip_layers():
+            clips = [c for c in layer.clip_layers if id(c) in ids]
+            if clips:
+                src = _clipped_colour(src, shape_raw, (
+                    left + x0, top + y0, left + x0 + w, top + y0 + h), clips)
+
         color_b = color[box]
         alpha_b = alpha_g[box]
         alpha_new = utils.union(alpha_b, alpha_s)

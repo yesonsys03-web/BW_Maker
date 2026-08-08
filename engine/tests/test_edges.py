@@ -599,6 +599,53 @@ def test_composite_colour_fast_path_matches_psd_tools(tmp_path, monkeypatch):
     assert np.array_equal(fast, slow), "빠른 경로가 psd-tools와 다른 픽셀을 냈다"
 
 
+def test_composite_colour_takes_the_fast_path_with_a_clipping_colour_leaf(tmp_path,
+                                                                          monkeypatch):
+    """
+    색 잎 하나가 다른 색 잎에 클리핑돼 있어도 빠른 경로로 간다.
+
+    납품 캐릭터 파일에서 이것이 **유일하게 남은 가드**였다 — 샘플 넷의 뷰 17개 중
+    5개가 여기 걸려 3.7~4.7배를 놓치고 있었다. `merge_rgba`(내보내기)는 같은 문을
+    안 여는데, 그 이유는 클리핑이 아니라 빠른 경로가 psd.composite와 원리적으로
+    비트 동일이 아니어서다(render._fast_mergeable docstring). 그래서 이 옵트인은
+    edges 쪽에만 있고, 그것이 실제로 걸려 있는지 여기서 지킨다.
+
+    psd.composite 호출 횟수로 경로를 확인한다 — 픽셀만 비교하면 느린 경로로 떨어져도
+    같은 값이 나와 옵트인을 지워도 통과한다.
+    """
+    # base는 32x24라 알파 그라데이션도 (h=24, w=32)여야 한다. 전부 255면 합성
+    # 산술이 어긋나도 결과가 같아 비교가 무뎌진다(conftest의 alpha_overlap_psd 참고).
+    grad = np.tile(np.linspace(0, 255, 32, dtype=np.uint8), (24, 1))
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("shade", (40, 20, 20), 4, 2, 24, 20, alpha=200),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24, alpha=grad),
+    ])
+    line = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    p = tmp_path / "clipped_colour.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT 3/4", layers=[line, colours])],
+              clipping=("shade",))
+    store = SessionStore()
+    s = store.get(store.open(str(p)))
+    psd = s["psd"]
+    view = find_views(s)[0]
+    colour_layers = [s["layers_by_id"][i] for i in view["colourIds"]]
+    assert any(l.clipping for l in colour_layers), \
+        "픽스처에 클리핑 색 잎이 없다 — 이 테스트가 재는 게 없다"
+    box = _union_bbox(colour_layers)
+
+    calls = []
+    real = psd.composite
+    monkeypatch.setattr(psd, "composite",
+                        lambda **kw: (calls.append(1), real(**kw))[1])
+    fast = _composite_colour(psd, colour_layers, box)
+    assert not calls, "클리핑 색 잎 때문에 느린 경로로 떨어졌다"
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow = _composite_colour(psd, colour_layers, box)
+    assert calls, "대비책이 psd.composite를 안 불렀다 — 비교가 공허하다"
+    assert np.array_equal(fast, slow), "빠른 경로가 다른 색 그림을 냈다"
+
+
 def test_composite_colour_leaves_unrelated_groups_out_of_the_composite(tmp_path,
                                                                        monkeypatch):
     # 옛 필터는 `id(l) in wanted or l.is_group()`이라 문서의 **보이는 그룹을 전부**

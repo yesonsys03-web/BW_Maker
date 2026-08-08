@@ -205,6 +205,55 @@ def masked_clip_psd(tmp_path):
 
 
 @pytest.fixture
+def clipped_group_psd(tmp_path):
+    """
+    클리핑 잎 'shade'가 **그룹** 'ART'에 물려 있고, 병합 대상은 그 그룹 **안의**
+    'line'과 'shade'다.
+
+    빠른 경로가 클리핑을 재현하게 된 뒤 유일하게 위험한 모양이다. psd.composite는
+    'ART'를 통째로 합성한 뒤 그 위에 'shade'를 얹는데(_apply_clip_layers), 빠른
+    경로에는 'ART'라는 중간 결과가 없다 — 잎만 차례로 얹기 때문이다. 그래서
+    _fast_mergeable은 base를 이 집합 안에서 못 찾은 클리핑 잎을 거절해야 한다.
+
+    clip_layer_psd로는 이것을 못 만든다. 그쪽은 base가 잎('line')이라 base와
+    클리핑 잎이 함께 병합 대상에 들어가고, 그건 빠른 경로가 정확히 재현하는
+    경우다 — 거기서 가드를 지워도 결과가 안 바뀌어 테스트가 공허해진다.
+    """
+    grad = np.tile(np.linspace(0, 255, 24, dtype=np.uint8), (20, 1))
+    p = tmp_path / "clipped_group.psd"
+    write_psd(p, [
+        make_image("shade", 180, 4, 4, 24, 20),
+        nested_layers.Group(name="ART", layers=[
+            make_image("line", 120, 4, 4, 24, 20, alpha=grad),
+        ]),
+    ], clipping=("shade",))
+    return str(p)
+
+
+@pytest.fixture
+def faded_group_psd(tmp_path):
+    """
+    조상 그룹의 불투명도가 255가 아닌 문서 — 빠른 경로는 못 받고 타일 경로는 받는다.
+
+    "빠른 경로를 막을 것"이 필요할 때 클리핑을 쓰면 안 된다. 빠른 경로가 클리핑을
+    재현하게 된 뒤로(_clipped_colour) 그런 문서는 더 이상 막히지 않아, 막힘을
+    전제한 테스트가 조용히 다른 것을 재게 된다. 그룹 불투명도는 계속 막힌다 —
+    _plain이 조상에는 allow_mask_opacity를 주지 않기 때문이고, 실납품에서도 두
+    번째로 큰 가드다(ancestor:opacity 205.2 Mpx). _tileable은 효과와 획만 보므로
+    타일 경로는 열려 있다.
+    """
+    grad = np.tile(np.linspace(0, 255, 24, dtype=np.uint8), (20, 1))
+    p = tmp_path / "faded_group.psd"
+    write_psd(p, [
+        nested_layers.Group(name="ART", opacity=128, layers=[
+            make_image("line2", 30, 12, 8, 24, 20, alpha=grad[:, ::-1].copy()),
+            make_image("line", 120, 4, 4, 24, 20, alpha=grad),
+        ]),
+    ])
+    return str(p)
+
+
+@pytest.fixture
 def hidden_group_psd(tmp_path):
     """
     숨겨진 그룹(HIDDEN, pass-through) 안에 보이는 NORMAL 그룹, 그 안에 'line'.

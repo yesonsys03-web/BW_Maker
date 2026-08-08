@@ -344,21 +344,133 @@ def test_merge_rgba_fast_path_ignores_clip_layers_outside_the_merge(clip_layer_p
     )
 
 
-def test_merge_rgba_falls_back_when_a_merged_layer_is_itself_clipping(clip_layer_psd, monkeypatch):
-    """
-    병합 대상 자체가 클리핑 레이어면 예전 경로로 떨어진다.
+def _opt_in_fast(s, layers):
+    """오버레이가 하는 것과 같은 호출 — allow_clipping을 켠 빠른 경로.
 
-    psd.composite는 본 패스에서 클리핑 레이어를 통째로 건너뛴다(apply의
-    `if not clip_compositing and layer.clipping: return`). 빠른 경로가 그것을
-    그리면 지금까지 없던 그림이 산출물에 생긴다.
+    `merge_rgba`로는 이것을 못 잰다. 내보내기는 `allow_clipping`을 주지 않으므로
+    클리핑이 낀 병합이 언제나 느린 경로로 떨어지고, 그러면 아래 비교가 같은 코드
+    끼리가 되어 아무것도 지키지 못한다.
+    """
+    boxes = [l.bbox for l in layers if l.bbox != (0, 0, 0, 0)]
+    vp = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+          max(b[2] for b in boxes), max(b[3] for b in boxes))
+    ok = render_mod._fast_mergeable(s["psd"], layers, allow_clipping=True)
+    return ok, vp
+
+
+def _whole_composite(s, layers, vp):
+    wanted = render_mod._wanted_ids(s["psd"], layers)
+    return np.array(s["psd"].composite(
+        viewport=vp, force=True, color=1.0, alpha=0.0,
+        layer_filter=lambda l: id(l) in wanted).convert("RGBA"))
+
+
+def test_fast_merge_lays_a_clipping_target_onto_its_base(clip_layer_psd):
+    """
+    병합 대상 안에 base와 그 클리핑 잎이 함께 있으면, 빠른 경로가 그 잎을 본
+    패스에서 빼고 base의 색 위에 얹는다 — psd.composite의 _apply_clip_layers
+    (606행)와 같은 자리다.
+
+    세 가지를 한꺼번에 본다 — 빠른 경로가 이 집합을 받는가, psd-tools와 픽셀이
+    같은가, 그리고 클리핑 잎이 실제로 그림을 바꾸는가. 마지막 하나가 없으면 이
+    픽스처가 아무 차이도 만들지 않을 때 앞의 둘이 조용히 통과한다.
     """
     s = _session(clip_layer_psd)
-    layers = [s["layers_by_id"][1], s["layers_by_id"][2]]   # line, shade(클리핑)
+    base, clip = _by_name(s, "line", "shade")   # shade가 line에 클리핑돼 있다
+
+    ok, vp = _opt_in_fast(s, [base, clip])
+    assert ok, "빠른 경로가 이 집합을 안 받는다 — 비교가 공허하다"
+    fast, _, _ = render_mod._merge_rgba_fast(s["psd"], [base, clip], vp)
+    whole = _whole_composite(s, [base, clip], vp)
+    base_only = _whole_composite(s, [base], vp)
+
+    assert np.array_equal(fast, whole), (
+        f"최대차 {np.abs(fast.astype(int) - whole.astype(int)).max()}, "
+        f"다른 성분 {(fast != whole).sum()}/{fast.size}"
+    )
+    assert not np.array_equal(whole, base_only), \
+        "클리핑 잎이 그림을 안 바꾼다 — 이 픽스처로는 아무것도 지키지 못한다"
+
+
+def test_fast_merge_lays_a_masked_clipping_target_onto_a_masked_base(masked_clip_psd):
+    """
+    클리핑 잎에도 base에도 마스크가 걸린 경우. 이 코드에서 가장 어려운 조합이다.
+
+    마스크가 붙으면 `shape_s`와 `alpha_s`가 갈라지고(_layer_source의 주석),
+    `_clipped_colour`가 하위 Compositor의 `_alpha_0`로 쓰는 base의 shape는 **마스크
+    전** 값이어야 한다 — _get_object가 `alpha = shape * 1.0`을 마스크보다 먼저 뜨기
+    때문이다. 마스크 없는 픽스처로는 이 순서가 틀려도 결과가 같아 안 드러난다.
+
+    두 마스크가 다 0..255 그라데이션이라 (base 알파, 클리핑 알파) 조합이 넓게 깔린다.
+    """
+    s = _session(masked_clip_psd)
+    base, clip = _by_name(s, "base", "shade")
+
+    ok, vp = _opt_in_fast(s, [base, clip])
+    assert ok, "빠른 경로가 이 집합을 안 받는다 — 비교가 공허하다"
+    fast, _, _ = render_mod._merge_rgba_fast(s["psd"], [base, clip], vp)
+    whole = _whole_composite(s, [base, clip], vp)
+    base_only = _whole_composite(s, [base], vp)
+
+    assert np.array_equal(fast, whole), (
+        f"최대차 {np.abs(fast.astype(int) - whole.astype(int)).max()}, "
+        f"다른 성분 {(fast != whole).sum()}/{fast.size}"
+    )
+    assert not np.array_equal(whole, base_only), \
+        "마스크 낀 클리핑 잎이 그림을 안 바꾼다 — 지키는 게 없다"
+
+
+def test_merge_rgba_still_falls_back_when_a_merged_layer_is_itself_clipping(
+        clip_layer_psd, monkeypatch):
+    """
+    **내보내기는 클리핑이 낀 병합을 계속 느린 경로로 보낸다.** 위 두 테스트가 보이듯
+    클리핑 재현 자체는 psd-tools와 픽셀이 같은데도 그렇게 둔다.
+
+    이유는 클리핑이 아니라 빠른 경로 자체다 — 잎을 평평하게 union하느냐 그룹마다
+    union하느냐로 float32의 마지막 비트가 갈려, psd.composite와 **원리적으로** 비트
+    동일이 아니다(_fast_mergeable docstring에 한 픽셀짜리 증거가 있다). 내보내기에
+    이 문을 열었더니 납품 26장 중 3장이 즉시 갈렸다(271/1210/124px, 대부분 알파).
+    그래서 내보내기의 인구는 이미 기준선으로 검증된 것만 유지한다.
+    """
+    s = _session(clip_layer_psd)
+    base, clip = _by_name(s, "line", "shade")
 
     monkeypatch.setattr(render_mod, "FAST_MERGE", True)
     calls = _spy_on_composite(s["psd"])
-    merge_rgba(s["psd"], layers)
-    assert calls, "클리핑 레이어가 병합 대상인데 빠른 경로로 갔다"
+    merge_rgba(s["psd"], [base, clip])
+    assert calls, "내보내기가 클리핑 낀 병합을 빠른 경로로 보냈다"
+    assert not render_mod._fast_mergeable(s["psd"], [base, clip]), \
+        "allow_clipping 없이도 통과한다 — 옵트인이 아무 일도 안 한다"
+
+
+def test_fast_merge_refuses_a_clipping_target_clipped_to_a_group(clipped_group_psd):
+    """
+    클리핑 잎의 base가 병합 대상 밖의 **그룹**이면 `allow_clipping`이어도 거절한다.
+
+    psd.composite는 그 그룹을 통째로 합성한 뒤 그 결과 위에 잎을 얹지만
+    (_apply_clip_layers, 606행) 빠른 경로에는 그런 중간 결과가 없다 — 잎만 차례로
+    캔버스에 얹기 때문이다. 그대로 태우면 그 잎이 조용히 빠진다.
+
+    **옵트인을 켜고 봐야 한다.** `merge_rgba`로 재면 `allow_clipping`이 없어서
+    어차피 거절되므로, 이 가드를 지워도 테스트가 통과한다.
+
+    그리고 그 잎이 실제로 그림을 바꾸는지도 같이 본다. 그것이 없으면 잎이 빠져도
+    티가 안 나 가드가 지키는 것이 없다 — clip_layer_psd로 쓴 첫 판이 정확히
+    그랬다(거기서는 base가 잎이라 빠른 경로가 옳게 재현했다).
+    """
+    s = _session(clipped_group_psd)
+    base, clip = _by_name(s, "line", "shade")
+
+    assert not render_mod._fast_mergeable(s["psd"], [base, clip], allow_clipping=True), \
+        "그룹에 물린 클리핑 잎인데 빠른 경로가 받았다"
+
+    boxes = [l.bbox for l in [base, clip]]
+    vp = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+          max(b[2] for b in boxes), max(b[3] for b in boxes))
+    whole = _whole_composite(s, [base, clip], vp)
+    base_only = _whole_composite(s, [base], vp)
+    assert not np.array_equal(whole, base_only), \
+        "이 클리핑 잎이 그림을 안 바꾼다 — 빠져도 티가 안 나므로 지키는 게 없다"
 
 
 def test_merge_rgba_draws_a_layer_under_a_hidden_group(hidden_group_psd):
@@ -385,7 +497,8 @@ def test_merge_rgba_draws_a_layer_under_a_hidden_group(hidden_group_psd):
     assert arr[..., 3][:, 0:20].max() == 255, "보이는 라인까지 빠졌다"
 
 
-def test_merge_rgba_tiles_the_viewport_when_fast_path_is_unavailable(clip_layer_psd, monkeypatch):
+def test_merge_rgba_tiles_the_viewport_when_fast_path_is_unavailable(faded_group_psd,
+                                                                     monkeypatch):
     """
     빠른 경로를 못 쓰는 병합은 뷰포트를 타일로 나눠 합성하고, 결과는 한 번에
     합성한 것과 같아야 한다.
@@ -396,9 +509,11 @@ def test_merge_rgba_tiles_the_viewport_when_fast_path_is_unavailable(clip_layer_
     그 부풀림이 사라진다. 합성 자체는 psd-tools가 그대로 하므로 마스크·클리핑·
     그룹 semantics를 다시 구현하지 않는다 — 그것이 이 방식을 고른 이유다.
     """
-    s = _session(clip_layer_psd)
-    # shade는 클리핑이라 float32 빠른 경로가 거부한다 -> 타일 경로로 간다.
-    layers = [s["layers_by_id"][1], s["layers_by_id"][2]]
+    s = _session(faded_group_psd)
+    # 조상 그룹 'ART'의 불투명도가 128이라 빠른 경로가 거부한다 -> 타일 경로로 간다.
+    # (클리핑으로 막던 것을 바꿨다 — 빠른 경로가 이제 클리핑을 재현한다.
+    #  faded_group_psd docstring 참고.)
+    layers = _by_name(s, "line", "line2")
 
     monkeypatch.setattr(render_mod, "FAST_MERGE", False)
     whole, whole_left, whole_top = merge_rgba(s["psd"], layers)
