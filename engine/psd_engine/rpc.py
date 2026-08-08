@@ -53,7 +53,7 @@ RENDER_DIR_GENERATIONS = 3
 OVERLAY_CACHE_PER_SESSION = 8
 
 #: opts 중 실제로 그려지는 픽셀을 바꾸는 설정만 뽑아 캐시 키로 쓴다
-#: (edges.EDGE_DEFAULTS·build_overlay가 읽는 것과 정확히 같은 여섯 개).
+#: (edges.EDGE_DEFAULTS·build_overlay가 읽는 것과 정확히 같은 일곱 개).
 #: "enabled"는 이 값이 캐시 키에 들어갈 필요가 없다 — _cached_plan_overlays는
 #: 호출부가 이미 enabled를 확인한 뒤에만 부른다. "manualColourIds"도 뺀다 —
 #: 그게 바뀌면 뷰 자체(view["colourIds"]/view["lineIds"])가 달라지므로 뷰

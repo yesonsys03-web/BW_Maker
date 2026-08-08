@@ -416,7 +416,9 @@ def stroke_rgba(mask, labels, colour, width):
     # 다시 덮지 않는다(`np.where(grown == 0, ...)`). 한 링(ring)씩 퍼지므로 어느
     # 라벨이 먼저 도착하느냐가 곧 체비셰프 거리로 "더 가까운" 라벨이다 — thick를
     # 만들 때 쓴 정사각형 커널과 같은 거리 척도라 서로 어긋나지 않는다. 반경은
-    # thick와 똑같이 (홀수로 올림한 width) // 2번 반복하면 된다(기본 width=5면 2회).
+    # thick를 채우는 (홀수로 올림한 width) // 2회에 BLUR_REACH를 더 돈다(기본
+    # width=5면 2+2=4회) — 알파가 블러로 thick 밖까지 번지므로, 색이 그 자락까지
+    # 따라가려면 라벨도 그만큼 더 자라야 한다(BLUR_REACH 주석 참고).
     size = width if width % 2 else width + 1
     grown = labels
     for _ in range(size // 2 + BLUR_REACH):

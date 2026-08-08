@@ -739,6 +739,45 @@ def test_stroke_rgba_paints_every_pixel_it_makes_visible():
         f"알파는 있는데 색이 안 칠해진 픽셀이 {int(unpainted.sum())}개다 — 검은 후광")
 
 
+def test_stroke_rgba_paints_a_fringe_pixel_from_the_nearer_fragment():
+    # 위 테스트는 "칠해지긴 했다"만 본다 — BLUR_REACH이 늘린 링이 실제로
+    # 쓰이는지, 그 자리에서 색이 **맞는** 조각(더 가까운 쪽) 걸로 칠해지는지는
+    # 안 본다. 기존 "contested ground" 테스트(폭 11 배열, 라벨 간격 7px)로는
+    # 이걸 못 잰다 — 배열이 좁아 3번째 링(=size//2, BLUR_REACH 이전)에서 이미
+    # 다 채워지고, BLUR_REACH가 더한 링은 리포트가 확인한 대로 그 픽스처에서
+    # 아무것도 안 바꾼다.
+    #
+    # 그래서 두 조각을 thick끼리 안 닿을 만큼 떼어(gap), 그 사이 픽셀이 r=2
+    # 링만으로는 못 닿고 r+BLUR_REACH=4 링이어야만 닿게 잡는다. 라벨 1은
+    # x=20, 라벨 2는 x=27 — 간격 7px(홀수라 정확히 가운데서 동점이 안 난다).
+    # width=5 -> r=2, thick는 [18,22]와 [25,29]. 그 사이 x=23,24가
+    # no-man's-land: x=23은 라벨1까지 3px·라벨2까지 4px(라벨1이 더 가깝다),
+    # x=24는 그 반대(라벨2가 더 가깝다) — 둘 다 r=2보다 멀어(3px, 4px)
+    # BLUR_REACH 없이는 절대 안 닿고, r+BLUR_REACH=4 안에는 들어와 실제로
+    # 칠해진다(실측: 두 자리 모두 alpha=65, BLUR_REACH=0으로 되돌리면 두 자리
+    # 다 알파는 그대로 65인데 색은 (0,0,0)으로 남는다 — task-4-report.md의
+    # BLUR_REACH=0 실행 기록 참고).
+    N = 47
+    xa, xb = 20, 27
+    mask = np.zeros((1, N), bool)
+    mask[0, xa] = True
+    mask[0, xb] = True
+    labels, _ = label_components(mask)
+    colour_a, colour_b = [10, 20, 30], [200, 210, 220]
+    colour = np.zeros((1, N, 3), np.uint8)
+    colour[0, xa] = colour_a
+    colour[0, xb] = colour_b
+    out = stroke_rgba(mask, labels, colour, width=5)
+    thick = _morph(mask, 5, grow=True)
+    assert not thick[0, 23] and not thick[0, 24], "픽스처가 thick 밖을 안 겨눴다"
+    assert out[0, 23, 3] > 0 and out[0, 24, 3] > 0, (
+        "이 자리에 알파가 없다 — 테스트가 무의미하다")
+    assert tuple(out[0, 23, :3]) == tuple(colour_a), \
+        "라벨1(x=20)에 더 가까운 x=23이 검거나 라벨2 색으로 칠해졌다"
+    assert tuple(out[0, 24, :3]) == tuple(colour_b), \
+        "라벨2(x=27)에 더 가까운 x=24가 검거나 라벨1 색으로 칠해졌다"
+
+
 def test_paste_colour_applies_the_layers_mask(tmp_path):
     # topil()은 래스터 마스크를 적용하지 않는다. paste가 그걸 쓰면 가려진 자리가
     # 불투명하게 남아, 실제로는 없는 색 경계가 생기고 그 자리에 가짜 획이 그어진다
