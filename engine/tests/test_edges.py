@@ -1,7 +1,8 @@
 import numpy as np
 
 from psd_engine.edges import (
-    EDGE_DEFAULTS, EDGE_MODES, colour_change, region_boundary, segment_colours)
+    EDGE_DEFAULTS, EDGE_MODES, REGION_GATE_SCALE, colour_change,
+    region_boundary, segment_colours)
 
 
 def _rgba(rows, alpha=255):
@@ -162,6 +163,54 @@ def test_edge_mode_absent_behaves_as_region():
     without = build_overlay(rgba, line, opts)
     explicit = build_overlay(rgba, line, {**opts, "edgeMode": "region"})
     assert (without == explicit).all(), "키가 없을 때와 region을 줬을 때가 다르다"
+
+
+def test_build_overlay_region_gate_catches_a_seam_the_raw_threshold_would_reject():
+    # region의 게이트는 threshold(24)가 아니라 REGION_GATE_SCALE을 곱인 값(16)이다
+    # (REGION_GATE_SCALE 주석 참고) — 두 평평한 대표색이 20만큼 갈리는 경계를
+    # 준다. 16 < 20 < 24라 스케일된 게이트는 잡고, 스케일 안 된 원 문턱이었다면
+    # 놓쳤을 자리다.
+    gate = round(EDGE_DEFAULTS["threshold"] * REGION_GATE_SCALE)
+    assert gate == 16, f"이 테스트가 겨눈 게이트 값 자체가 달라졌다: {gate}"
+
+    a, b = [100, 100, 100], [120, 100, 100]        # 채널 최대차 20
+    rgba = _rgba([[a] * 6 + [b] * 6] * 8)
+    # 픽스처가 실제로 20만큼 갈리는지는 만든 값을 믿지 않고 segment_colours의
+    # 산출물로 확인한다.
+    labels, flats = segment_colours(rgba)
+    assert len(flats) == 2, "두 색이 각자 영역이 돼야 게이트를 시험할 수 있다"
+    diff = int(np.abs(flats[0].astype(np.int16) - flats[1].astype(np.int16)).max())
+    assert diff == 20, f"픽스처의 대표색 차가 20이 아니다: {diff}"
+    assert gate < diff < EDGE_DEFAULTS["threshold"], (
+        "픽스처가 게이트(16)와 원 문턱(24) 사이를 안 겨눴다")
+
+    line = np.zeros((8, 12), np.uint8)
+    opts = {**EDGE_DEFAULTS, "width": 1, "gap": 0, "minLength": 1}
+    region = build_overlay(rgba, line, {**opts, "edgeMode": "region"})
+    assert region[..., 3].max() > 0, (
+        "region이 20짜리 경계를 놓쳤다 — 게이트가 원 문턱처럼 동작하고 있다")
+
+    # change는 이 변경과 무관해야 한다. 20은 change의 raw 문턱(24) 아래라
+    # change 방식(k=3 중앙차분)으로 재도 원래부터 기각된다 — 이 변경 전후로
+    # 똑같이 아무것도 못 찾아야 한다.
+    change = build_overlay(rgba, line, {**opts, "edgeMode": "change"})
+    assert change[..., 3].max() == 0, "change의 동작이 이 변경으로 달라졌다"
+
+
+def test_build_overlay_region_gate_still_rejects_a_seam_below_it():
+    # 게이트를 낮췄다고 다 열리면 안 된다 — 10은 스케일된 게이트(16)에도 원
+    # 문턱(24)에도 못 미친다. 이 테스트는 이 변경 전에도 이미 통과해야 한다.
+    a, b = [100, 100, 100], [110, 100, 100]        # 채널 최대차 10
+    rgba = _rgba([[a] * 6 + [b] * 6] * 8)
+    labels, flats = segment_colours(rgba)
+    assert len(flats) == 2, "두 색이 각자 영역이 돼야 게이트를 시험할 수 있다"
+    diff = int(np.abs(flats[0].astype(np.int16) - flats[1].astype(np.int16)).max())
+    assert diff == 10, f"픽스처의 대표색 차가 10이 아니다: {diff}"
+
+    line = np.zeros((8, 12), np.uint8)
+    opts = {**EDGE_DEFAULTS, "width": 1, "gap": 0, "minLength": 1}
+    region = build_overlay(rgba, line, {**opts, "edgeMode": "region"})
+    assert region[..., 3].max() == 0, "게이트 아래인데 획을 그었다"
 
 
 def test_colour_change_reports_the_darker_side_colour():

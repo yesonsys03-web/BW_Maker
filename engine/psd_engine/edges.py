@@ -87,6 +87,40 @@ ANTIALIAS_RADIUS = 3
 FLAT_COLOUR_FLOOR = 0.0005
 
 
+#: region 검출의 색차 게이트에 곱하는 배율. `region_boundary`의 문턱을 `change`의
+#: threshold와 그대로 공유하면 안 된다 — 둘이 재는 것 자체가 다른 양이다. `change`는
+#: 실제 픽셀 두 개(ANTIALIAS_RADIUS만큼 떨어진)를 직접 비교하는데, `region`은
+#: `segment_colours`가 뭉친 두 영역의 **평평한 대표색**을 비교한다. 완만한
+#: 그라데이션을 가로지르는 경계에서는 분할이 양 끝의 극단값을 대표색 안으로
+#: 흡수해 버리므로, 같은 경계라도 region이 재는 단차는 change가 raw 픽셀로 재는
+#: 것보다 작다 — 같은 문턱을 쓰면 region 쪽이 부당하게 더 잘 기각한다.
+#:
+#: 공유했을 때의 대가는 실측했다. 납품 캐릭터 폴더 100장·342뷰 전수에서 16개
+#: 뷰(5.6%, 파일 7/83)가 획 픽셀의 절반 넘게, 8개는 3/4 넘게, 3개는 95% 넘게
+#: region에서 잃는다. 최악은 change가 그리는 2257px짜리 최종 경계가 region에서
+#: 35px로 준다 — 부드럽게 음영진 그림에서 change가 긋는 경계를 region이 통째로
+#: 기각한다는 뜻이다.
+#:
+#: 2/3이라는 배율은 **점 하나짜리 눈금**에서 나왔다. 최악 뷰 둘에서 문턱을
+#: 24→16→12→4로 훑어가며 region 마스크가 change 마스크를 얼마나 담는지 쟀더니
+#: 16에서 82.7%/93.5%로 회복하고 그 아래로는 평평하다(12·4에서 거의 안 바뀐다).
+#: 즉 24가 16이 되어야 한다는 것만 알고, 참 관계가 **비율**인지 **고정폭 뺄셈**
+#: (예: threshold−8)인지는 이 점 하나로는 못 가른다. 그래도 비율을 골랐다 —
+#: 프리셋의 threshold가 낮아져도(예: 6) 게이트가 계속 양수로 남는다. 고정폭
+#: 뺄셈이었다면 threshold가 그 폭보다 작아지는 지점에서 게이트가 0 이하로
+#: 떨어져, 낮은 문턱을 쓰는 프리셋일수록 먼저 무너진다.
+#:
+#: 16이 안전한지는 따로 쟀다 — 그라데이션 얼굴 실측에서 문턱 0이면 93,860px가
+#: 걸리지만 문턱 2 이상이면 하나도 안 걸린다. 16은 그 위험 지점(2)의 여덟 배라,
+#: 이 배율이 실제로 등고선을 다시 열 만큼 낮지는 않다.
+#:
+#: 고정된 16을 그냥 쓰지 않고 배율로 두는 이유: 그러면 프리셋의 threshold가
+#: region 모드에서 조용히 아무 일도 안 하는 손잡이가 된다. 이 저장소는 그
+#: 결함을 이미 한 번 냈다 — 엔진에서는 width=0이 "자동"인데 프런트는 항상
+#: 5를 보내서 자동이 한 번도 안 돌았고, 그런데도 테스트 양쪽 다 통과했다.
+REGION_GATE_SCALE = 2 / 3
+
+
 def _pack_rgb(rgb):
     return ((rgb[..., 0].astype(np.uint32) << 16)
             | (rgb[..., 1].astype(np.uint32) << 8)
@@ -512,8 +546,10 @@ def build_overlay(colour_rgba, line_alpha, opts):
     if o.get("edgeMode") == "change":
         raw_mask, colour = colour_change(colour_rgba, o["threshold"])
     else:
-        raw_mask, colour = region_boundary(*segment_colours(colour_rgba),
-                                           o["threshold"])
+        # region의 게이트는 threshold를 그대로 쓰지 않는다 — REGION_GATE_SCALE
+        # 주석 참고.
+        gate = max(1, round(o["threshold"] * REGION_GATE_SCALE))
+        raw_mask, colour = region_boundary(*segment_colours(colour_rgba), gate)
     subtracted = subtract_lines(raw_mask, line_alpha, o["gap"], o["lineAlpha"])
     labels, count = label_components(subtracted)
     dropped = drop_small(subtracted, labels, count, o["minLength"])
