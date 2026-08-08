@@ -13,6 +13,11 @@ from PIL import Image, ImageFilter
 # 이쪽에서 render를 가져와도 순환 import가 안 생긴다. export.py가 이미 두 모듈을
 # 함께 가져오는 것(edges의 _composite_overlay + render의 extract_rgba)이 같은
 # 방향이 안전하다는 증거다.
+#
+# 모듈째로도 가져온다. `FAST_MERGE`를 값으로 받으면 PSD_ENGINE_FAST_MERGE=0도,
+# 테스트의 monkeypatch(test_render.py)도 이쪽까지 닿지 않아 "빠른 경로를 끈
+# 상태"가 오버레이에서만 조용히 안 꺼진다 — `render.FAST_MERGE`로 읽는다.
+from . import render
 from .render import extract_rgba
 
 #: 실측에 근거한 기본값. 설계 문서 7절 참고.
@@ -668,6 +673,62 @@ def _drop_filled(line_layers, box, alpha_threshold):
     return kept
 
 
+def _composite_colour(psd, colour_layers, box):
+    """뷰의 색 그림 — 지금까지와 **같은 픽셀**을, 문서 전체를 훑지 않고 만든다.
+
+    `merge_rgba`가 내보내기에서 쓰는 두 단을 그대로 쓴다. 여기 따로 쓰는 이유는
+    가시성 규약이 정반대이기 때문이다: `merge_rgba`는 **숨은 조상 아래 잎도 일부러
+    포함**하고(사용자가 확정한 동작), 오버레이는 반대로 빼야 한다 — 꺼진 대체
+    색상의 실루엣이 색 경계로 오인되기 때문이다
+    (test_overlay_for_view_ignores_a_hidden_colour_layer). 그래서 잎을
+    `is_visible()`로 먼저 거른다. 이것이 옛 필터의 `l.visible` 항과 같은 것을
+    고른다 — Compositor.apply는 필터를 통과 못 한 그룹에서 재귀를 멈추므로,
+    단계마다 자기 플래그만 보는 것이 조상을 훑는 것과 결과가 같다.
+
+    **뷰포트(box)는 숨은 잎까지 포함한 합집합 그대로 둔다.** 이 함수가 좁히는 것은
+    무엇을 합성하느냐뿐이고, 돌려주는 배열의 좌표는 호출부가 그대로 쓴다.
+
+    **배포되는 산출물로 잰 값이 결론이다** — 샘플 #001~#004의 뷰 17개에서
+    `overlay_for_view`가 돌려주는 획 RGBA를 옛 경로와 직접 겨뤘다: 합 55.47초 →
+    26.28초(**2.11배**), 좌표까지 **17/17 바이트 동일**. 아래 두 단의 배율은
+    색 합성 단계만 따로 잰 것이라 이보다 크다.
+
+    두 단, 실측(같은 17개 뷰):
+
+    - **빠른 경로** — 잎을 뷰포트로 부풀리지 않는다. 통과한 12뷰에서 **5.2~9.5배**,
+      12뷰 전부 바이트 동일. 막은 것은 전부 `clipping`이었다(뷰당 1~3장).
+    - **좁은 필터** — 막힌 5뷰의 대비책. 옛 필터는 `id(l) in wanted or l.is_group()`
+      이라 **문서의 보이는 그룹을 전부** 통과시켰고, 그러면 이 뷰가 아무것도 원하지
+      않는 그룹까지 뷰포트 크기로 매번 다시 합성됐다(#001은 그룹이 32개다).
+      조상만 남기면 **1.4~2.2배**, 잰 7뷰 전부 바이트 동일.
+
+    타일링(`_merge_rgba_tiled`)은 재고 뺐다 — 막힌 5뷰에서 3.72→3.49초, 3.34→3.35초로
+    이득이 없다. 뷰포트가 0.1~3.1 Mpx라 2048px 타일로는 갈리지 않는다. 내보내기에서
+    2.38배였던 것은 거기 뷰포트가 54 Mpx급이기 때문이다.
+    """
+    visible = [l for l in colour_layers if l.is_visible() and l.bbox != (0, 0, 0, 0)]
+    if visible and render.FAST_MERGE and render._fast_mergeable(psd, visible):
+        return render._merge_rgba_fast(psd, visible, box)[0]
+    # 조상까지 포함해야 한다. 잎만 통과시키면 그 위 그룹이 필터에서 걸려 재귀가
+    # 거기서 멈추고, 잎에 닿지도 못한다.
+    #
+    # `.visible` 항은 남겨야 한다. `layer_filter`를 주면 psd.composite의 기본
+    # 필터(`Layer.is_visible`)를 **대체**한다 — 더해지는 것이 아니다
+    # (psd_tools/composite/composite.py: `layer_filter = layer_filter or
+    # Layer.is_visible`). 빼면 `wanted` 안의 숨은 잎이 그대로 그려지고, 숨은
+    # 조상 그룹도 통과해 그 아래가 통째로 뚫린다.
+    #
+    # 자기 플래그만 봐도 충분한 이유는 위 docstring과 같다 — 재귀가 숨은
+    # 그룹에서 멈춘다. `render.py`의 BG 경로(render_thumbnails)도 같은 이유로
+    # `.visible`을 쓴다.
+    wanted = render._wanted_ids(psd, colour_layers)
+    img = psd.composite(
+        viewport=box, force=True, color=1.0, alpha=0.0,
+        layer_filter=lambda l: l.visible and id(l) in wanted,
+    )
+    return np.array(img.convert("RGBA"))
+
+
 def overlay_for_view(session, colour_ids, line_ids, opts):
     """
     뷰 하나의 획 오버레이. 그릴 것이 없으면 None.
@@ -684,31 +745,11 @@ def overlay_for_view(session, colour_ids, line_ids, opts):
     if box is None:
         return None
 
-    wanted = {id(l) for l in colour_layers}
-    # `layer_filter`를 주면 psd.composite의 기본 필터(`Layer.is_visible`)를
-    # **대체**한다 — 더해지는 것이 아니다(psd_tools/composite/composite.py:
-    # `layer_filter = layer_filter or Layer.is_visible`). `.visible` 항 없이
-    # `id(l) in wanted or l.is_group()`만 쓰면 숨은 레이어도 조건 없이
-    # 합성된다: `wanted` 안의 숨은 잎은 그대로 그려지고(꺼진 대체 색상의
-    # 실루엣이 색 경계로 오인된다), 숨은 그룹도 전부 통과해 그 자손까지
-    # 뚫린다.
-    #
-    # `.visible`(자신의 플래그, 조상은 안 봄)이면 충분하다. Compositor.apply는
-    # 필터를 통과 못 한 레이어에서 그 자리 그대로 반환하고 자식을 아예 보지
-    # 않으므로(psd_tools/composite/composite.py의 Compositor.apply 앞부분),
-    # 매 단계 자기 플래그만 검사해도 숨은 조상 아래는 재귀가 거기서 멈춰
-    # 전부 걸린다 — `is_visible()`로 조상을 직접 훑는 것과 결과가 같다.
-    # `render.py`의 기존 BG 경로(render_thumbnails)도 같은 이유로 `.visible`을
-    # 쓴다.
     o = {**EDGE_DEFAULTS, **(opts or {})}
     if o.get("colourMode") == "paste":
         colour_rgba = _paste_colour(colour_layers, box)
     else:
-        img = session["psd"].composite(
-            viewport=box, force=True, color=1.0, alpha=0.0,
-            layer_filter=lambda l: l.visible and (id(l) in wanted or l.is_group()),
-        )
-        colour_rgba = np.array(img.convert("RGBA"))
+        colour_rgba = _composite_colour(session["psd"], colour_layers, box)
     line_alpha = _paste_alpha(
         _drop_filled(
             [layers_by_id[i] for i in line_ids], box, o["lineAlpha"]),

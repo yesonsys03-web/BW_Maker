@@ -495,6 +495,8 @@ def test_build_overlay_a_nonzero_width_forces_that_value_regardless_of_line_art(
 
 from psd_engine.edges import _auto_width
 from psd_engine.character import find_views
+from psd_engine import render as render_mod
+from psd_engine.edges import _composite_colour, _union_bbox
 from psd_engine.edges import overlay_for_view, plan_overlays
 from psd_engine.session import SessionStore
 from pytoshop.user import nested_layers
@@ -546,6 +548,120 @@ def test_overlay_for_view_ignores_a_hidden_colour_layer(tmp_path):
     line_id = next(lid for lid, l in s["layers_by_id"].items() if l.name == "LINES")
     result = overlay_for_view(s, [alt_id, base_id], [line_id], EDGE_DEFAULTS)
     assert result is None, "숨은 색 레이어의 실루엣이 경계로 잡혔다"
+
+
+def _gradient_colour_session(tmp_path, extra_top=()):
+    """색 잎 둘이 **그라데이션 알파로 겹치는** 뷰 하나.
+
+    _two_tone_session으로는 아래 비교를 못 한다 — 거기 알파가 전부 255라 어떤
+    합성식을 써도 같은 값이 나와, 빠른 경로가 psd-tools와 어긋나도 "동일"이
+    나온다(conftest의 alpha_overlap_psd가 같은 이유로 있다).
+    """
+    grad = np.tile(np.linspace(0, 255, 24, dtype=np.uint8), (20, 1))
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("dark", (40, 20, 20), 4, 2, 24, 20,
+                       alpha=grad[:, ::-1].copy()),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24, alpha=200),
+    ])
+    line = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    p = tmp_path / "gradient_colour.psd"
+    write_psd(p, list(extra_top) + [
+        nested_layers.Group(name="FRONT 3/4", layers=[line, colours])])
+    store = SessionStore()
+    return store.get(store.open(str(p)))
+
+
+def test_composite_colour_fast_path_matches_psd_tools(tmp_path, monkeypatch):
+    # 빠른 경로는 잎을 뷰포트로 부풀리지 않고 같은 그림을 만든다(실측 5.2~9.5배).
+    # 계약은 **바이트 동일**이므로 두 경로를 직접 겨룬다.
+    #
+    # 두 호출이 정말 **다른 경로**였는지를 psd.composite 호출 횟수로 확인한다.
+    # 이것 없이 배열만 비교하면 두 가지가 조용히 통과한다: 빠른 경로가 애초에
+    # 안 걸린 경우, 그리고 edges가 FAST_MERGE를 `from .render import`로 가져와
+    # monkeypatch가 안 닿는 경우. 둘 다 같은 코드를 두 번 돌므로 "동일"이 나온다.
+    s = _gradient_colour_session(tmp_path)
+    psd = s["psd"]
+    view = find_views(s)[0]
+    colour_layers = [s["layers_by_id"][i] for i in view["colourIds"]]
+    box = _union_bbox(colour_layers)
+
+    calls = []
+    real = psd.composite
+    monkeypatch.setattr(psd, "composite",
+                        lambda **kw: (calls.append(1), real(**kw))[1])
+
+    fast = _composite_colour(psd, colour_layers, box)
+    assert not calls, "빠른 경로가 안 걸렸다 — psd.composite로 떨어졌다"
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow = _composite_colour(psd, colour_layers, box)
+    assert calls, "FAST_MERGE=False가 edges까지 닿지 않았다 — 두 호출이 같은 경로다"
+    assert np.array_equal(fast, slow), "빠른 경로가 psd-tools와 다른 픽셀을 냈다"
+
+
+def test_composite_colour_leaves_unrelated_groups_out_of_the_composite(tmp_path,
+                                                                       monkeypatch):
+    # 옛 필터는 `id(l) in wanted or l.is_group()`이라 문서의 **보이는 그룹을 전부**
+    # 통과시켰다. 그런 그룹은 픽셀에 아무것도 보태지 않으면서(자기 잎은 wanted에
+    # 없어 걸린다) 뷰마다 뷰포트 크기로 다시 합성됐고, 그것이 이 단계 시간의
+    # 절반이었다(실측 한 뷰 7.1초 → 3.6초, 그림은 바이트 동일).
+    #
+    # 픽셀로는 드러나지 않는 회귀라 필터 자체를 본다. 픽셀 비교로 쓰면 옛 코드
+    # 에서도 통과해 아무것도 지키지 못한다.
+    other = nested_layers.Group(name="OTHER", layers=[
+        make_rgb_image("noise", (10, 220, 10), 0, 0, 32, 24)])
+    s = _gradient_colour_session(tmp_path, extra_top=[other])
+    psd = s["psd"]
+    view = find_views(s)[0]
+    colour_layers = [s["layers_by_id"][i] for i in view["colourIds"]]
+    box = _union_bbox(colour_layers)
+
+    # 빠른 경로는 psd.composite를 아예 안 부른다 — 필터를 보려면 대비책으로 민다.
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    captured = {}
+    real = psd.composite
+
+    def spy(**kw):
+        captured["filter"] = kw["layer_filter"]
+        return real(**kw)
+
+    monkeypatch.setattr(psd, "composite", spy)
+    _composite_colour(psd, colour_layers, box)
+
+    keep = captured["filter"]
+    unrelated = next(l for l in psd.descendants() if l.name == "OTHER")
+    assert not keep(unrelated), "이 뷰와 상관없는 그룹이 합성에 들어간다"
+    assert all(keep(l) for l in colour_layers), "색 잎이 필터에서 걸렸다"
+    assert keep(next(l for l in psd.descendants() if l.name == "COLORS")), \
+        "색 잎의 조상 그룹이 걸리면 재귀가 거기서 멈춰 잎에 닿지도 못한다"
+
+
+def test_composite_colour_skips_a_leaf_under_a_hidden_group(tmp_path):
+    # 잎 자신의 플래그는 켜져 있고 **조상 그룹만** 꺼진 모양. 빠른 경로는 넘겨받은
+    # 잎을 조건 없이 그리므로, 거기 넘길 목록을 `.visible`(자기 플래그)로 고르면
+    # 이 잎이 그려진다 — 꺼진 대체 색상의 실루엣이 색 경계로 오인되는 바로 그
+    # 결함이다(test_overlay_for_view_ignores_a_hidden_colour_layer의 조상판).
+    #
+    # find_views를 안 쓰고 id를 직접 넘긴다 — character._pixel_leaves가 숨은
+    # 조상 아래로 내려가지 않으므로, find_views를 거치면 이 필터가 없어도 같은
+    # 결과가 나와 무엇을 지키는 테스트인지 알 수 없어진다.
+    colours = nested_layers.Group(name="COLORS", layers=[
+        nested_layers.Group(name="ALT", visible=False, layers=[
+            make_rgb_image("alt", (10, 200, 10), 4, 4, 8, 8)]),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    p = tmp_path / "hidden_group_colour.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT 3/4", layers=[colours])])
+    store = SessionStore()
+    s = store.get(store.open(str(p)))
+    by_name = {l.name: l for l in s["psd"].descendants()}
+    both = [by_name["alt"], by_name["base"]]
+    box = _union_bbox(both)
+
+    with_alt = _composite_colour(s["psd"], both, box)
+    without = _composite_colour(s["psd"], [by_name["base"]], box)
+    assert np.array_equal(with_alt, without), \
+        "숨은 그룹 아래의 색 잎이 그려졌다"
 
 
 def test_overlay_for_view_is_none_when_there_is_no_unlined_boundary(tmp_path):
