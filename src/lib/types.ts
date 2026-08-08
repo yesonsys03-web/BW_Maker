@@ -128,6 +128,16 @@ export interface EdgeLines {
    * 하므로 당분간 고를 수 있게 둔다.
    */
   colourMode: "composite" | "paste";
+  /**
+   * 색 경계를 찾는 방법. `region`이 기본이다 — 색 그림을 평평한 색 영역으로 나눠
+   * 라벨 경계를 두른다. `change`는 지금까지의 동작(중앙차분 + 비최대 억제)이고,
+   * 그 두 단계가 획을 지글거리게 만들었다.
+   *
+   * 부풀리기 전 1px 마스크에서 `change`의 중심선은 끊기고 겹줄이 나는데 `region`은
+   * 이어진 한 줄이다. 대신 `region`이 최종 경계 픽셀을 파일마다 +5~91% 더 그리고,
+   * 그게 진짜 경계인지는 사람이 봐야 하므로 당분간 고를 수 있게 둔다.
+   */
+  edgeMode: "region" | "change";
 }
 
 export interface EngineError {

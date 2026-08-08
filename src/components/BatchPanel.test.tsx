@@ -37,7 +37,7 @@ const PRESET = {
   excludeTokens: [],
   edgeLines: {
     enabled: false, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64,
-    colourMode: "composite" as const,
+    colourMode: "composite" as const, edgeMode: "region" as const,
   },
 };
 

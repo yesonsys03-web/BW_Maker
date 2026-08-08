@@ -20,7 +20,7 @@ export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"];
  */
 export const DEFAULT_EDGE_LINES: EdgeLines = {
   enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
-  colourMode: "composite",
+  colourMode: "composite", edgeMode: "region",
 };
 
 export const DEFAULT_PRESET: Preset = {
@@ -197,6 +197,9 @@ function validatePreset(value: unknown, index: number): Preset {
   // 기본값 composite로 메우므로, 모르는 값만 걷어내면 예전 프리셋은 예전 동작 그대로다.
   if (edge.colourMode !== "composite" && edge.colourMode !== "paste") {
     throw new Error(`${prefix}.edgeLines.colourMode: composite 또는 paste가 아닙니다.`);
+  }
+  if (edge.edgeMode !== "region" && edge.edgeMode !== "change") {
+    throw new Error(`${prefix}.edgeLines.edgeMode: region 또는 change가 아닙니다.`);
   }
 
   return {
