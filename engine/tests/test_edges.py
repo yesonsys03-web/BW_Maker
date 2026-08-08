@@ -120,6 +120,7 @@ def test_region_boundary_uses_the_darker_of_the_two_regions():
     rgba = _rgba([[red] * 6 + [black] * 6] * 4)
     labels, flats = segment_colours(rgba)
     mask, colour = region_boundary(labels, flats, EDGE_DEFAULTS["threshold"])
+    assert mask.any(), "픽스처에 경계가 없다 — 빈 마스크에서는 색 단언이 공허하게 통과한다"
     assert (colour[mask] == np.array(black, np.uint8)).all(), "어두운 쪽을 안 골랐다"
 
 
