@@ -2,12 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   MergeRule,
+  EdgeLines,
   EngineError,
   OpenResult,
   Operation,
+  OutputFormat,
   Preset,
   ExportResult,
   BatchItemResult,
+  TreeNode,
 } from "./types";
 
 export class EngineRpcError extends Error implements EngineError {
@@ -42,16 +45,46 @@ export async function openPsd(path: string): Promise<OpenResult> {
   return callEngine("open_psd", { path }) as Promise<OpenResult>;
 }
 
+export interface SkippedLayer {
+  id: number;
+  /** 그룹 경로까지 포함한 이름. `*ART/120_BG/BOTTOM_FLOOR_WALL/NOTE FOR LINE: ...` */
+  path: string;
+  kind: string;
+  /**
+   * 규칙에 걸렸는데도 결과에 없는 이유.
+   *
+   * "그릴 수 없어서" — "text"는 라인 PSD 안의 텍스트를 작업 메모로 본 것,
+   * "noPixels"는 그릴 채널이 없는 것.
+   *
+   * "라인이 아니라서" — "notLineWord"는 이름에 검색어가 부분 문자열로만
+   * 들어있는 것("LINEAR DODGE"), "groupHasOwnLine"은 그룹 이름 때문에 딸려올
+   * 뻔했지만 그 그룹에 진짜 라인이 따로 있는 것, "excludedToken"은 제외
+   * 토큰이 붙은 것("line col"), "blendMode"는 normal이 아닌 합성으로 얹힌 것.
+   * 이쪽은 규칙이 의도한 결과라 오류가 아니다.
+   */
+  reason:
+    | "text"
+    | "noPixels"
+    | "notLineWord"
+    | "groupHasOwnLine"
+    | "excludedToken"
+    | "blendMode";
+}
+
 /**
  * Applies a preset to a PSD session.
+ *
+ * skippedLayers는 규칙에 걸렸지만 그릴 수 없어 뺀 레이어들이다. 예전에는 그런
+ * 레이어 하나가 파일 전체의 적용을 실패시켰다(engine/psd_engine/matching.py).
  */
 export async function applyPreset(
   sessionId: number,
   preset: Preset
-): Promise<{ matchedLayerIds: number[]; operations: Operation[] }> {
+): Promise<{ matchedLayerIds: number[]; operations: Operation[]; skippedLayers?: SkippedLayer[] }> {
   return callEngine("apply_preset", { sessionId, preset }) as Promise<{
     matchedLayerIds: number[];
     operations: Operation[];
+    skippedLayers?: SkippedLayer[];
   }>;
 }
 
@@ -61,12 +94,12 @@ export async function applyPreset(
  * 배치 실행 결과가 갈라지지 않는다.
  */
 export async function autoMergeOperations(
-  sessionId: number,
+  tree: TreeNode[],
   layerIds: number[],
   roleTokens: string[] | null,
   rule: MergeRule
 ): Promise<{ operations: Operation[] }> {
-  return callEngine("auto_merge_operations", { sessionId, layerIds, roleTokens, rule }) as Promise<{
+  return callEngine("auto_merge_operations", { tree, layerIds, roleTokens, rule }) as Promise<{
     operations: Operation[];
   }>;
 }
@@ -77,29 +110,54 @@ export async function autoMergeOperations(
  * 쓰기 때문에 표시된 숫자와 결과가 어긋나지 않는다.
  */
 export async function autoMergePreview(
-  sessionId: number,
+  tree: TreeNode[],
   layerIds: number[],
   roleTokens: string[] | null = null
 ): Promise<{ rules: Record<MergeRule, { layerCount: number; names: string[] }> }> {
-  return callEngine("auto_merge_preview", { sessionId, layerIds, roleTokens }) as Promise<{
+  return callEngine("auto_merge_preview", { tree, layerIds, roleTokens }) as Promise<{
     rules: Record<MergeRule, { layerCount: number; names: string[] }>;
   }>;
 }
 
 /**
  * Renders a preview image of visible layers.
+ *
+ * `manualColourIds`는 색 경계선 생성의 수동 지정(설계 3.1) — 자동 검출이
+ * 못 찾은 색 레이어를 아티스트가 트리에서 직접 짚은 것이다. TS `EdgeLines`
+ * 타입에는 이 필드가 없다: `EdgeLines`는 프리셋에 그대로 저장되는데, 지정은
+ * 파일마다 다른 사실이라 프리셋(파일과 무관)에 넣으면 안 되기 때문이다
+ * (opsReducer.ts의 edgeColourIds 주석 참고). 그래서 엔진이 기대하는 모양
+ * (`edgeLines.manualColourIds`)은 여기서, payload를 만드는 이 자리에서만
+ * 합친다. edgeLines가 꺼져 있으면(null) 엔진이 애초에 안 읽으므로 지정이
+ * 있어도 그대로 null을 보낸다 — 기능이 꺼진 상태를 payload로 흉내내지 않는다.
+ *
+ * `includedIds`는 체크박스가 실제로 내보내기에 포함시킨 레이어 목록
+ * (opsReducer.ts의 같은 이름, exportPsd가 받는 것과 같은 값) — 엔진의
+ * `character.manual_views`가 "이미 있는 라인"을 판단하는 기준이다. 여기
+ * 넘기는 `visibleLayerIds`는 눈(previewHiddenIds)까지 반영한 **그리기용**
+ * 목록이라 다르다: 체크는 됐지만 눈으로 숨긴 라인은 visibleLayerIds에 없어도
+ * includedIds에는 있어야 한다 — 그래야 미리보기가 export와 같은 라인을
+ * 뺀다(rpc.py의 render_preview 주석 참고). 생략하면(null) 엔진은 이전
+ * 동작(세션 전체 레이어로 근사)으로 물러난다.
  */
 export async function renderPreview(
   sessionId: number,
   visibleLayerIds: number[],
   maxSize: number,
-  lineColor: string | null = null
+  lineColor: string | null = null,
+  lineColorIds: number[] | null = null,
+  edgeLines: EdgeLines | null = null,
+  manualColourIds: number[] | null = null,
+  includedIds: number[] | null = null
 ): Promise<{ pngPath: string }> {
   return callEngine("render_preview", {
     sessionId,
     visibleLayerIds,
     maxSize,
     lineColor,
+    lineColorIds,
+    edgeLines: edgeLines ? { ...edgeLines, manualColourIds: manualColourIds ?? [] } : null,
+    includedIds,
   }) as Promise<{ pngPath: string }>;
 }
 
@@ -133,6 +191,10 @@ export async function renderThumbnails(
 
 /**
  * Exports a PSD file with applied operations.
+ *
+ * `manualColourIds` — renderPreview 위의 주석과 같다. PreviewCanvas와 여기가
+ * 같은 값(ops.edgeColourIds)을 보내야 한다: 하나라도 다른 값을 쓰면 아티스트가
+ * 미리보기로 승인한 그림과 실제로 내보낸 파일이 달라진다.
  */
 export async function exportPsd(
   sessionId: number,
@@ -144,7 +206,11 @@ export async function exportPsd(
   overwrite: boolean = false,
   verify: boolean = true,
   lineColor: string | null = null,
-  splitLayers: boolean = false
+  splitLayers: boolean = false,
+  outputFormat: OutputFormat = "psd",
+  lineColorIds: number[] | null = null,
+  edgeLines: EdgeLines | null = null,
+  manualColourIds: number[] | null = null
 ): Promise<ExportResult> {
   return callEngine("export_psd", {
     sessionId,
@@ -157,6 +223,9 @@ export async function exportPsd(
     verify,
     lineColor,
     splitLayers,
+    outputFormat,
+    lineColorIds,
+    edgeLines: edgeLines ? { ...edgeLines, manualColourIds: manualColourIds ?? [] } : null,
   }) as Promise<ExportResult>;
 }
 
@@ -172,6 +241,21 @@ export async function batchRun(
   return callEngine("batch_run", { paths, preset, outputDir, overwrite }) as Promise<{
     results: BatchItemResult[];
   }>;
+}
+
+/**
+ * 화면이 지금 보고 있는 파일을 엔진에 알린다. 그 파일의 세션은 LRU 축출에서
+ * 제외되므로, 배경에서 파일을 차례로 여는 동안에도 밀려나지 않는다. 세션
+ * 총량(2개)은 그대로라 메모리는 늘지 않는다 — engine/psd_engine/session.py 참고.
+ *
+ * 세션 id가 아니라 경로를 보내는 이유가 중요하다: 축출 복구는 새 세션을 만드는데,
+ * id로 고정하면 그 새 id를 다시 고정하기 전까지 무방비다. 경로는 재오픈에도
+ * 그대로이므로 그 틈이 없다.
+ *
+ * null은 "지금 보고 있는 파일 없음"이다.
+ */
+export async function pinFile(path: string | null): Promise<void> {
+  return (await callEngine("pin_file", { path })) as void;
 }
 
 /**
@@ -198,6 +282,28 @@ export async function loadPngDataUrl(path: string): Promise<string> {
  */
 export async function pathsExist(paths: string[]): Promise<boolean[]> {
   return invoke("paths_exist", { paths });
+}
+
+export interface PsdScan {
+  /** Sorted, de-duplicated absolute paths of the .psd files that were found. */
+  files: string[];
+  /** True when the walk gave up early on a file-count or depth cap. */
+  truncated: boolean;
+  /** Sub-folders that could not be opened (permissions) and were skipped. */
+  skippedDirs: number;
+}
+
+/**
+ * Expands a mixed list of paths into .psd files: folders are walked
+ * recursively, .psd files pass straight through, everything else is dropped.
+ * The folder button and drag & drop share it, so dropping a folder, a pile of
+ * files, or both at once all follow one rule.
+ *
+ * Rust-side for the same reason as pathsExist: source folders live outside
+ * AppData, which is all plugin-fs's capability scope allows it to read.
+ */
+export async function collectPsdFiles(paths: string[]): Promise<PsdScan> {
+  return invoke("collect_psd_files", { paths });
 }
 
 /**

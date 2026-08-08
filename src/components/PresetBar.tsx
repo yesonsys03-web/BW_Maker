@@ -9,7 +9,13 @@ import { PresetDialog, type PresetDialogMode } from "./PresetDialog";
 interface PresetBarProps {
   sessionId: number | undefined;
   path: string | undefined;
-  hasPendingOps: boolean;
+  /**
+   * 사람이 직접 한 편집(병합/이름변경/포함 변경)이 남아 있는지. ops가 비어
+   * 있는지로 보지 않는 이유는 appStore의 FileEntry.edited 주석 참고 — 프리셋
+   * 적용 자체가 ops를 만들기 때문에, 그걸 근거로 삼으면 지울 편집이 없는데도
+   * 확인창이 뜬다.
+   */
+  hasManualEdits: boolean;
   onApplied: (matchedLayerIds: number[], operations: Operation[]) => void;
   onSessionRefreshed: (path: string, result: OpenResult) => void;
   onError: (title: string, error: EngineError) => void;
@@ -28,7 +34,7 @@ type DialogState = { mode: Extract<PresetDialogMode, "edit">; index: number } | 
 export function PresetBar({
   sessionId,
   path,
-  hasPendingOps,
+  hasManualEdits,
   onApplied,
   onSessionRefreshed,
   onError,
@@ -102,7 +108,7 @@ export function PresetBar({
 
   function handleApplyClick() {
     if (!sessionId || !path || !selectedPreset || applying) return;
-    if (hasPendingOps) {
+    if (hasManualEdits) {
       setConfirmApply(true);
       return;
     }

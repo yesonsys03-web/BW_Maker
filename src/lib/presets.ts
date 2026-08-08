@@ -1,8 +1,27 @@
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { exists, mkdir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
-import type { Preset } from "./types";
+import type { EdgeLines, OutputFormat, Preset } from "./types";
 
 const PRESETS_FILENAME = "presets.json";
+
+/** 색 지정 레이어를 걸러내는 기본 어휘. 엔진 DEFAULT_EXCLUDE_TOKENS와 같다. */
+export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"];
+
+/**
+ * 색 경계선 생성 기본값. 엔진 EDGE_DEFAULTS(engine/psd_engine/edges.py)와
+ * threshold/gap/width/minLength/lineAlpha가 같다 — enabled만 TS 쪽에만 있다
+ * (엔진은 edgeLines.get("enabled")로 켜짐 여부를 읽는다). 기본은 꺼짐이라
+ * BG 프리셋과 이미 저장된 모든 프리셋은 이 기능 도입 전과 똑같이 동작한다.
+ *
+ * `width: 0`은 **자동**이다 — 그 뷰 자신의 라인 굵기에서 유도한다. 이 값들이
+ * 엔진 기본값과 같아야 하는 이유가 여기서 드러난다: 프런트는 다섯 수치를 **항상**
+ * 실어 보내므로, 여기 0이 아닌 값이 있으면 엔진의 자동 판정을 매번 덮어쓴다.
+ * 한동안 여기만 5로 남아 있어서 엔진이 자동을 지원해도 화면에서는 늘 5가 강제됐다.
+ */
+export const DEFAULT_EDGE_LINES: EdgeLines = {
+  enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
+  colourMode: "composite", edgeMode: "region",
+};
 
 export const DEFAULT_PRESET: Preset = {
   name: "line 추출",
@@ -18,6 +37,9 @@ export const DEFAULT_PRESET: Preset = {
   embedPreview: true,
   lineColor: null,
   splitLayers: false,
+  outputFormat: "psd",
+  excludeTokens: [...DEFAULT_EXCLUDE_TOKENS],
+  edgeLines: { ...DEFAULT_EDGE_LINES },
 };
 
 /** 색 통일을 켤 때 처음 제안하는 색. 라인 아트의 기본값. */
@@ -39,6 +61,24 @@ const INCLUDE_TYPES = new Set(["contains", "regex"]);
 const MERGE_MODES = new Set(["none", "all", "perGroup", "byElement"]);
 
 const MERGE_RULES = new Set(["role", "group", "plane"]);
+
+export interface OutputFormatOption {
+  value: OutputFormat;
+  label: string;
+}
+
+/**
+ * 출력 포맷 선택지의 유일한 출처. ExportDialog와 PresetDialog가 그대로 렌더링에
+ * 쓰고, 아래 OUTPUT_FORMATS(검증기)도 여기서 값만 뽑아 쓴다 — 세 군데가 각자
+ * 같은 목록을 따로 적으면, 하나만 바뀌었을 때 나머지가 조용히 어긋난다.
+ */
+export const OUTPUT_FORMAT_OPTIONS: OutputFormatOption[] = [
+  { value: "psd", label: "원본 따름 (.psd / .psb)" },
+  { value: "png", label: "PNG — 투명 배경" },
+  { value: "jpg", label: "JPG — 흰 배경" },
+];
+
+const OUTPUT_FORMATS = new Set<string>(OUTPUT_FORMAT_OPTIONS.map((o) => o.value));
 
 /** byRole 병합의 기본 역할 토큰(아래→위 순서). 엔진 DEFAULT_ROLE_TOKENS와 같다. */
 export const DEFAULT_ROLE_TOKENS = ["UL", "OL_UL", "OL"];
@@ -102,6 +142,13 @@ function validatePreset(value: unknown, index: number): Preset {
       throw new Error(`${prefix}.roleTokens: 문자열 배열이 아닙니다.`);
     }
   }
+  // excludeTokens도 나중에 추가된 항목 — 없으면 기본 어휘로 읽는다. 빈 배열은
+  // "제외하지 않겠다"는 뜻이므로 기본값으로 되돌리지 않는다.
+  if (v.excludeTokens !== undefined) {
+    if (!Array.isArray(v.excludeTokens) || !v.excludeTokens.every((t) => typeof t === "string")) {
+      throw new Error(`${prefix}.excludeTokens: 문자열 배열이 아닙니다.`);
+    }
+  }
   if (typeof v.embedPreview !== "boolean") throw new Error(`${prefix}.embedPreview: boolean이 아닙니다.`);
   // lineColor는 나중에 추가된 항목이라, 그 이전에 저장된 presets.json에는 아예
   // 없다. 없는 것은 "원본 색 유지"(null)로 읽는다 — 형식이 깨진 값과 달리
@@ -111,6 +158,51 @@ function validatePreset(value: unknown, index: number): Preset {
     if (typeof v.lineColor !== "string" || !isValidLineColor(v.lineColor)) {
       throw new Error(`${prefix}.lineColor: null 또는 "#RRGGBB" 형식이 아닙니다.`);
     }
+  }
+  // outputFormat도 나중에 추가된 항목이라 그 이전에 저장된 presets.json에는
+  // 아예 없다. 없는 것은 "원본 따름"(psd)으로 읽는다 — 구버전 파일은 잘못된
+  // 것이 아니기 때문이다. 반대로 들어있는데 모르는 값이면 통과시키지 않는다.
+  if (v.outputFormat !== undefined && !OUTPUT_FORMATS.has(v.outputFormat as string)) {
+    throw new Error(`${prefix}.outputFormat: "psd", "png", "jpg" 중 하나가 아닙니다.`);
+  }
+  // edgeLines도 나중에 추가된 항목이라 그 이전 presets.json에는 없다. 없는 것은
+  // 꺼짐으로 읽는다 — 구버전 파일은 잘못된 것이 아니다. 반대로 들어있는데 형식이
+  // 어긋나면 통과시키지 않는다.
+  // 키 자체가 없는 것(구버전 파일)과 키는 있는데 객체가 아닌 것(손상된 파일)을
+  // 구분해야 한다 — typeof만으로는 null과 배열도 "object"로 잡히므로 따로
+  // 걸러낸다. 여기서 조용히 기본값으로 바꿔치기하면, 파일에 적힌 값을 무시한
+  // 채로 내보내기가 진행되어 아티스트가 의도하지 않은 결과물을 받게 된다 —
+  // 차라리 막는 편이 낫다.
+  if (
+    v.edgeLines !== undefined &&
+    (typeof v.edgeLines !== "object" || v.edgeLines === null || Array.isArray(v.edgeLines))
+  ) {
+    throw new Error(`${prefix}.edgeLines: 객체가 아닙니다.`);
+  }
+  const edge = { ...DEFAULT_EDGE_LINES, ...((v.edgeLines as object | undefined) ?? {}) };
+  if (typeof edge.enabled !== "boolean") {
+    throw new Error(`${prefix}.edgeLines.enabled: boolean이 아닙니다.`);
+  }
+  for (const key of ["threshold", "gap", "width", "minLength", "lineAlpha"] as const) {
+    if (
+      typeof edge[key] !== "number" ||
+      !Number.isFinite(edge[key]) ||
+      !Number.isInteger(edge[key]) ||
+      edge[key] < 0
+    ) {
+      throw new Error(`${prefix}.edgeLines.${key}: 0 이상의 정수가 아닙니다.`);
+    }
+  }
+  // 저장된 프리셋에는 이 두 키가 없다(각 옵션이 생기기 전에 저장된 것들). 위의
+  // 스프레드가 둘 다 기본값으로 메운다 — colourMode는 composite라 예전 프리셋이
+  // 예전 동작 그대로지만, edgeMode는 일부러 그렇지 않다. 기본값이 region(새 검출)
+  // 이라, edgeMode가 없던 예전 프리셋은 이제 새 검출을 쓴다 — region이 옛 change를
+  // 밀어낸 이유가 바로 아티스트가 change를 결함으로 신고했기 때문이다(설계 문서 3절).
+  if (edge.colourMode !== "composite" && edge.colourMode !== "paste") {
+    throw new Error(`${prefix}.edgeLines.colourMode: composite 또는 paste가 아닙니다.`);
+  }
+  if (edge.edgeMode !== "region" && edge.edgeMode !== "change") {
+    throw new Error(`${prefix}.edgeLines.edgeMode: region 또는 change가 아닙니다.`);
   }
 
   return {
@@ -131,6 +223,9 @@ function validatePreset(value: unknown, index: number): Preset {
     embedPreview: v.embedPreview,
     lineColor: (v.lineColor as string | null | undefined) ?? null,
     splitLayers: (v.splitLayers as boolean | undefined) ?? false,
+    outputFormat: (v.outputFormat as OutputFormat | undefined) ?? "psd",
+    excludeTokens: (v.excludeTokens as string[] | undefined) ?? [...DEFAULT_EXCLUDE_TOKENS],
+    edgeLines: edge,
   };
 }
 
@@ -138,6 +233,18 @@ function validatePreset(value: unknown, index: number): Preset {
 function validatePresetList(value: unknown): Preset[] {
   if (!Array.isArray(value)) throw new Error("presets.json: 최상위 값이 배열이 아닙니다.");
   return value.map((item, index) => validatePreset(item, index));
+}
+
+/**
+ * Parses and validates a raw presets.json string into Preset[], with no
+ * filesystem access. `loadPresets` below is this plus the disk read — pulled
+ * apart so validation rules (esp. the "missing key is fine, wrong-shaped key
+ * throws" family) can be exercised directly without going through Tauri fs
+ * mocks for every case.
+ */
+export function parsePresets(raw: string): Preset[] {
+  const parsed: unknown = JSON.parse(raw);
+  return validatePresetList(parsed);
 }
 
 /**
@@ -151,8 +258,7 @@ export async function loadPresets(): Promise<Preset[]> {
   const filePath = await presetsFilePath();
   if (!(await exists(filePath))) return [DEFAULT_PRESET];
   const raw = await readTextFile(filePath);
-  const parsed: unknown = JSON.parse(raw);
-  return validatePresetList(parsed);
+  return parsePresets(raw);
 }
 
 /**

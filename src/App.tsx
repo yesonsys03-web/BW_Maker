@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import { AppProvider, useAppStore } from "./state/appStore";
+import { AppProvider, applyPresetEffect, openFileEffect, useAppStore, type FileEntry } from "./state/appStore";
+import type { SkippedLayer } from "./lib/engine";
 import { FilePanel } from "./components/FilePanel";
 import { LayerTree } from "./components/LayerTree";
 import { ErrorPanel } from "./components/ErrorPanel";
@@ -10,15 +11,28 @@ import { PresetBar } from "./components/PresetBar";
 import { OpsHistory } from "./components/OpsHistory";
 import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
-import { loadPngDataUrl, renderThumbnails } from "./lib/engine";
+import { loadPngDataUrl, pinFile, renderDocumentPreview, renderPreview, renderThumbnails } from "./lib/engine";
 import {
+  BOTTOM_PANEL_HEIGHT_STORAGE_KEY,
+  DEFAULT_FILE_PANEL_WIDTH,
+  FILE_PANEL_WIDTH_STORAGE_KEY,
+  clampFilePanelWidth,
+  parseFilePanelWidth,
+  DEFAULT_BOTTOM_PANEL_HEIGHT,
   DEFAULT_TREE_PANEL_WIDTH,
+  clampBottomPanelHeight,
+  parseBottomPanelHeight,
   TREE_PANEL_WIDTH_STORAGE_KEY,
   clampTreePanelWidth,
   parseTreePanelWidth,
 } from "./lib/layout";
+import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS } from "./lib/presets";
-import { pixelLeafIds, toEngineError } from "./lib/preview";
+import { PREVIEW_MAX_SIZE, toEngineError } from "./lib/preview";
+import { PreviewCache, needsPrefetch, previewRenderSpec } from "./lib/previewCache";
+import { openFailureReport, type FailedOpen } from "./lib/openReport";
+import { undrawableReport } from "./lib/skippedReport";
+import { missingFromChunk, nextThumbnailChunk } from "./lib/thumbnailQueue";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
 import type { Preset } from "./lib/types";
 
@@ -26,16 +40,29 @@ type BottomTab = "history" | "batch";
 
 /**
  * 썸네일을 한 번에 몇 장씩 요청할지. 엔진은 stdin 큐를 순서대로 처리하므로 이
- * 값이 곧 "썸네일 작업이 미리보기 요청을 최대 얼마나 붙잡아두는가"이다.
+ * 값이 곧 "썸네일 작업이 사람이 누른 요청을 최대 얼마나 붙잡아두는가"이다.
+ *
+ * 8이었는데 2로 줄였다. 48px 썸네일 한 장에도 레이어의 원본 해상도 RGBA를 통째로
+ * 디코드하기 때문에(engine/psd_engine/render.py) 장당 비용이 파일 크기에 따라
+ * 수십 배로 벌어진다 — 실측으로 1.4GB짜리 파일은 8장 묶음 하나가 **19초**였고,
+ * 그동안 클릭한 것이 전부 그 뒤에서 기다렸다. 총량은 그대로지만 한 번에 잡는
+ * 시간이 1/4로 줄어 반응이 그만큼 빨라진다.
  */
-const THUMBNAIL_CHUNK_SIZE = 8;
+const THUMBNAIL_CHUNK_SIZE = 2;
+
+/** 실패 목록이 아직 없는 파일용. 매번 새 Set을 만들지 않기 위한 것. */
+const EMPTY_IDS: ReadonlySet<number> = new Set<number>();
 
 /**
- * 첫 썸네일 청크를 보내기 전에 두는 짧은 지연. 파일을 열면 이 효과와
- * PreviewCanvas의 렌더 요청이 같은 틱에 깨어나는데, 아티스트가 기다리는 것은
- * 그림이지 썸네일이 아니다. 이만큼 양보해 미리보기 요청이 큐에 먼저 들어가게 한다.
+ * 미리보기 준비 큐가 "화면이 그리는 중"을 기다려 주는 시간의 상한. 화면 쪽이
+ * 어떤 이유로든 끝났다는 신호를 못 보내더라도 준비가 영영 멈추지는 않게 한다.
  */
-const THUMBNAIL_START_DELAY_MS = 250;
+const PREFETCH_YIELD_MAX_MS = 60_000;
+
+function fileName(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
 
 function AppShell() {
   const {
@@ -45,8 +72,12 @@ function AppShell() {
     addFiles,
     selectFile,
     removeFile,
+    clearFiles,
     togglePreview,
     setPreviewHidden,
+    toggleSolo,
+    setSolo,
+    setEdgeColour,
     pushOp,
     setIncluded,
     applyPresetResult,
@@ -55,18 +86,89 @@ function AppShell() {
     pushError,
     refreshSession,
     engineRestarted,
+    dispatch,
   } = useAppStore();
 
   // Thumbnails per file path (layer ids are only unique within a session, so
   // keying by path — not a flat id map — avoids collisions across files).
   const [thumbsByPath, setThumbsByPath] = useState<Record<string, Record<number, string>>>({});
-  const fetchedPathsRef = useRef<Set<string>>(new Set());
+  /**
+   * 위 상태의 거울. 큐가 한 회차를 마치고 곧바로 다음 회차를 계산하는데, 그때
+   * React는 아직 새 상태를 반영하지 않았다 — 상태만 보면 방금 받은 묶음을 다시
+   * 집어 큐가 끝나지 않는다. 갱신은 항상 둘을 함께 한다.
+   */
+  const thumbsRef = useRef<Record<string, Record<number, string>>>({});
+  /** 파일별로 "지금 화면에 보이는 행". LayerTree가 스크롤에 맞춰 갈아 끼운다. */
+  const wantedThumbsRef = useRef<Map<string, number[]>>(new Map());
+  /** 렌더에 실패했거나 엔진이 끝내 주지 않은 id. 다시 집으면 큐가 끝나지 않는다. */
+  const failedThumbsRef = useRef<Map<string, Set<number>>>(new Map());
+  const drainingThumbsRef = useRef(false);
+
+  const rememberFailedThumbs = useCallback((path: string, ids: number[]) => {
+    if (ids.length === 0) return;
+    const failed = failedThumbsRef.current.get(path) ?? new Set<number>();
+    for (const id of ids) failed.add(id);
+    failedThumbsRef.current.set(path, failed);
+  }, []);
 
   // 레이어 패널 폭. 파일이 아니라 사람에게 붙는 설정이라 재시작을 넘어 유지된다.
   const [treeWidth, setTreeWidth] = useState(() =>
     parseTreePanelWidth(window.localStorage.getItem(TREE_PANEL_WIDTH_STORAGE_KEY))
   );
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  // 파일 패널 폭. 핸들이 오른쪽 모서리에 있으므로 오른쪽으로 끌수록 넓어진다.
+  const [fileWidth, setFileWidth] = useState(() =>
+    parseFilePanelWidth(window.localStorage.getItem(FILE_PANEL_WIDTH_STORAGE_KEY))
+  );
+  const fileDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  function handleFileResizeStart(e: React.PointerEvent<HTMLDivElement>) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    fileDragRef.current = { startX: e.clientX, startWidth: fileWidth };
+  }
+
+  function handleFileResizeMove(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = fileDragRef.current;
+    if (!drag) return;
+    setFileWidth(clampFilePanelWidth(drag.startWidth + (e.clientX - drag.startX), window.innerWidth));
+  }
+
+  function handleFileResizeEnd(e: React.PointerEvent<HTMLDivElement>) {
+    if (!fileDragRef.current) return;
+    fileDragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    window.localStorage.setItem(FILE_PANEL_WIDTH_STORAGE_KEY, String(fileWidth));
+  }
+
+  // 아래 패널 높이. 폭과 같은 이유로 사람에게 붙는 설정이라 재시작을 넘어 유지된다.
+  const [bottomHeight, setBottomHeight] = useState(() =>
+    parseBottomPanelHeight(window.localStorage.getItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY))
+  );
+  const bottomDragRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  function handleBottomResizeStart(e: React.PointerEvent<HTMLDivElement>) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    bottomDragRef.current = { startY: e.clientY, startHeight: bottomHeight };
+  }
+
+  function handleBottomResizeMove(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = bottomDragRef.current;
+    if (!drag) return;
+    // 핸들은 패널 위쪽 모서리에 있으므로 위로 끌수록 높아진다.
+    setBottomHeight(clampBottomPanelHeight(drag.startHeight - (e.clientY - drag.startY), window.innerHeight));
+  }
+
+  function handleBottomResizeEnd(e: React.PointerEvent<HTMLDivElement>) {
+    if (!bottomDragRef.current) return;
+    bottomDragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    window.localStorage.setItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY, String(bottomHeight));
+  }
 
   function handleResizeStart(e: React.PointerEvent<HTMLDivElement>) {
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -100,90 +202,554 @@ function AppShell() {
     if (!activeFile) setExportOpen(false);
   }, [activeFile]);
 
-  // Background thumbnail render per opened file, in chunks. A failure lands on
-  // the error stack and leaves that file's rows showing names only.
+  // 로드 큐. 목록에 들어온 파일을 클릭 없이 하나씩 열고, 선택된 프리셋까지
+  // 적용해 둔다 — 작업자가 파일마다 클릭해서 여는 단계를 없앤 것이다.
   //
-  // Chunked because the engine serves its stdin queue strictly in order: one
-  // request covering all 165 layers of a real plate occupies it for ~13s, and
-  // the preview the artist is actually waiting for sits behind that. Per
-  // chunk the wait is ~1s, and rows fill in progressively instead of all at
-  // the end. Chunks are issued one at a time (each awaited before the next),
-  // so a chunk's PNGs are always read before the engine's render-dir ring
-  // rotates them away.
+  // 한 번에 하나씩 도는 이유는 두 가지다. 엔진은 stdin 큐를 순서대로 처리하므로
+  // 동시에 던져봐야 어차피 줄을 서고, 파일 사이에서 양보해야 그 틈에 사람이 누른
+  // 미리보기 요청이 끼어들 수 있다. 그리고 프리셋 적용은 그 파일을 연 직후에
+  // 붙여야 세션이 아직 엔진의 LRU(2개) 안에 있다.
+  //
+  // 여기서 계산해둔 트리와 매칭 결과는 프론트엔드 상태에 남으므로, 나중에 세션이
+  // 밀려나도 그대로 쓸 수 있다. 다시 필요한 것은 미리보기 렌더뿐이다.
+  const [loadProgress, setLoadProgress] = useState<{ done: number; total: number } | null>(null);
+  const drainingRef = useRef(false);
+  /**
+   * "중지"가 세운 취소 표시. 큐마다 따로 둔다 — 진행바 자리는 하나지만 두 큐는
+   * 별개의 작업이라, "여는 중"에서 누른 중지가 그 뒤에 도는 "미리보기 준비 중"까지
+   * 함께 끄면 사용자는 누른 적 없는 작업이 멈춘 것을 보게 된다.
+   *
+   * 표시를 큐 안이 아니라 여기 바깥에 두는 것이 요점이다. 큐를 시작하는 효과는
+   * state.files가 바뀔 때마다 다시 도는데, 그 효과 안에서 취소를 지우면 중지가
+   * 다음 상태 변화까지밖에 못 간다 — 중지 직후 파일 하나를 클릭해 여는 것만으로도
+   * (selectFile이 idle 파일에 openFileEffect를 부른다) 방금 세운 중지가 풀려
+   * 큐가 통째로 다시 시작됐다. 파일을 새로 추가할 때만 푼다(handleAddFiles).
+   *
+   * 상태와 ref를 함께 든다. 큐가 도는 도중에는 값을 즉시 읽어야 하므로(cancelled)
+   * ref가 필요하고, 취소를 **푸는** 것은 효과를 다시 돌려야 하므로 상태가 필요하다.
+   * ref만 두면 다시 시작할 방법이 없다: 이미 있는 폴더를 다시 추가하면 addFiles
+   * 리듀서가 새 파일이 없다며 같은 state를 그대로 돌려주고(appStore.tsx의
+   * `additions.length === 0`), 그러면 state.files 정체가 그대로라 효과가 안 돈다.
+   */
+  const [loadCancelled, setLoadCancelled] = useState(false);
+  const [prefetchCancelled, setPrefetchCancelled] = useState(false);
+  const loadCancelledRef = useRef(false);
+  const prefetchCancelledRef = useRef(false);
+  const setLoadCancel = useCallback((cancelled: boolean) => {
+    loadCancelledRef.current = cancelled;
+    setLoadCancelled(cancelled);
+  }, []);
+  const setPrefetchCancel = useCallback((cancelled: boolean) => {
+    prefetchCancelledRef.current = cancelled;
+    setPrefetchCancelled(cancelled);
+  }, []);
+  const filesRef = useRef(state.files);
+  const activePathRef = useRef(state.activePath);
+  const presetRef = useRef(selectedPreset);
+  const loadingRef = useRef(false);
+  useEffect(() => {
+    filesRef.current = state.files;
+    activePathRef.current = state.activePath;
+    presetRef.current = selectedPreset;
+  }, [state.files, state.activePath, selectedPreset]);
+
+  /**
+   * 이 인스턴스가 버려졌는지. 세 배경 큐가 회차 사이에 확인한다.
+   *
+   * 큐의 중복 실행은 ref로 막는데(draining/prefetching/drainingThumbs), 그 ref는
+   * 마운트된 인스턴스의 것이다. 리마운트되면 새 인스턴스는 빈 ref로 자기 큐를
+   * 출발시키고 옛 큐는 그대로 돈다 — 옛 큐가 읽는 취소 ref도 함께 버려졌으므로
+   * 진행바의 "중지"조차 닿지 않는다. 개발 중 HMR로 이것이 여섯 겹까지 쌓여 세션
+   * 두 칸을 두고 서로를 밀어냈고, 파일 40~49개가 한꺼번에 'unknown or evicted
+   * session'으로 떨어졌다(세션 id가 900까지 갔다 — 그만큼 PSD를 다시 읽었다).
+   *
+   * 큐 효과들보다 먼저 선언한다. 효과는 선언 순서대로 도니, 다시 마운트될 때
+   * 큐가 출발하기 전에 표시가 내려가 있어야 한다. StrictMode의 정리-재설치도
+   * 같은 인스턴스라 여기서 다시 false가 되고, 그 정리와 재설치 사이는 동기
+   * 구간이라 큐가 그 틈에 확인할 일이 없다.
+   */
+  const abandonedRef = useRef(false);
+  useEffect(() => {
+    abandonedRef.current = false;
+    return () => {
+      abandonedRef.current = true;
+    };
+  }, []);
+
+  // 큐가 도는 동안 엔진을 두고 다투는 다른 작업들을 멈추기 위한 플래그. 세션이
+  // 두 개뿐이라, 동시에 세 군데서 열면 서로의 세션을 밀어내며 PSD를 계속 다시
+  // 파싱하게 된다.
+  const loading = loadProgress !== null;
+  // 썸네일 큐는 회차 사이에 이 값을 다시 읽어야 한다 — 효과가 잡아둔 값을 계속
+  // 쓰면 로드가 시작돼도 양보하지 않는다.
+  loadingRef.current = loading;
+
+  /**
+   * 진행바의 "중지". 버튼은 하나지만 진행바가 지금 무엇을 보여주고 있는지에 따라
+   * 그 큐만 세운다 — 사용자는 지금 눈에 보이는 문구를 멈추려고 누른다.
+   */
+  const cancelLoad = useCallback(() => {
+    if (loading) setLoadCancel(true);
+    else setPrefetchCancel(true);
+  }, [loading, setLoadCancel, setPrefetchCancel]);
+
+  /**
+   * 파일을 새로 추가하는 것은 "이제 다시 시작해도 좋다"는 뜻이므로 중지 표시를
+   * 푼다. 취소가 풀리는 유일한 지점이다 — 그 밖의 상태 변화로는 풀리지 않아야
+   * 중지가 중지로 남는다.
+   */
+  const handleAddFiles = useCallback(
+    (paths: string[]) => {
+      setLoadCancel(false);
+      setPrefetchCancel(false);
+      addFiles(paths);
+    },
+    [addFiles, setLoadCancel, setPrefetchCancel]
+  );
+
+  /**
+   * 목록을 비운다. 비우기는 "이 폴더는 끝났다"는 뜻이므로 중지 표시와 미리 만들기
+   * 실패 목록도 함께 내린다 — 이전 폴더에서 세운 중지가 다음 폴더의 큐를 막으면
+   * 사람은 누른 적 없는 중지를 만나게 된다.
+   */
+  const handleClearFiles = useCallback(() => {
+    setLoadCancel(false);
+    setPrefetchCancel(false);
+    prefetchFailedRef.current.clear();
+    clearFiles();
+  }, [clearFiles, setLoadCancel, setPrefetchCancel]);
+
+  /**
+   * 중지 표시를 푼다. 큐를 여기서 직접 부르지 않는 것이 요점이다 — 상태가
+   * 바뀌면 두 효과가 다시 돌면서 남은 일을 스스로 다시 센다.
+   */
+  const handleResume = useCallback(() => {
+    setLoadCancel(false);
+    setPrefetchCancel(false);
+  }, [setLoadCancel, setPrefetchCancel]);
+
+  useEffect(() => {
+    if (drainingRef.current) return;
+    if (loadCancelled) return;
+    if (!state.files.some((f) => f.status === "idle")) return;
+    drainingRef.current = true;
+
+    // 라인이 하나도 안 나온 자리를 파일별로 모은다. 파일마다 카드를 띄우면 화면이
+    // 카드로 덮여 진짜 오류가 묻히므로 끝에 한 장으로 낸다.
+    const undrawableByPath: Array<{ path: string; layers: SkippedLayer[] }> = [];
+    // 열리지 않은 파일. 파일마다 카드를 띄우면 화면이 덮이므로 끝에 한 장으로 낸다 —
+    // 빠진 레이어 카드와 같은 이유다.
+    const openFailures: FailedOpen[] = [];
+
+    void drainLoadQueue({
+      pendingPaths: () => filesRef.current.filter((f) => f.status === "idle").map((f) => f.path),
+      processPath: async (path) => {
+        // 아직 아무것도 안 보고 있으면 첫 파일을 띄워준다. 그 뒤로는 사람이
+        // 보고 있는 화면을 뺏지 않는다.
+        const result = await openFileEffect(dispatch, path, {
+          activate: activePathRef.current === null,
+          collect: (failed, error) =>
+            openFailures.push({ path: failed, name: fileName(failed), message: error.message, traceback: error.traceback }),
+        });
+        const preset = presetRef.current;
+        // 프리셋은 파일을 연 직후에 붙인다 — 그래야 세션이 아직 엔진의 LRU 안에
+        // 있어서 다시 파싱하지 않는다.
+        if (result && preset) {
+          const undrawable = await applyPresetEffect(dispatch, path, result.sessionId, preset);
+          if (undrawable.length > 0) undrawableByPath.push({ path, layers: undrawable });
+        }
+      },
+      // 큐가 끝났다는 표시(progress=null)와 drainingRef를 같은 순간에 내린다.
+      // 준비 큐는 loading이 false가 되는 것을 보고 다시 도는데, 그때 drainingRef가
+      // 아직 서 있으면 위의 가드에 걸려 되돌아가고 — 그것을 다시 깨울 신호는
+      // 없다(ref는 의존성이 아니다). 두 값을 붙여두면 그 틈이 생기지 않는다.
+      onProgress: (progress) => {
+        if (progress === null) drainingRef.current = false;
+        setLoadProgress(progress);
+      },
+      cancelled: () => abandonedRef.current || loadCancelledRef.current,
+    })
+      .then(() => {
+        const failures = openFailureReport(openFailures);
+        if (failures) {
+          pushError(failures.title, { message: failures.message, traceback: failures.traceback }, failures.paths);
+        }
+
+        const report = undrawableReport(
+          undrawableByPath.map(({ path, layers }) => ({ path, name: fileName(path), layers }))
+        );
+        if (report) pushError(report.title, { message: report.message, traceback: "" }, report.paths);
+      })
+      // 개별 파일의 실패는 openError/pushError로 이미 보고되고 큐는 계속 돈다.
+      // 여기까지 오는 것은 큐 자체가 무너진 경우뿐이라 조용히 넘기면 안 된다.
+      .catch((e) => pushError("파일 자동 열기 중단", toEngineError(e)))
+      .finally(() => {
+        drainingRef.current = false;
+      });
+  }, [state.files, loadCancelled, dispatch, pushError]);
+
+  // 보고 있는 파일을 엔진에 고정한다. 이게 없으면 배경 작업(미리보기 미리
+  // 만들기)이 파일을 차례로 여는 동안 화면이 쓰는 세션이 계속 밀려나고, 썸네일과
+  // 미리보기가 각자 재오픈을 하다 서로를 걷어차며 실패한다.
+  //
+  // 세션 id가 아니라 경로를 보낸다. id로 걸었더니 재오픈이 새 id를 만드는 순간부터
+  // 그것을 다시 고정할 때까지가 무방비였고, 그 사이에 배경 작업이 두 번만 열면
+  // 방금 되살린 세션이 또 사라졌다 — 썸네일이 그렇게 실패했다. 경로는 재오픈에도
+  // 변하지 않으므로 그 틈이 없다.
+  //
+  // 실측상 세션 하나가 파일 크기만큼(700MB급) 메모리를 쓰므로 총량은 늘리지
+  // 않았다 — 두 칸 중 한 칸을 화면 몫으로 못박는 것뿐이다.
+  //
+  // 다만 로드 큐가 도는 동안에는 고정을 푼다. 그때는 이 pin이 지키는 것이 없다 —
+  // 미리보기 캔버스는 paused(=loading)라 안 그리고, 썸네일도 준비 큐도 loading에
+  // 막혀 있어 활성 파일의 세션을 읽는 사람이 아무도 없다. 그런데 고정해두면 두 칸
+  // 중 한 칸이 묶여 큐가 쓸 수 있는 것은 한 칸뿐이고, 여유가 0이 된다: 어디선가
+  // open_psd가 하나만 끼어들어도 큐가 방금 연 세션이 곧바로 밀려나 apply_preset이
+  // 'unknown or evicted session'으로 떨어진다(재시도 상한까지 밀린다). 로드 중에는
+  // 두 칸을 다 큐에 주고, 끝나는 순간 다시 고정한다.
+  useEffect(() => {
+    void pinFile(loading ? null : state.activePath).catch((e) =>
+      pushError("파일 고정 실패", toEngineError(e))
+    );
+  }, [state.activePath, loading, pushError]);
+
+  // 미리보기 준비 큐. 로드가 끝난 뒤 조용히 돌면서 파일마다 라인 합성을 미리
+  // 만들어 캐시에 넣어둔다 — 그래야 파일을 눌렀을 때 엔진에 가지 않고 바로 뜬다.
+  //
+  // 로드와 분리한 이유는 비용이다. 실측(245레이어급 한 장)으로 PSD 열기 3.4초에
+  // 합성 7.9초라, 로드에 합치면 진행바가 세 배로 길어진다. 여기서 미리 해두면
+  // 진행바는 지금처럼 끝나고 그 뒤로 조용히 채워진다.
+  //
+  // 보고 있는 파일을 맨 앞에 둔다. 그 파일은 어차피 PreviewCanvas가 그리는데,
+  // 준비 큐가 다른 파일을 열어 세션을 밀어내면 그 그림에 PSD 재파싱 3.4초가
+  // 얹힌다. 먼저 처리해 캐시에 넣어두면 그 왕복이 통째로 사라진다.
+  const previewCacheRef = useRef(new PreviewCache());
+  const [prefetchProgress, setPrefetchProgress] = useState<{ done: number; total: number } | null>(null);
+  const prefetchingRef = useRef(false);
+  /** 미리 만들기에 실패한 파일. 다시 집으면 큐가 끝나지 않으므로 빼둔다. */
+  const prefetchFailedRef = useRef<Set<string>>(new Set());
+  /**
+   * 이번에 만들어둔 미리보기의 키. 캐시에서 밀려나도 다시 만들지 않기 위한 것이다
+   * — 자세한 이유는 lib/previewCache.ts의 needsPrefetch 주석에 있다.
+   */
+  const prefetchedKeysRef = useRef<Set<string>>(new Set());
+  /**
+   * 배치가 도는 중인지. 배경 큐들이 그동안 비켜서기 위한 신호다.
+   *
+   * 배치는 이제 파일 하나씩 부르므로 파일 사이마다 엔진이 빈다. 그 틈은 사람이
+   * 누른 것을 처리하라고 생긴 것이지, 배경 작업이 끼어들라고 생긴 것이 아니다 —
+   * 비켜서지 않으면 아티스트가 기다리는 배치가 그만큼 느려진다.
+   */
+  const batchRunningRef = useRef(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const handleBatchRunningChange = useCallback((busy: boolean) => {
+    batchRunningRef.current = busy;
+    setBatchRunning(busy);
+  }, []);
+
+  /** 화면이 지금 엔진에 렌더를 걸고 있는지. 준비 큐가 그동안 비켜서기 위한 신호. */
+  const canvasRenderingRef = useRef(false);
+  const handleCanvasRendering = useCallback((busy: boolean) => {
+    canvasRenderingRef.current = busy;
+  }, []);
+  const opsByPathRef = useRef(state.opsByPath);
+  useEffect(() => {
+    opsByPathRef.current = state.opsByPath;
+  }, [state.opsByPath]);
+  /** 파일별 프리셋 매칭 결과. 색 통일을 어디에 걸지 정한다(previewCache의 lineColorIdsFor). */
+  const matchedIdsByPathRef = useRef(state.matchedIdsByPath);
+  useEffect(() => {
+    matchedIdsByPathRef.current = state.matchedIdsByPath;
+  }, [state.matchedIdsByPath]);
+
+  /** 이 파일의 미리보기를 어떻게 그릴지 + 어느 키에 담을지. 아직 못 그리면 null. */
+  const previewPlanFor = useCallback((file: FileEntry) => {
+    const ops = opsByPathRef.current[file.path];
+    if (!file.tree || file.sessionId === undefined || !ops) return null;
+    return previewRenderSpec(
+      { path: file.path, mtime: file.mtime },
+      file.tree,
+      ops.includedIds,
+      ops.previewHiddenIds,
+      ops.soloIds,
+      presetRef.current?.lineColor ?? null,
+      matchedIdsByPathRef.current[file.path],
+      presetRef.current?.edgeLines ?? null,
+      ops.edgeColourIds
+    );
+  }, []);
+
+  useEffect(() => {
+    // loading(=loadProgress 상태)만으로는 부족하다. 로드 큐가 방금 시작한 것은
+    // 같은 커밋 안에서 아직 상태에 반영되지 않아, 두 효과가 한 렌더에서 나란히
+    // 출발할 수 있다 — 중지했다가 재개할 때가 정확히 그 경우다(이미 열린 파일이
+    // 있어 준비 큐도 할 일이 있고, 로드 큐도 남은 대기 파일로 출발한다). 그러면
+    // 세션 두 칸을 두고 다투다 'unknown or evicted session'이 난다. 효과는 선언
+    // 순서대로 도니, 로드 큐가 동기적으로 세워둔 ref를 여기서 보면 그 틈이 없다.
+    if (loading || drainingRef.current || prefetchingRef.current || batchRunning) return;
+    if (prefetchCancelled) return;
+
+    const pending = () => {
+      const cache = previewCacheRef.current;
+      const ready = filesRef.current.filter(
+        (f) =>
+          f.status === "open" &&
+          !prefetchFailedRef.current.has(f.path) &&
+          // 보고 있는 파일은 건드리지 않는다. 그 파일은 캔버스가 어차피 그려서
+          // 같은 캐시에 넣으므로 여기서 또 그릴 이유가 없고, 무엇보다 한 파일을
+          // 두 군데서 열면 서로를 밀어낸다: 둘 다 자기 세션 id를 들고 있다가
+          // 축출되면 각자 재오픈하는데, 세션 칸이 둘뿐이라 그 재오픈이 상대의
+          // 세션을 걷어찬다. 그러다 재시도 상한을 넘겨 실패한 것이
+          // "미리보기를 미리 만들지 못한 파일"의 정체였다(활성 파일 하나만 그랬다).
+          f.path !== activePathRef.current
+      );
+      return ready
+        .filter((f) => needsPrefetch(previewPlanFor(f)?.key ?? null, cache, prefetchedKeysRef.current))
+        .map((f) => f.path);
+    };
+    if (pending().length === 0) return;
+
+    prefetchingRef.current = true;
+    const failures: Array<{ path: string; message: string }> = [];
+
+    void drainLoadQueue({
+      pendingPaths: pending,
+      processPath: async (path) => {
+        // 화면이 그림을 그리는 동안에는 비켜선다. 세션이 두 칸뿐이라 둘이 동시에
+        // 열면 서로의 세션을 밀어내고, 그러다 재시도 상한을 넘기면 사람이 보려던
+        // 그림이 실패한다 — 미리 만들어두려다 지금 보는 화면을 망치는 셈이다.
+        // 기다리는 동안에도 중지를 본다. 예전에는 회차 사이에서만 확인해서, 최대
+        // 60초를 기다리는 사이에 누른 중지가 그동안 아무 반응이 없었다.
+        for (let waited = 0; canvasRenderingRef.current && waited < PREFETCH_YIELD_MAX_MS; waited += 200) {
+          if (prefetchCancelledRef.current || drainingRef.current || abandonedRef.current) return;
+          await new Promise((resolve) => window.setTimeout(resolve, 200));
+        }
+
+        const file = filesRef.current.find((f) => f.path === path);
+        if (!file) return;
+        const plan = previewPlanFor(file);
+        if (!plan || !plan.key || plan.visibleIds.length === 0) return;
+        try {
+          // 축출-재오픈이 끼면 세션 id가 바뀐다. 그림을 만든 그 id로 담아야
+          // 화면 쪽이 같은 키를 만들어 찾아낸다.
+          let sid = file.sessionId!;
+          const { pngPath } = await withEvictedSessionRetry(
+            path,
+            sid,
+            (s) =>
+              plan.documentView
+                ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
+                : renderPreview(s, plan.visibleIds, PREVIEW_MAX_SIZE,
+                                presetRef.current?.lineColor ?? null, plan.lineColorIds,
+                                presetRef.current?.edgeLines ?? null, plan.edgeColourIds,
+                                plan.includedIds),
+            (r) => {
+              sid = r.sessionId;
+              refreshSession(path, r);
+            }
+          );
+          previewCacheRef.current.set(plan.key, await loadPngDataUrl(pngPath));
+          prefetchedKeysRef.current.add(plan.key);
+        } catch (e) {
+          // 한 파일의 실패로 준비 전체를 멈추지 않는다. 예전에는 여기서 예외가
+          // 큐 밖으로 나가 회차가 통째로 끊겼고, 효과가 다시 돌면서 같은 파일에서
+          // 또 끊겨 진행률이 0에서 움직이지 않았다.
+          //
+          // 실패한 파일은 이번 세션 동안 다시 시도하지 않는다 — 그래야 큐가
+          // 끝난다. 그 파일은 눌렀을 때 화면이 직접 그린다.
+          prefetchFailedRef.current.add(path);
+          failures.push({ path, message: toEngineError(e).message });
+        }
+      },
+      onProgress: setPrefetchProgress,
+      // 로드 큐가 출발하면 즉시 비켜선다. 사람이 기다리는 것은 파일이 열리는
+      // 쪽이고, 미리 만들어두는 일은 그 뒤에 해도 된다. 취소 표시는 건드리지
+      // 않으므로 로드가 끝나 loading이 내려가면 알아서 다시 돈다.
+      cancelled: () =>
+        abandonedRef.current || prefetchCancelledRef.current || drainingRef.current || batchRunningRef.current,
+    })
+      .then(() => {
+        // 미리 만들어두는 일이 실패해도 작업을 막지 않는다(누를 때 그리면 된다).
+        // 다만 조용히 넘기지는 않는다 — 파일마다 카드를 내면 화면을 덮으므로
+        // 한 장으로 모은다.
+        if (failures.length === 0) return;
+        pushError(`미리보기를 미리 만들지 못한 파일 ${failures.length}개`, {
+          message: failures.map((f) => `${fileName(f.path)} — ${f.message}`).join("\n"),
+          traceback: "",
+        });
+      })
+      .catch((e) => pushError("미리보기 준비 중단", toEngineError(e)))
+      .finally(() => {
+        prefetchingRef.current = false;
+      });
+  }, [loading, prefetchCancelled, batchRunning, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
+
+  /**
+   * 파일별 내보내기 장수. opsByPath에 이미 있는 값을 세는 것뿐이라 따로 저장하거나
+   * 엔진을 부를 것이 없다. 프리셋이 아직 안 걸린 파일은 빠진다 — 그때의 entries는
+   * 매칭 전의 전체 픽셀 leaf라 내보낼 장수가 아니다.
+   */
+  const entryCounts = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const file of state.files) {
+      if (!file.presetApplied) continue;
+      const ops = state.opsByPath[file.path];
+      if (ops) out[file.path] = ops.entries.length;
+    }
+    return out;
+  }, [state.files, state.opsByPath]);
+
+  /**
+   * 진행바 자리에 띄울 "중지됨" 문구. 도는 큐가 있으면 진행바가 우선이라 null이다.
+   *
+   * 파일 열기가 중지된 경우에는 남은 개수를 말한다 — 사람이 아쉬워하는 값이 그것이다.
+   * 미리보기 준비만 중지된 경우에는 세지 않는다: 무엇이 남았는지는 캐시 적중까지
+   * 봐야 알 수 있어 렌더마다 열린 파일 전부의 트리를 걷게 된다. 재개를 누르면
+   * 큐가 스스로 다시 세고, 할 일이 없으면 그대로 끝난다(버튼은 사라진다).
+   */
+  const stoppedLabel = useMemo(() => {
+    if (loading || prefetchProgress !== null) return null;
+    const idle = state.files.filter((f) => f.status === "idle").length;
+    if (loadCancelled && idle > 0) return `남은 파일 ${idle}개`;
+    if (prefetchCancelled) return "미리보기 준비";
+    return null;
+  }, [loading, prefetchProgress, state.files, loadCancelled, prefetchCancelled]);
+
+  // 로드 큐가 지나간 뒤에도 프리셋이 안 걸린 파일을 위한 그물. 프리셋 목록은
+  // 비동기로 읽히므로(PresetBar) 그보다 파일이 먼저 열렸을 수 있고, 그런 파일은
+  // presetApplied가 false로 남는다. 래치가 서 있는 파일은 건드리지 않으므로
+  // 사람이 해둔 편집을 덮지 않는다.
+  //
+  // 큐가 도는 동안에는 비켜선다. 큐가 여는 파일마다 어차피 프리셋을 붙이는데,
+  // 그 사이 openSuccess가 반영된 렌더를 이 효과가 먼저 보면 같은 파일에 적용이
+  // 두 번 나간다 — 두 번째는 이미 밀려난 세션을 붙들고 실패할 수 있다.
   useEffect(() => {
     const path = state.activePath;
     const sessionId = activeFile?.sessionId;
-    const tree = activeFile?.tree;
-    if (!path || !sessionId || !tree) return;
-    if (fetchedPathsRef.current.has(path)) return;
-    fetchedPathsRef.current.add(path);
+    if (loading) return;
+    if (!path || !sessionId || !selectedPreset) return;
+    if (activeFile?.presetApplied !== false) return;
+    void applyPresetEffect(dispatch, path, sessionId, selectedPreset);
+  }, [state.activePath, activeFile?.sessionId, activeFile?.presetApplied, selectedPreset, loading, dispatch]);
 
-    const ids = pixelLeafIds(tree);
-    if (ids.length === 0) return;
+  // 썸네일은 "화면에 보이는 행"만 만든다. LayerTree가 스크롤에 따라 목록을
+  // 알려주고(onThumbnailsNeeded), 여기서 아직 못 받은 것만 청크로 나눠 받는다.
+  //
+  // 예전에는 파일을 열자마자 전 레이어를 만들었다. 실측으로 엔진 시간의 66%가
+  // 아무도 안 보는 썸네일이었고(303회 / 1038초), 엔진은 stdin 큐를 순서대로
+  // 처리하므로 그동안 사람이 누른 것이 전부 그 뒤에서 기다렸다 — 자동 병합이
+  // "어떤 파일은 즉시, 어떤 파일은 몇 초"로 갈리던 이유가 이것이다. 계산 자체는
+  // 0.01초였고, 기다린 것은 앞에 쌓인 썸네일 청크들이었다.
+  //
+  // 청크를 하나씩 await하는 것은 그대로다. 엔진 렌더 디렉터리는 세대가 돌아가므로
+  // 다음 청크를 내기 전에 이번 PNG를 다 읽어야 한다.
+  const drainThumbnails = useCallback(async () => {
+    if (drainingThumbsRef.current) return;
+    drainingThumbsRef.current = true;
+    try {
+      for (;;) {
+        const path = activePathRef.current;
+        // 로드 큐가 도는 동안에는 양보한다. 세션이 두 칸뿐이라 썸네일 요청이
+        // 큐가 방금 연 세션을 밀어낸다. 큐가 끝나면 아래 효과가 다시 부른다.
+        //
+        // 버려진 인스턴스에서도 멈춘다 — activePathRef는 언마운트 뒤에도 값을
+        // 들고 있어, 이 확인이 없으면 죽은 화면이 남은 청크를 계속 받아간다.
+        if (abandonedRef.current || !path || loadingRef.current || batchRunningRef.current) return;
+        const file = filesRef.current.find((f) => f.path === path);
+        if (file?.sessionId === undefined) return;
+        const chunk = nextThumbnailChunk(
+          wantedThumbsRef.current.get(path) ?? [],
+          thumbsRef.current[path],
+          failedThumbsRef.current.get(path) ?? EMPTY_IDS,
+          THUMBNAIL_CHUNK_SIZE
+        );
+        if (chunk.length === 0) return;
 
-    let cancelled = false;
-    let finished = false;
-    void (async () => {
-      try {
-        await new Promise((resolve) => window.setTimeout(resolve, THUMBNAIL_START_DELAY_MS));
-        for (let i = 0; i < ids.length; i += THUMBNAIL_CHUNK_SIZE) {
-          if (cancelled) return;
-          const chunk = ids.slice(i, i + THUMBNAIL_CHUNK_SIZE);
+        let sid = file.sessionId;
+        try {
           const { thumbs } = await withEvictedSessionRetry(
             path,
-            sessionId,
-            (sid) => renderThumbnails(sid, chunk, 48),
-            (result) => refreshSession(path, result)
+            sid,
+            (s) => renderThumbnails(s, chunk, 48),
+            (result) => {
+              // 청크마다 현재 id를 갱신한다. 처음 잡은 값을 끝까지 쓰면 축출된
+              // 뒤의 청크가 전부 죽은 id로 나가 매번 재오픈(=PSD 재파싱)이 붙는다.
+              sid = result.sessionId;
+              refreshSession(path, result);
+            }
           );
           const entries = await Promise.all(
-            Object.entries(thumbs).map(async ([id, path_]) => [Number(id), await loadPngDataUrl(path_)] as const)
+            Object.entries(thumbs).map(async ([id, p]) => [Number(id), await loadPngDataUrl(p)] as const)
           );
-          if (cancelled) return;
-          setThumbsByPath((prev) => ({ ...prev, [path]: { ...prev[path], ...Object.fromEntries(entries) } }));
+          // 상태와 ref를 함께 올린다. 다음 회차가 곧바로 ref를 읽으므로, 상태만
+          // 갱신하면 React가 반영하기 전에 같은 묶음을 다시 집어 큐가 돌지 않는다.
+          const merged = { ...thumbsRef.current, [path]: { ...thumbsRef.current[path], ...Object.fromEntries(entries) } };
+          thumbsRef.current = merged;
+          setThumbsByPath(merged);
+          // 엔진이 끝내 안 준 id는 없는 것으로 본다 — 안 그러면 같은 묶음이 계속 나간다.
+          rememberFailedThumbs(path, missingFromChunk(chunk, thumbs));
+        } catch (e) {
+          // 이 묶음만 포기하고 나머지는 계속 받는다. 실패한 행은 이름만 보인다.
+          rememberFailedThumbs(path, chunk);
+          pushError("썸네일 렌더링 실패", toEngineError(e));
         }
-        finished = true;
-      } catch (e) {
-        if (cancelled) return;
-        pushError("썸네일 렌더링 실패", toEngineError(e));
       }
-    })();
+    } finally {
+      drainingThumbsRef.current = false;
+    }
+  }, [rememberFailedThumbs, refreshSession, pushError]);
 
-    return () => {
-      cancelled = true;
-      // Switching away mid-run leaves this file with only some of its rows
-      // filled. Clearing the marker lets a later visit pick the rest up —
-      // keeping it would strand those rows on names-only forever.
-      if (!finished) fetchedPathsRef.current.delete(path);
-    };
-  }, [state.activePath, activeFile?.sessionId, activeFile?.tree, refreshSession, pushError]);
+  /** LayerTree가 알려주는 "지금 보이는 행". 목록을 통째로 바꾼다 — 지나간 행은 빠진다. */
+  const requestThumbnails = useCallback(
+    (visibleIds: number[]) => {
+      const path = activePathRef.current;
+      if (!path) return;
+      wantedThumbsRef.current.set(path, visibleIds);
+      void drainThumbnails();
+    },
+    [drainThumbnails]
+  );
+
+  // 로드 큐가 끝났거나 파일이 열렸을 때 멈춰 있던 큐를 다시 깨운다. 보이는 행은
+  // 그대로인데 그때는 양보하느라(또는 세션이 없어) 받지 못했을 수 있다.
+  useEffect(() => {
+    if (!loading) void drainThumbnails();
+  }, [loading, state.activePath, activeFile?.sessionId, drainThumbnails]);
 
   // Removing a file (FilePanel's "×") drops its thumbnails/fetch-marker too,
   // so re-adding the same path later re-fetches instead of reusing stale
   // (or, worse, silently absent) thumbnail data.
   useEffect(() => {
     const validPaths = new Set(state.files.map((f) => f.path));
-    setThumbsByPath((prev) => {
-      let changed = false;
-      const next: typeof prev = {};
-      for (const [p, v] of Object.entries(prev)) {
-        if (validPaths.has(p)) next[p] = v;
-        else changed = true;
-      }
-      return changed ? next : prev;
-    });
-    for (const p of fetchedPathsRef.current) {
-      if (!validPaths.has(p)) fetchedPathsRef.current.delete(p);
+    let changed = false;
+    const next: Record<string, Record<number, string>> = {};
+    for (const [p, v] of Object.entries(thumbsRef.current)) {
+      if (validPaths.has(p)) next[p] = v;
+      else changed = true;
+    }
+    if (changed) {
+      thumbsRef.current = next;
+      setThumbsByPath(next);
+    }
+    for (const map of [wantedThumbsRef.current, failedThumbsRef.current]) {
+      for (const p of map.keys()) if (!validPaths.has(p)) map.delete(p);
     }
   }, [state.files]);
 
   return (
-    <div className="app-shell" style={{ gridTemplateColumns: `240px 1fr ${treeWidth}px` }}>
+    <div
+      className="app-shell"
+      style={{
+        gridTemplateColumns: `${fileWidth}px 1fr ${treeWidth}px`,
+        gridTemplateRows: `auto auto 1fr ${bottomHeight}px`,
+      }}
+    >
       <EngineStatus onRestarted={engineRestarted} onError={pushError} />
 
       <PresetBar
         sessionId={activeFile?.sessionId}
         path={activeFile?.path}
-        hasPendingOps={ops.ops.length > 0}
+        hasManualEdits={activeFile?.edited === true}
         onApplied={applyPresetResult}
         onSessionRefreshed={refreshSession}
         onError={pushError}
@@ -202,9 +768,24 @@ function AppShell() {
       <FilePanel
         files={state.files}
         activePath={state.activePath}
-        onAddFiles={addFiles}
+        loadProgress={loadProgress ? { ...loadProgress, label: "여는 중" } : null}
+        prefetchProgress={prefetchProgress ? { ...prefetchProgress, label: "미리보기 준비 중" } : null}
+        stopped={stoppedLabel}
+        entryCounts={entryCounts}
+        onResizeStart={handleFileResizeStart}
+        onResizeMove={handleFileResizeMove}
+        onResizeEnd={handleFileResizeEnd}
+        onResizeReset={() => {
+          const reset = clampFilePanelWidth(DEFAULT_FILE_PANEL_WIDTH, window.innerWidth);
+          setFileWidth(reset);
+          window.localStorage.setItem(FILE_PANEL_WIDTH_STORAGE_KEY, String(reset));
+        }}
+        onAddFiles={handleAddFiles}
         onSelectFile={selectFile}
         onRemoveFile={removeFile}
+        onClearFiles={handleClearFiles}
+        onCancelLoad={cancelLoad}
+        onResume={handleResume}
         onError={pushError}
       />
 
@@ -212,11 +793,19 @@ function AppShell() {
         <PreviewCanvas
           sessionId={activeFile?.sessionId}
           path={activeFile?.path}
+          mtime={activeFile?.mtime}
           status={activeFile?.status}
           tree={activeFile?.tree}
           includedIds={ops.includedIds}
           previewHiddenIds={ops.previewHiddenIds}
+          soloIds={ops.soloIds}
           lineColor={selectedPreset?.lineColor ?? null}
+          matchedIds={state.activePath ? state.matchedIdsByPath[state.activePath] : undefined}
+          edgeLines={selectedPreset?.edgeLines ?? null}
+          edgeColourIds={ops.edgeColourIds}
+          paused={loading}
+          cache={previewCacheRef.current}
+          onRenderingChange={handleCanvasRendering}
           onSessionRefreshed={refreshSession}
           onError={pushError}
         />
@@ -246,17 +835,37 @@ function AppShell() {
           path={activeFile?.path}
           status={activeFile?.status}
           ops={ops}
-          matchedIds={state.matchedIds}
+          matchedIds={(state.activePath && state.matchedIdsByPath[state.activePath]) || []}
           thumbs={(state.activePath && thumbsByPath[state.activePath]) || {}}
           onSetIncluded={setIncluded}
           onTogglePreview={togglePreview}
           onSetPreviewHidden={setPreviewHidden}
+          onToggleSolo={toggleSolo}
+          onSetSolo={setSolo}
+          onSetEdgeColour={setEdgeColour}
           onPushOp={pushOp}
+          onThumbnailsNeeded={requestThumbnails}
           onError={pushError}
         />
       </div>
 
       <div className="bottom-strip">
+        <div
+          className="bottom-resize-handle"
+          role="separator"
+          aria-label="아래 패널 높이 조절"
+          aria-orientation="horizontal"
+          onPointerDown={handleBottomResizeStart}
+          onPointerMove={handleBottomResizeMove}
+          onPointerUp={handleBottomResizeEnd}
+          onPointerCancel={handleBottomResizeEnd}
+          onDoubleClick={() => {
+            const reset = clampBottomPanelHeight(DEFAULT_BOTTOM_PANEL_HEIGHT, window.innerHeight);
+            setBottomHeight(reset);
+            window.localStorage.setItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY, String(reset));
+          }}
+          title="끌어서 높이 조절 (더블클릭으로 초기화)"
+        />
         <div className="bottom-tabs">
           <button
             type="button"
@@ -273,7 +882,7 @@ function AppShell() {
           {bottomTab === "history" ? (
             <OpsHistory ops={ops} tree={activeFile?.tree} onUndo={undoOp} />
           ) : (
-            <BatchPanel files={state.files} onError={pushError} />
+            <BatchPanel files={state.files} onError={pushError} onRunningChange={handleBatchRunningChange} />
           )}
         </div>
       </div>
@@ -285,6 +894,7 @@ function AppShell() {
           ops={ops}
           tree={activeFile.tree}
           preset={selectedPreset}
+          matchedIds={state.matchedIdsByPath[activeFile.path]}
           onPushOp={pushOp}
           onClose={() => setExportOpen(false)}
           onSessionRefreshed={refreshSession}
@@ -292,7 +902,7 @@ function AppShell() {
         />
       )}
 
-      <ErrorPanel errors={state.errors} onDismiss={dismissError} />
+      <ErrorPanel errors={state.errors} onDismiss={dismissError} onSelectFile={selectFile} />
     </div>
   );
 }

@@ -1,24 +1,172 @@
 """프리셋 규칙 → 매치 레이어 id 목록 / operation list 변환."""
 import re
 
+from .names import has_any_token, token_match, tokenize
+
 
 def _name_matches(name, include):
     kind = include["type"]
     if kind == "contains":
-        if include.get("caseSensitive"):
-            return include["value"] in name
-        return include["value"].lower() in name.lower()
+        value = include["value"]
+        case_sensitive = bool(include.get("caseSensitive"))
+        # 부분 문자열이 아니라 토큰으로 본다 — "LINEAR DODGE"의 앞 네 글자가
+        # 걸리면 안 된다(psd_engine/names.py). 검색값이 토큰을 만들지 못하면
+        # (예: "-") 예전 규칙으로 되돌아간다.
+        if tokenize(value):
+            return token_match(name, value, case_sensitive)
+        return _legacy_contains(name, include)
     if kind == "regex":
         flags = 0 if include.get("caseSensitive") else re.IGNORECASE
         return re.search(include["value"], name, flags) is not None
     raise ValueError(f"unknown include type: {kind!r}")
 
 
-def match_preset(tree, preset):
-    matched = []
-    prefixes = tuple(preset.get("excludeGroupPrefixes", []))
+def _legacy_contains(name, include):
+    """
+    토큰 매칭 이전의 부분 문자열 규칙.
 
-    def walk(nodes, inside_matched_group):
+    두 곳에서 쓴다. 검색값이 토큰을 못 만들 때의 대체 동작, 그리고 "예전에는
+    걸렸는데 이제는 안 걸린다"를 사람에게 알려주는 보고다.
+    """
+    if include["type"] != "contains":
+        return False
+    if include.get("caseSensitive"):
+        return include["value"] in name
+    return include["value"].lower() in name.lower()
+
+
+#: 픽셀을 들고 있어도 결과물에 넣지 않는 종류. 라인 PSD 안의 텍스트는 사실상
+#: 언제나 작업 메모다 — 실제로 만난 예가 "NOTE FOR LINE: apply penthouse
+#: wallpaper to this wall"이다. 포토샵이 텍스트도 래스터화해서 저장하기 때문에
+#: 픽셀 유무로는 걸러지지 않으므로 종류로 못박는다.
+NON_ART_KINDS = frozenset({"type"})
+
+#: 매칭에서 빠진 이유.
+SKIP_TEXT = "text"
+SKIP_NO_PIXELS = "noPixels"
+#: 이름에 검색어가 부분 문자열로는 들어있지만 토큰으로는 아니다("LINEAR DODGE").
+SKIP_NOT_LINE_WORD = "notLineWord"
+#: 그룹 이름이 걸려 딸려올 뻔했지만, 그 그룹 안에 자기 이름으로 걸리는 leaf가
+#: 이미 있어서 뺐다.
+SKIP_GROUP_HAS_OWN_LINE = "groupHasOwnLine"
+
+#: 이름에 제외 토큰이 들어있다.
+SKIP_EXCLUDED_TOKEN = "excludedToken"
+
+#: 합성 모드가 normal이 아니다. 라인 아트는 normal로 그린다 — 실파일 25개의
+#: 진짜 라인 645장이 전부 normal이었고, normal이 아닌 11장은 전부 오탐이었다.
+SKIP_BLEND_MODE = "blendMode"
+
+#: 이름에 line이 있어도 라인 아트가 아닌 것을 걸러내는 토큰. 실제 파일에서
+#: `line col`, `LINE_COL`, `Line Colour`, `Wall_Line_Col`이 18장 나왔다.
+#: 프리셋이 덮어쓸 수 있다 — 네 규칙 중 이것만 어휘에 의존하기 때문이다.
+#: src/lib/presets.ts의 DEFAULT_EXCLUDE_TOKENS와 같은 값이어야 한다.
+DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"]
+
+
+def _leaf_skip_reason(node, exclude_tokens):
+    """
+    후보로 잡힌 leaf를 그래도 빼야 하는 이유. 뺄 이유가 없으면 None.
+
+    빠지는 게이트가 여기 한 곳에만 있어야 한다 — 규칙 ②가 "이 leaf는 알아서
+    걸린다"고 판단하는 근거와 실제로 걸러내는 자리가 갈라지면, 판단은 살아남는다고
+    보는데 실제로는 빠지는 leaf가 생긴다(_exports_itself).
+    """
+    if node["kind"] in NON_ART_KINDS:
+        return SKIP_TEXT
+    # hasPixels가 없는 트리는 이 필드가 생기기 전의 것이다. 그때의 유일한
+    # 통과 조건이 kind == "pixel"이었으므로 그대로 유지한다.
+    if not node.get("hasPixels", node["kind"] == "pixel"):
+        return SKIP_NO_PIXELS
+    if has_any_token(node["name"], exclude_tokens):
+        return SKIP_EXCLUDED_TOKEN
+    # blendMode가 없는 트리는 이 필드가 생기기 전의 것이다. 그때는 모두
+    # 통과했으므로 normal로 본다.
+    if node.get("blendMode", "normal") != "normal":
+        return SKIP_BLEND_MODE
+    return None
+
+
+def _hidden(node, preset):
+    """
+    숨겨서 뺄 레이어인가. 위의 사유들과 달리 이것은 skip 기록을 남기지 않는다 —
+    사용자가 프리셋에서 직접 끈 것이라 알려줄 이유가 없다. 그래서 따로 둔다.
+    """
+    return not node["visible"] and not preset.get("includeHidden", True)
+
+
+def _exports_itself(node, preset, exclude_tokens):
+    """
+    이 leaf가 그룹 이름의 도움 없이 혼자서 결과물에 들어가는가.
+
+    이름이 걸리는지만 봐서는 안 된다. 뒤의 게이트에서 빠질 leaf를 근거로 그룹의
+    일괄 포함을 끄면, 단서 없는 형제들까지 함께 사라져 그 그룹에서 아무것도
+    안 나온다. walk의 leaf 판정과 같은 게이트를 같은 순서로 묻는다.
+    """
+    return (_name_matches(node["name"], preset["include"])
+            and not _hidden(node, preset)
+            and _leaf_skip_reason(node, exclude_tokens) is None)
+
+
+def _has_own_match(nodes, preset, prefixes, exclude_tokens):
+    """
+    하위 트리에 혼자 힘으로 결과물에 들어가는 leaf가 있는가.
+
+    이것이 있으면 그룹의 일괄 포함은 더할 것이 없다 — 그 leaf들이 알아서
+    걸린다. 없을 때만 그룹 이름이 유일한 단서다.
+    """
+    for node in nodes:
+        if node["kind"] == "group":
+            if prefixes and node["name"].startswith(prefixes):
+                continue
+            if _has_own_match(node["children"], preset, prefixes, exclude_tokens):
+                return True
+        elif _exports_itself(node, preset, exclude_tokens):
+            return True
+    return False
+
+
+def match_preset(tree, preset):
+    """
+    규칙에 걸린 레이어 id와, 걸렸지만 그릴 수 없어 뺀 레이어들을 돌려준다.
+
+    예전에는 픽셀 레이어가 아니면 예외를 던졌다. 그런데 실제 작업 파일에는 이름에
+    line이 들어간 메모 텍스트와, 진짜 라인인 스마트오브젝트가 흔히 섞여 있다.
+    그것 하나 때문에 파일 전체가 실패하면 아무것도 못 뽑는다.
+
+    그래서 종류가 아니라 "그릴 픽셀이 있는가"로 가른다 — 스마트오브젝트와 셰이프는
+    래스터화된 채널을 함께 저장하므로 픽셀 레이어와 똑같이 렌더된다. 다만 텍스트는
+    픽셀이 있어도 뺀다(NON_ART_KINDS). 뺀 것은 조용히 버리지 않고 함께 돌려준다.
+
+    다만 noPixels만은 두 가지를 더 묻고 알린다. 이 사유는 "이름은 LINE인데 결과에
+    없다"를 알리려고 있는 것인데, 실파일 24개에서 47장이 나왔고 열어보니 대부분
+    알릴 것이 아니었다(자세한 근거는 tests/test_matching.py의 같은 절).
+
+      - 자기 이름이 걸린 것만 알린다. 그룹 이름에 딸려온 자식(`LINE KEY BOARD`의
+        `bell`, `KEYS`)은 라인으로 지목된 적이 없다.
+      - 같은 그룹에서 라인이 하나라도 나왔으면 알리지 않는다. 그 자리의 그림은
+        결과물에 들어갔다 — 복제 템플릿의 안 쓰는 슬롯(`secondary_line`)이 이렇다.
+
+    남는 것은 "그 자리에서 라인이 한 장도 안 나왔다"뿐이고, 그것만이 파일을 열어볼
+    이유가 된다. 47 → 11장이 되고 납품 폴더 25개는 4 → 4장으로 그대로다.
+    """
+    matched = []
+    skipped = []
+    #: 결과에 라인이 하나라도 들어간 그룹의 경로. 두 번째 물음의 답이다. 그룹이
+    #: 무엇을 냈는지는 walk가 끝나야 알 수 있으므로 판정은 뒤로 미룬다.
+    producing_parents = set()
+    prefixes = tuple(preset.get("excludeGroupPrefixes", []))
+    exclude_tokens = preset.get("excludeTokens", DEFAULT_EXCLUDE_TOKENS)
+
+    def _skip(node, reason):
+        skipped.append({
+            "id": node["id"],
+            "path": "/".join(node["path"]),
+            "kind": node["kind"],
+            "reason": reason,
+        })
+
+    def walk(nodes, inside_matched_group, inside_suppressed):
         for node in nodes:
             if node["kind"] == "group":
                 if prefixes and node["name"].startswith(prefixes):
@@ -26,21 +174,47 @@ def match_preset(tree, preset):
                 hit = preset.get("matchGroups", True) and _name_matches(
                     node["name"], preset["include"]
                 )
-                walk(node["children"], inside_matched_group or hit)
-                continue
-            if not (_name_matches(node["name"], preset["include"]) or inside_matched_group):
-                continue
-            if not node["visible"] and not preset.get("includeHidden", True):
-                continue
-            if node["kind"] != "pixel":
-                raise ValueError(
-                    f"matched non-pixel layer {'/'.join(node['path'])!r} "
-                    f"(kind={node['kind']}) — not supported in v1"
+                # 걸린 그룹이라도 안에 진짜 라인이 있으면 일괄 포함을 끈다.
+                blanket = hit and not _has_own_match(
+                    node["children"], preset, prefixes, exclude_tokens
                 )
+                walk(node["children"],
+                     inside_matched_group or blanket,
+                     inside_suppressed or (hit and not blanket))
+                continue
+            self_hit = _name_matches(node["name"], preset["include"])
+            if not (self_hit or inside_matched_group):
+                if inside_suppressed:
+                    _skip(node, SKIP_GROUP_HAS_OWN_LINE)
+                # 예전 규칙으로는 걸렸을 이름이라면 왜 빠졌는지 남긴다. 이름이
+                # LINE인데 결과에 없으면 사람이 이유를 알 방법이 없다.
+                elif _legacy_contains(node["name"], preset["include"]):
+                    _skip(node, SKIP_NOT_LINE_WORD)
+                continue
+            if _hidden(node, preset):
+                continue
+            reason = _leaf_skip_reason(node, exclude_tokens)
+            if reason:
+                if reason == SKIP_NO_PIXELS:
+                    if not self_hit:
+                        continue
+                    _skip(node, reason)
+                    # 뒤에서 걸러내기 위한 자리 표시. 돌려주기 전에 지운다.
+                    skipped[-1]["_parent"] = "/".join(node["path"][:-1])
+                    continue
+                _skip(node, reason)
+                continue
             matched.append(node["id"])
+            producing_parents.add("/".join(node["path"][:-1]))
 
-    walk(tree, False)
-    return matched
+    walk(tree, False, False)
+
+    def _worth_reporting(entry):
+        # _parent가 없으면 noPixels가 아니다 — 그 사유들은 그대로 둔다.
+        parent = entry.pop("_parent", None)
+        return parent is None or parent not in producing_parents
+
+    return matched, [s for s in skipped if _worth_reporting(s)]
 
 
 #: 역할 접미사의 기본값. 요소 이름에서 이 접미사를 떼어내 "같은 요소"를 알아낸다

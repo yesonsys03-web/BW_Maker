@@ -73,6 +73,56 @@ def test_rpc_full_flow(fixture_psd, tmp_path):
         eng.close()
 
 
+def test_export_png_over_rpc(fixture_psd, tmp_path):
+    """실제 서브프로세스로 열기 → PNG 내보내기 → 검증까지."""
+    eng = EngineProc()
+    try:
+        doc = eng.call("open_psd", path=str(fixture_psd))["result"]
+        sid = doc["sessionId"]
+        # 픽셀 레이어 id — test_rpc_full_flow(:41)와 같은 fixture_psd에서
+        # 확인된 세 픽셀 레이어(hidden line, line, lines)의 id다.
+        out = tmp_path / "out.png"
+        resp = eng.call(
+            "export_psd", sessionId=sid, includedIds=[3, 4, 5], operations=[],
+            naming="pathPrefix", outputPath=str(out), outputFormat="png",
+        )
+        assert "result" in resp, resp.get("error")
+        assert resp["result"]["verification"]["ok"] is True
+        assert out.is_file()
+    finally:
+        eng.close()
+
+
+def test_export_png_split_over_rpc(fixture_psd, tmp_path):
+    """분할 PNG 내보내기: 파일마다 그 파일에 들어간 엔트리 하나로 검증돼야 한다.
+
+    entries 전체를 넘기면 각 파일이 세 레이어를 합친 것과 비교돼 ok가 거짓이
+    된다 — 그 회귀를 잡는 테스트다.
+    """
+    eng = EngineProc()
+    try:
+        doc = eng.call("open_psd", path=str(fixture_psd))["result"]
+        sid = doc["sessionId"]
+        out = tmp_path / "out.png"
+        resp = eng.call(
+            "export_psd", sessionId=sid, includedIds=[3, 4, 5], operations=[],
+            naming="pathPrefix", outputPath=str(out), outputFormat="png",
+            splitLayers=True,
+        )
+        assert "result" in resp, resp.get("error")
+        r = resp["result"]
+
+        assert len(r["outputs"]) == 3
+        for o in r["outputs"]:
+            assert os.path.isfile(o["outputPath"])
+            assert o["verification"]["ok"] is True
+
+        assert r["verification"]["ok"] is True
+        assert os.path.isdir(r["outputPath"])
+    finally:
+        eng.close()
+
+
 def test_rpc_error_carries_traceback(fixture_psd):
     eng = EngineProc()
     try:
@@ -216,3 +266,371 @@ def test_engine_survives_non_ascii_requests_under_a_legacy_locale(tmp_path):
     # 파일이 없다는 정상 에러 응답이어야 하고, 경로의 한글이 그대로 살아 있어야 한다.
     assert msg["id"] == 1
     assert "한글 경로.psd" in msg["error"]["message"]
+
+
+# 메서드를 만들고 허용 목록에 넣는 것을 잊으면, 앱은 그 기능을 부르는 순간
+# "unknown method"로 실패한다 — 코드에는 멀쩡히 있으니 눈으로는 안 보인다.
+# 실제로 pin_session이 그렇게 빠졌다. 두 목록을 맞물려 둔다.
+def test_every_engine_method_is_dispatchable():
+    from psd_engine.rpc import Engine
+
+    public = {
+        name for name in vars(Engine)
+        if not name.startswith("_") and callable(getattr(Engine, name))
+    }
+    # handle은 디스패처 자신이라 RPC로 부를 수 없다.
+    assert public - {"handle"} == Engine._ALLOWED_METHODS
+
+
+def test_allowed_methods_all_exist():
+    from psd_engine.rpc import Engine
+
+    missing = [n for n in Engine._ALLOWED_METHODS if not hasattr(Engine, n)]
+    assert missing == []
+
+
+from pytoshop.user import nested_layers
+
+from conftest import make_rgb_image, write_psd
+
+
+def _two_view_psd(tmp_path):
+    """FRONT/BACK 각각 색 경계가 있고 라인이 없는 뷰 하나씩."""
+    colours_front = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("dark", (40, 20, 20), 0, 0, 16, 12),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    line_front = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    colours_back = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("dark", (10, 60, 90), 0, 0, 16, 12),
+        make_rgb_image("base", (250, 250, 20), 0, 0, 32, 24),
+    ])
+    line_back = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    p = tmp_path / "two_views.psd"
+    write_psd(p, [
+        nested_layers.Group(name="FRONT", layers=[line_front, colours_front]),
+        nested_layers.Group(name="BACK", layers=[line_back, colours_back]),
+    ])
+    return p
+
+
+def test_render_preview_does_not_plan_overlays_for_a_view_whose_lines_are_not_visible(tmp_path, monkeypatch):
+    # plan_overlays 한 번이 뷰당 0.9~11.6초다(설계 9절). 다섯 뷰 모델에서 하나만
+    # 켜도 나머지를 합성해 버리고 버리면 그 낭비를 요청마다 치르고, 요청은
+    # stdin 큐에서 순차 처리되므로 뒤에 온 다른 요청까지 물고 늘어진다. 뷰
+    # 둘짜리 문서에서 하나의 라인만 visibleLayerIds에 넣으면, plan_overlays에는
+    # 그 뷰 하나만 넘어가야 한다(시간을 재는 대신 넘어간 뷰 자체를 본다).
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    captured = []
+    real_plan_overlays = rpc.plan_overlays
+
+    def spy(session, views, opts):
+        captured.append(views)
+        return real_plan_overlays(session, views, opts)
+
+    monkeypatch.setattr(rpc, "plan_overlays", spy)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True})
+
+    assert len(captured) == 1
+    view_names = {v["name"] for v in captured[0]}
+    assert view_names == {"FRONT"}, \
+        f"보이지 않는 뷰까지 plan_overlays에 넘어갔다: {view_names}"
+
+
+def test_render_preview_manual_path_treats_a_checked_line_as_covering_regardless_of_the_eye(fixture_psd, monkeypatch):
+    # character.manual_views의 included_ids는 "내보내기에 이미 포함된 라인"을
+    # 뜻한다. export_psd는 진짜 includedIds를 준다. render_preview는 그 목록을
+    # 받지 않으므로, visibleLayerIds(체크 ∩ 눈)를 그대로 넘기면 체크는 됐지만
+    # 눈으로만 숨긴 라인이 "포함 안 됨"으로 보인다 — 이 앱 다른 곳에서는 눈이
+    # 무엇이 그려지는지만 바꾸는데 여기서만 계산 자체가 눈에 따라 달라지는
+    # 예외였다. render_preview가 manual_views에 넘기는 included_ids가
+    # visibleLayerIds보다 넓어야(체크됐지만 숨은 것도 포함) 한다.
+    captured = {}
+    real_manual_views = rpc.manual_views
+
+    def spy(session, colour_ids, included_ids):
+        captured["included_ids"] = set(included_ids)
+        return real_manual_views(session, colour_ids, included_ids)
+
+    monkeypatch.setattr(rpc, "manual_views", spy)
+
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(fixture_psd))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    all_ids = set(s["layers_by_id"].keys())
+    # render_preview는 visibleLayerIds를 픽셀 레이어로 그리려 하므로(render.py의
+    # _preview_tile) 그룹 id를 넣으면 이 테스트와 무관한 이유로 터진다 — 잎을 쓴다.
+    some_id = next(lid for lid, l in s["layers_by_id"].items() if not l.is_group())
+
+    engine.render_preview(
+        sid, visibleLayerIds=[some_id],
+        edgeLines={"enabled": True, "manualColourIds": [some_id]},
+    )
+
+    assert "included_ids" in captured
+    assert captured["included_ids"] == all_ids, (
+        "render_preview가 visibleLayerIds만 included_ids로 넘겼다 — 체크는 됐지만 "
+        "눈으로 숨긴 라인이 포함 안 된 것으로 보여, 그 라인이 이미 덮는 자리에도 "
+        "획을 겹쳐 그리게 된다"
+    )
+
+
+def test_render_preview_given_the_export_inclusion_list_agrees_with_export_on_which_lines_it_subtracts(
+    tmp_path, monkeypatch
+):
+    # 위 테스트는 includedIds를 안 주는 옛 호출이 여전히 전체 세션 근사로
+    # 동작하는지를 지킨다. 이 테스트는 새 인자 자체가 실제로 쓰이는지를 지킨다
+    # — includedIds가 오면 render_preview는 그것을 그대로 manual_views에
+    # 넘겨야 하고, 그 결과(체크된 라인은 빼고 체크 해제한 라인은 안 빼는 것)가
+    # export_psd가 만드는 것과 같아야 한다(설계 배경 참고). 체크 해제한 라인을
+    # 빼지 않으면 미리보기가 export보다 획이 많아지고, 실수로 계속 빼면
+    # 미리보기가 export보다 획이 적어진다 — 둘 다 이 기능이 고치려는 그 차이다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+    front_colour_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "dark" and l.parent.name == "COLORS" and l.parent.parent.name == "FRONT"
+    )
+
+    captured = []
+    real_manual_views = rpc.manual_views
+
+    def spy(session, colour_ids, included_ids):
+        views = real_manual_views(session, colour_ids, included_ids)
+        captured.append(views)
+        return views
+
+    monkeypatch.setattr(rpc, "manual_views", spy)
+
+    # 체크됨: export_psd라면 이 라인이 이미 있는 것으로 보고 빼야 한다.
+    engine.render_preview(
+        sid, visibleLayerIds=[front_line_id],
+        edgeLines={"enabled": True, "manualColourIds": [front_colour_id]},
+        includedIds=[front_line_id],
+    )
+    front_view = next(v for v in captured[-1] if v["name"] == "FRONT")
+    assert front_view["lineIds"] == [front_line_id], (
+        "체크된 라인을 빼지 않았다 — 미리보기가 export보다 획이 많아진다"
+    )
+
+    # 체크 해제됨: export_psd라면 이 라인은 산출물에 없으므로 빼면 안 된다.
+    engine.render_preview(
+        sid, visibleLayerIds=[front_line_id],
+        edgeLines={"enabled": True, "manualColourIds": [front_colour_id]},
+        includedIds=[],
+    )
+    front_view = next(v for v in captured[-1] if v["name"] == "FRONT")
+    assert front_view["lineIds"] == [], (
+        "체크 해제한 라인을 그대로 뺐다 — 그 라인은 실제로는 export에 없으므로 "
+        "미리보기가 export보다 획이 적어진다"
+    )
+
+
+def _spy_on_plan_overlays(monkeypatch):
+    """rpc.plan_overlays 호출을 가로채 넘어온 views를 기록한다. 실제 계산은 그대로 돈다."""
+    calls = []
+    real_plan_overlays = rpc.plan_overlays
+
+    def spy(session, views, opts):
+        calls.append((views, opts))
+        return real_plan_overlays(session, views, opts)
+
+    monkeypatch.setattr(rpc, "plan_overlays", spy)
+    return calls
+
+
+def test_render_preview_reuses_the_overlay_cache_for_a_repeat_render_with_the_same_inputs(
+    tmp_path, monkeypatch
+):
+    # 컨트롤러 실측: 기능이 꺼지면 미리보기 0.20초, plan_overlays 한 번이
+    # 20.71초 — 켜져 있으면 매 렌더가 20.81초가 된다. 오버레이 내용은 뭐가
+    # 보이는지와 무관하므로, 같은 뷰·같은 설정으로 다시 렌더하면 두 번째는
+    # 계산 없이 캐시를 그대로 써야 한다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id], edgeLines={"enabled": True})
+    engine.render_preview(sid, visibleLayerIds=[front_line_id], edgeLines={"enabled": True})
+
+    assert len(calls) == 1, f"두 번째 렌더가 캐시를 쓰지 않고 다시 계산했다: {len(calls)}번 호출됨"
+
+
+def test_render_preview_recomputes_the_overlay_when_a_pixel_affecting_setting_changes(
+    tmp_path, monkeypatch
+):
+    # width 같은 설정은 그려지는 획 자체를 바꾼다. 캐시 키가 뷰만 보고 설정을
+    # 무시하면, 설정을 바꿔도 예전 오버레이가 그대로 나오는 조용한 오류가
+    # 생긴다 — 두 번째 렌더는 반드시 새로 계산해야 한다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "width": 3})
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "width": 7})
+
+    assert len(calls) == 2, f"설정이 바뀌었는데도 캐시를 재사용했다: {len(calls)}번만 호출됨"
+
+
+def test_render_preview_recomputes_when_the_colour_mode_changes(tmp_path, monkeypatch):
+    # colourMode는 색 그림을 만드는 방법을 바꾸므로 그려지는 획도 바뀔 수 있다
+    # (클리핑을 지키는지가 갈린다). 캐시 키에서 빠져 있으면, 두 방법을 비교하려고
+    # 모드만 바꿔 다시 렌더한 사람이 **이전 모드의 오버레이를 그대로 보고**
+    # "차이 없음"이라는 틀린 판정을 내린다 — 비교하려고 만든 옵션이 비교를 막는다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "colourMode": "composite"})
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "colourMode": "paste"})
+
+    assert len(calls) == 2, (
+        f"모드가 바뀌었는데도 캐시를 재사용했다: {len(calls)}번만 호출됨")
+
+
+def test_render_preview_recomputes_when_the_edge_mode_changes(tmp_path, monkeypatch):
+    # edgeMode는 그려지는 획 자체를 바꾼다. 캐시 키에서 빠져 있으면, 두 검출을
+    # 비교하려고 모드만 바꿔 다시 렌더한 사람이 **이전 모드의 오버레이를 그대로
+    # 보고** "차이 없음"이라는 틀린 판정을 내린다 — colourMode 때와 같은 함정이다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "edgeMode": "region"})
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "edgeMode": "change"})
+
+    assert len(calls) == 2, (
+        f"모드가 바뀌었는데도 캐시를 재사용했다: {len(calls)}번만 호출됨")
+
+
+def test_render_preview_toggling_visibility_does_not_recompute_a_view_already_cached(
+    tmp_path, monkeypatch
+):
+    # 눈 토글은 어떤 오버레이를 "그릴지"만 바꾼다 — 오버레이 자체의 계산과는
+    # 무관하다(뷰포트 필터는 별개로 남는다: 안 보이는 뷰는 애초에 캐시 조회에도
+    # 들어가지 않는다). 뷰 하나를 껐다 다시 켜도, 이미 계산해 둔 것이면 다시
+    # 계산하면 안 된다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+    back_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "BACK"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    # 둘 다 보임 — FRONT, BACK 둘 다 처음 계산된다.
+    engine.render_preview(sid, visibleLayerIds=[front_line_id, back_line_id],
+                          edgeLines={"enabled": True})
+    assert len(calls) == 2
+
+    # FRONT를 끈다 — BACK만 남고, BACK은 이미 캐시돼 있으므로 재계산이 없다.
+    engine.render_preview(sid, visibleLayerIds=[back_line_id],
+                          edgeLines={"enabled": True})
+    assert len(calls) == 2, "숨겨졌다 남은 뷰(BACK)를 다시 계산했다"
+
+    # FRONT를 다시 켠다 — FRONT도 이미 캐시돼 있으므로 재계산이 없어야 한다.
+    engine.render_preview(sid, visibleLayerIds=[front_line_id, back_line_id],
+                          edgeLines={"enabled": True})
+    assert len(calls) == 2, "껐다 켠 뷰(FRONT)를 다시 계산했다 — 캐시가 눈 상태에 묶여 있다"
+
+
+def test_the_overlay_cache_evicts_the_oldest_entry_instead_of_growing_without_bound(
+    tmp_path, monkeypatch
+):
+    # 오버레이 한 장이 3.1 Mpx 뷰에서 12MB를 넘을 수 있다(컨트롤러 실측) —
+    # 세션당 무한정 쌓이면 예전 레이어별 썸네일 캐시가 냈던 OOM을 그대로
+    # 반복한다. 설정을 상한 이상으로 바꿔가며 렌더하면 캐시 크기는 상한을
+    # 넘지 않아야 하고, 밀려난 항목은 다시 요청하면 새로 계산돼야 한다(그냥
+    # 상한에서 추가를 멈추는 구현과 구별하기 위함).
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    widths = list(range(1, rpc.OVERLAY_CACHE_PER_SESSION + 6))
+    for w in widths:
+        engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                              edgeLines={"enabled": True, "width": w})
+
+    assert len(s["_overlay_cache"]) <= rpc.OVERLAY_CACHE_PER_SESSION, (
+        f"캐시가 상한 없이 자랐다: {len(s['_overlay_cache'])}개"
+    )
+
+    calls_before = len(calls)
+    # 가장 먼저 넣은 설정(widths[0])은 상한에 밀려 캐시에서 빠졌어야 한다 —
+    # 다시 요청하면 캐시가 아니라 새로 계산돼야 한다.
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "width": widths[0]})
+    assert len(calls) == calls_before + 1, "상한에 밀려났어야 할 설정이 여전히 캐시에 남아 있다"

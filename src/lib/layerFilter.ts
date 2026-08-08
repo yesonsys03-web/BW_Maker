@@ -1,3 +1,4 @@
+import { tokenMatch } from "./layerNames";
 import type { Entry } from "./opsReducer";
 import type { TreeNode } from "./types";
 
@@ -20,7 +21,11 @@ export const LAYER_FILTER_LABELS: Record<LayerFilterMode, string> = {
   line: "라인만",
 };
 
-/** 프리셋 매칭 결과가 아직 없을 때 "라인만"이 대신 쓰는 이름 규칙. */
+/**
+ * 프리셋 매칭 결과가 아직 없을 때 "라인만"이 대신 쓰는 이름 규칙.
+ * 부분 문자열이 아니라 토큰으로 본다 — 엔진과 같은 규칙이라야 프리셋을 누르는
+ * 순간 목록이 바뀌지 않는다(engine/psd_engine/names.py).
+ */
 export const LINE_NAME_FALLBACK = "line";
 
 export interface FlatLeaf {
@@ -66,7 +71,7 @@ export function lineLeafIds(leaves: FlatLeaf[], matchedIds: number[]): number[] 
     return leaves.filter((l) => matched.has(l.node.id)).map((l) => l.node.id);
   }
   return leaves
-    .filter((l) => l.node.name.toLowerCase().includes(LINE_NAME_FALLBACK))
+    .filter((l) => tokenMatch(l.node.name, LINE_NAME_FALLBACK))
     .map((l) => l.node.id);
 }
 

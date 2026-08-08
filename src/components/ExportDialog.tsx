@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { defaultExportPath, reorderArgs, resolveEntryName } from "../lib/exportFlow";
+import { defaultExportPath, outputExtension, reorderArgs, resolveEntryName } from "../lib/exportFlow";
 import { exportPsd, onEngineEvent } from "../lib/engine";
-import { DEFAULT_LINE_COLOR } from "../lib/presets";
+import { DEFAULT_LINE_COLOR, OUTPUT_FORMAT_OPTIONS } from "../lib/presets";
 import { toEngineError } from "../lib/preview";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { OpsState } from "../lib/opsReducer";
-import type { EngineError, ExportResult, OpenResult, Operation, Preset, TreeNode } from "../lib/types";
+import type { EngineError, ExportResult, OpenResult, Operation, OutputFormat, Preset, TreeNode } from "../lib/types";
 
 interface ExportDialogProps {
   sessionId: number;
@@ -14,6 +14,13 @@ interface ExportDialogProps {
   ops: OpsState;
   tree: TreeNode[] | undefined;
   preset: Preset | undefined;
+  /**
+   * 프리셋 규칙에 걸린 레이어 id(apply_preset의 matchedLayerIds). 색 통일은
+   * 그중 실제로 내보내는 것에만 걸린다 — 아티스트가 손으로 체크해 넣은 색
+   * 레이어는 원본 색으로 나가야 한다(엔진의 assign_line_color 참고).
+   * 아직 프리셋을 적용하지 않았으면 undefined이고, 그때는 예전처럼 전부 건다.
+   */
+  matchedIds: number[] | undefined;
   onPushOp: (op: Operation) => void;
   onClose: () => void;
   onSessionRefreshed: (path: string, result: OpenResult) => void;
@@ -46,6 +53,7 @@ export function ExportDialog({
   ops,
   tree,
   preset,
+  matchedIds,
   onPushOp,
   onClose,
   onSessionRefreshed,
@@ -59,6 +67,7 @@ export function ExportDialog({
   // switch while already open.
   const [outputSuffix, setOutputSuffix] = useState(preset?.outputSuffix ?? "_LINE");
   const [naming, setNaming] = useState<"pathPrefix" | "original">(preset?.naming ?? "pathPrefix");
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>(preset?.outputFormat ?? "psd");
   const [embedPreview, setEmbedPreview] = useState(preset?.embedPreview ?? true);
   const [splitLayers, setSplitLayers] = useState(preset?.splitLayers ?? false);
   const [normalizeColor, setNormalizeColor] = useState((preset?.lineColor ?? null) !== null);
@@ -162,10 +171,14 @@ export function ExportDialog({
 
   async function handleExport() {
     try {
-      const defaultPath = defaultExportPath(srcPath, outputSuffix);
+      const defaultPath = defaultExportPath(srcPath, outputSuffix, outputFormat);
+      const ext = outputExtension(srcPath, outputFormat);
       const outputPath = await save({
         defaultPath,
-        filters: [{ name: "Photoshop", extensions: ["psd"] }],
+        filters: [{
+          name: outputFormat === "psd" ? "Photoshop" : outputFormat.toUpperCase(),
+          extensions: [ext],
+        }],
       });
       if (!outputPath) return;
 
@@ -177,8 +190,12 @@ export function ExportDialog({
         srcPath,
         sessionId,
         (sid) =>
+          // ops.edgeColourIds(수동 지정)를 넘긴다 — PreviewCanvas가 미리보기에
+          // 쓰는 것과 같은 값이어야 한다. 하나라도 다르면 아티스트가 미리보기로
+          // 승인한 그림과 실제 내보낸 파일이 갈린다.
           exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true,
-                    normalizeColor ? lineColor : null, splitLayers),
+                    normalizeColor ? lineColor : null, splitLayers, outputFormat,
+                    matchedIds ?? null, preset?.edgeLines ?? null, ops.edgeColourIds),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);
@@ -244,6 +261,17 @@ export function ExportDialog({
           })}
         </div>
 
+        <label className="preset-field">
+          <span>출력 포맷</span>
+          <select value={outputFormat} onChange={(e) => setOutputFormat(e.target.value as OutputFormat)}>
+            {OUTPUT_FORMAT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
         <div className="export-field-row">
           <label className="preset-field">
             <span>파일명 규칙</span>
@@ -274,10 +302,12 @@ export function ExportDialog({
           </label>
         </div>
 
-        <label className="preset-checkbox">
-          <input type="checkbox" checked={embedPreview} onChange={(e) => setEmbedPreview(e.currentTarget.checked)} />
-          <span>미리보기 이미지 포함하여 내보내기</span>
-        </label>
+        {outputFormat === "psd" && (
+          <label className="preset-checkbox">
+            <input type="checkbox" checked={embedPreview} onChange={(e) => setEmbedPreview(e.currentTarget.checked)} />
+            <span>미리보기 이미지 포함하여 내보내기</span>
+          </label>
+        )}
 
         <label className="preset-checkbox">
           <input

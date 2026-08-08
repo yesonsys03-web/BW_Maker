@@ -24,7 +24,7 @@ import {
   type MergeDestination,
   type OpsState,
 } from "../lib/opsReducer";
-import { toEngineError } from "../lib/preview";
+import { groupSoloIds, toEngineError } from "../lib/preview";
 import { PLANE_TOKENS, type EngineError, type MergeRule, type Operation, type TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
 
@@ -41,7 +41,24 @@ interface LayerTreeProps {
   onSetIncluded: (includedIds: number[]) => void;
   onTogglePreview: (layerId: number) => void;
   onSetPreviewHidden: (layerIds: number[], hidden: boolean) => void;
+  onToggleSolo: (layerId: number) => void;
+  onSetSolo: (layerIds: number[], solo: boolean) => void;
+  /**
+   * 색 경계선 생성의 수동 지정을 켜고 끈다(설계 3.1). ops.edgeColourIds가
+   * 대상 집합이고, 여기서는 컨텍스트 메뉴의 다중 선택을 그대로 받는다.
+   */
+  onSetEdgeColour: (layerIds: number[], on: boolean) => void;
   onPushOp: (op: Operation) => void;
+  /**
+   * 지금 화면에 보이는 pixel leaf id 전부. 스크롤할 때마다 새 목록으로 불린다.
+   *
+   * 썸네일을 이것만 만든다 — 500장짜리 파일을 열자마자 전부 렌더하던 때는 엔진
+   * 시간의 66%가 아무도 안 보는 그림에 갔고, 엔진은 요청을 한 줄로 세워 처리하므로
+   * 그동안 사람이 누른 것이 전부 그 뒤에서 기다렸다(자동 병합이 "랜덤하게" 느리던
+   * 이유). 목록에서 빠진 행은 큐에서도 빠지므로, 빠르게 훑고 지나간 구간까지
+   * 만들지는 않는다.
+   */
+  onThumbnailsNeeded: (visibleLayerIds: number[]) => void;
   onError: (title: string, error: EngineError) => void;
 }
 
@@ -114,7 +131,11 @@ export function LayerTree({
   onSetIncluded,
   onTogglePreview,
   onSetPreviewHidden,
+  onToggleSolo,
+  onSetSolo,
+  onSetEdgeColour,
   onPushOp,
+  onThumbnailsNeeded,
   onError,
 }: LayerTreeProps) {
   const [collapsedIds, setCollapsedIds] = useState<Set<number>>(new Set());
@@ -138,9 +159,13 @@ export function LayerTree({
   // 길어질 수 있어 한 단계 접어둔다.
   const [mergeIntoOpen, setMergeIntoOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  /** 스크롤되는 트리 본체. 썸네일 관측자의 기준(root)이다. */
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
   const previewHiddenSet = useMemo(() => new Set(ops.previewHiddenIds), [ops.previewHiddenIds]);
+  const soloSet = useMemo(() => new Set(ops.soloIds), [ops.soloIds]);
+  const edgeColourSet = useMemo(() => new Set(ops.edgeColourIds), [ops.edgeColourIds]);
   const matchedSet = useMemo(() => new Set(matchedIds), [matchedIds]);
 
   const allLeaves = useMemo(() => (tree ? flattenLeaves(tree) : []), [tree]);
@@ -203,6 +228,45 @@ export function LayerTree({
           : [],
     [filtering, flatRows, expandedMerges, tree, collapsedIds]
   );
+
+  /**
+   * 화면에 들어온 행만 썸네일을 요청한다.
+   *
+   * 목록이 바뀔 때마다(스크롤이 아니라 행 구성이 바뀔 때) 관측자를 새로 걸고
+   * 지금 붙어 있는 행들을 관찰한다. rootMargin으로 화면 조금 바깥까지 미리
+   * 잡아, 스크롤하는 동안 빈 칸이 따라오지 않게 한다.
+   *
+   * 나간 행은 목록에서 뺀다. 한 번 보인 것을 계속 쌓으면 빠르게 훑고 지나간
+   * 구간까지 전부 만들게 되어, 결국 예전처럼 500장을 만들게 된다.
+   */
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root) return;
+    const visible = new Set<number>();
+    const report = () => onThumbnailsNeeded([...visible]);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        let changed = false;
+        for (const entry of entries) {
+          const raw = (entry.target as HTMLElement).dataset.thumbId;
+          const id = raw === undefined ? NaN : Number(raw);
+          if (!Number.isFinite(id)) continue;
+          if (entry.isIntersecting) {
+            if (!visible.has(id)) {
+              visible.add(id);
+              changed = true;
+            }
+          } else if (visible.delete(id)) {
+            changed = true;
+          }
+        }
+        if (changed) report();
+      },
+      { root, rootMargin: "300px 0px" }
+    );
+    root.querySelectorAll<HTMLElement>("[data-thumb-id]").forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
+  }, [visibleOrder, onThumbnailsNeeded]);
 
   // Layer ids are only unique within a single session, so switching the
   // active file (a new `path`) must drop any selection/collapse/menu state
@@ -312,6 +376,16 @@ export function LayerTree({
     onSetPreviewHidden(leafIds, anyVisible);
   }
 
+  // 하위가 전부 solo면 누를 때 전부 풀고, 아니면 전부 건다. 그룹 눈과 같은 규약이다.
+  // 단, 눈과 달리 soloIds에는 pixel leaf id만 넣는다(groupSoloIds 참고) — 그리지
+  // 못하는 id로 soloIds가 채워지면 "solo 중"인데 어느 행도 solo로 안 보이는
+  // 막다른 상태에 갇힌다.
+  function handleGroupSolo(node: TreeNode) {
+    const soloIds = groupSoloIds([node]);
+    const allSoloed = soloIds.length > 0 && soloIds.every((id) => soloSet.has(id));
+    onSetSolo(soloIds, !allSoloed);
+  }
+
   function handleContextMenu(id: number, e: ReactMouseEvent) {
     e.preventDefault();
     const ids = selectedIds.has(id) && selectedIds.size > 0 ? Array.from(selectedIds) : [id];
@@ -345,6 +419,39 @@ export function LayerTree({
   }
 
   /**
+   * 색 경계선 생성의 수동 지정 대상. pixel leaf만 남긴다 — 색 경계선은 실제로
+   * 칠해진 픽셀에서만 의미가 있다(체크박스가 pixel leaf에만 걸리는 것과 같은
+   * 이유). 병합 행이 섞여 있으면 expandRowIds가 원본 소스 id로 펼친다.
+   */
+  function edgeColourTargets(ids: number[]): number[] {
+    if (!tree) return [];
+    return expandRowIds(ids).filter((id) => nodeById(tree, id)?.kind === "pixel");
+  }
+
+  /**
+   * 컨텍스트 메뉴의 "색 원본으로 지정" 버튼. 다중 선택이 섞인 상태(일부만
+   * 지정됨)일 때의 동작은 그룹 solo/eye 토글과 같은 규약을 쓴다 — 전부
+   * 지정됐으면 눌렀을 때 전부 해제하고, 하나라도 안 됐으면 전부 지정한다.
+   * 선택마다 개별 토글하면 "일부는 켜지고 일부는 꺼지는" 결과를 예측하기
+   * 어렵고, 그 규약이 이미 이 파일 전체에서 쓰이고 있어 일관적이다.
+   */
+  function handleToggleEdgeColour(ids: number[]) {
+    setContextMenu(null);
+    const targets = edgeColourTargets(ids);
+    if (targets.length === 0) return;
+    const allDesignated = targets.every((id) => edgeColourSet.has(id));
+    onSetEdgeColour(targets, !allDesignated);
+  }
+
+  function edgeColourButtonLabel(ids: number[]): string {
+    const targets = edgeColourTargets(ids);
+    if (targets.length > 0 && targets.every((id) => edgeColourSet.has(id))) {
+      return "색 원본 지정 해제";
+    }
+    return "색 원본으로 지정";
+  }
+
+  /**
    * 지금 화면에 보이는 leaf 전체를 한 번에 체크/해제한다. 필터로 좁힌 뒤
    * 하나씩 누르지 않아도 되게 하는 것이 이 패널의 목적이므로, 대상은 항상
    * "필터 결과"이지 트리 전체가 아니다.
@@ -354,15 +461,17 @@ export function LayerTree({
    * (프리셋의 요소별 병합과 같은 함수) 여기서는 그 결과 연산만 받아 쌓는다 —
    * 규칙을 프런트에도 따로 구현하면 배치 실행 결과와 갈라진다.
    */
+  // 세션이 아니라 트리를 보낸다 — 이름만 보고 묶는 계산이라 픽셀이 필요 없고,
+  // 트리는 세션이 밀려나도 화면에 남아 있다. 세션을 쓰던 때는 파일을 오갔다
+  // 돌아오면 축출된 세션을 되살리느라 버튼 한 번에 PSD 재파싱 3.4초가 붙었다.
   async function openRuleMenu() {
-    const sid = sessionId;
-    if (!sid) return;
+    if (!tree) return;
     const targets = bulkTogglableIds(filteredLeaves);
     if (targets.length === 0) return;
     setRuleMenuOpen(true);
     setRulePreview(null);
     try {
-      const { rules } = await autoMergePreview(sid, targets, roleTokens);
+      const { rules } = await autoMergePreview(tree, targets, roleTokens);
       setRulePreview(rules);
     } catch (e) {
       setRuleMenuOpen(false);
@@ -371,14 +480,13 @@ export function LayerTree({
   }
 
   async function handleAutoMerge(rule: MergeRule) {
-    const sid = sessionId;
-    if (!sid) return;
+    if (!tree) return;
     const targets = bulkTogglableIds(filteredLeaves);
     if (targets.length === 0) return;
     setRuleMenuOpen(false);
     setAutoMerging(true);
     try {
-      const { operations } = await autoMergeOperations(sid, targets, roleTokens, rule);
+      const { operations } = await autoMergeOperations(tree, targets, roleTokens, rule);
       // 규칙을 바꿔 다시 누르는 것이 정상 사용이다. 이미 병합된 상태 위에 그대로
       // 얹으면 새 병합이 대상을 못 찾고 무시되므로, autoMergeOps가 먼저 풀고
       // 병합 항목 id를 현재 상태에 맞춰준다.
@@ -438,6 +546,10 @@ export function LayerTree({
       const collapsed = collapsedIds.has(node.id);
       const leafIds = collectLeafIds(node);
       const allHidden = leafIds.length > 0 && leafIds.every((id) => previewHiddenSet.has(id));
+      // allSoloed는 leafIds가 아니라 groupSoloIds를 본다 — handleGroupSolo가 누를 때
+      // 실제로 켜는 목록과 같아야, 이 표시가 버튼을 눌렀을 때 벌어질 일과 어긋나지 않는다.
+      const soloIds = groupSoloIds([node]);
+      const allSoloed = soloIds.length > 0 && soloIds.every((id) => soloSet.has(id));
       return (
         <div key={node.id}>
           <div
@@ -450,6 +562,19 @@ export function LayerTree({
               {collapsed ? "▶" : "▼"}
             </button>
             <span className="checkbox-slot" />
+            <button
+              type="button"
+              className={`solo-toggle${allSoloed ? " solo-on" : ""}`}
+              // 그릴 수 있는 leaf가 하나도 없으면 누를 것이 없다. 막지 않으면
+              // 눌리기는 하는데 아무 일도 안 일어나고 켜지지도 않는 버튼이 된다
+              // (soloIds가 비어 allSoloed도 영영 false다).
+              disabled={soloIds.length === 0}
+              onClick={() => handleGroupSolo(node)}
+              aria-label="그룹 solo 토글"
+              title={soloIds.length === 0 ? "이 그룹에는 미리보기에 그릴 레이어가 없습니다" : "이 그룹만 보기"}
+            >
+              ◉
+            </button>
             <button
               type="button"
               className={`eye-toggle${allHidden ? " eye-hidden" : ""}`}
@@ -480,6 +605,8 @@ export function LayerTree({
     const isMatched = matchedSet.has(node.id);
     const included = includedSet.has(node.id);
     const hidden = previewHiddenSet.has(node.id);
+    const soloed = soloSet.has(node.id);
+    const edgeColour = edgeColourSet.has(node.id);
     const selected = selectedIds.has(node.id);
     const disabledCheckbox = node.kind !== "pixel";
     const flat = opts.breadcrumb !== undefined;
@@ -488,7 +615,7 @@ export function LayerTree({
     return (
       <div
         key={node.id}
-        className={`tree-row tree-row-leaf${flat ? " tree-row-flat" : ""}${opts.nested ? " tree-row-merge-source" : ""}${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
+        className={`tree-row tree-row-leaf${flat ? " tree-row-flat" : ""}${opts.nested ? " tree-row-merge-source" : ""}${selected ? " selected" : ""}${isMatched ? " matched" : ""}${edgeColour ? " edge-colour" : ""}`}
         style={{ paddingLeft: `${opts.indentPx}px` }}
         role={flat ? "listitem" : "treeitem"}
         aria-selected={selected}
@@ -507,6 +634,19 @@ export function LayerTree({
         />
         <button
           type="button"
+          className={`solo-toggle${soloed ? " solo-on" : ""}`}
+          disabled={disabledCheckbox}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSolo(node.id);
+          }}
+          aria-label="solo 토글"
+          title={disabledCheckbox ? "pixel 레이어만 미리보기에 그릴 수 있습니다" : "이 레이어만 보기"}
+        >
+          ◉
+        </button>
+        <button
+          type="button"
           className={`eye-toggle${hidden ? " eye-hidden" : ""}`}
           onClick={(e) => {
             e.stopPropagation();
@@ -517,7 +657,9 @@ export function LayerTree({
           👁
         </button>
         {node.kind === "pixel" && (
-          <span className="node-thumb-slot">
+          // data-thumb-id로 관측자가 이 행을 알아본다(아래 IntersectionObserver).
+          // 썸네일이 아직 없어도 자리는 있으므로 "보이면 그때 만든다"가 성립한다.
+          <span className="node-thumb-slot" data-thumb-id={node.id}>
             {thumbs[node.id] && <img className="node-thumb" src={thumbs[node.id]} alt="" draggable={false} />}
           </span>
         )}
@@ -531,16 +673,28 @@ export function LayerTree({
             </span>
           )}
         </span>
-        {exportLabel && (
-          <span
-            className={`node-export-label${exportLabel.merged ? " merged" : ""}`}
-            title={
-              exportLabel.merged
-                ? `${exportLabel.sourceCount}장이 "${exportLabel.name}" 하나로 병합되어 내보내집니다.`
-                : `"${exportLabel.name}" 이름으로 내보내집니다.`
-            }
-          >
-            {exportLabel.merged ? `⤳ ${exportLabel.name} ×${exportLabel.sourceCount}` : `⤳ ${exportLabel.name}`}
+        {(edgeColour || exportLabel) && (
+          <span className="node-trailing">
+            {edgeColour && (
+              <span
+                className="node-edge-colour-badge"
+                title="색 경계선 생성의 색 원본으로 지정됨 (체크박스·내보내기 포함 여부와는 무관)"
+              >
+                색 원본
+              </span>
+            )}
+            {exportLabel && (
+              <span
+                className={`node-export-label${exportLabel.merged ? " merged" : ""}`}
+                title={
+                  exportLabel.merged
+                    ? `${exportLabel.sourceCount}장이 "${exportLabel.name}" 하나로 병합되어 내보내집니다.`
+                    : `"${exportLabel.name}" 이름으로 내보내집니다.`
+                }
+              >
+                {exportLabel.merged ? `⤳ ${exportLabel.name} ×${exportLabel.sourceCount}` : `⤳ ${exportLabel.name}`}
+              </span>
+            )}
           </span>
         )}
         {node.kind !== "pixel" && <span className="node-kind">{node.kind}</span>}
@@ -557,9 +711,17 @@ export function LayerTree({
     const sourceIds = row.leaves.map((l) => l.node.id);
     const selected = selectedIds.has(row.entryId);
     const isMatched = sourceIds.some((id) => matchedSet.has(id));
+    // 병합된 소스 중 하나라도 지정돼 있으면 표시한다 — isMatched와 같은 규약
+    // ("일부라도 있으면 보인다")이다. 지정은 소스 leaf 단위라 병합 행 자체에는
+    // 별도로 붙지 않는다.
+    const edgeColour = sourceIds.some((id) => edgeColourSet.has(id));
     const allIncluded = sourceIds.length > 0 && sourceIds.every((id) => includedSet.has(id));
     const someIncluded = sourceIds.some((id) => includedSet.has(id));
     const hidden = sourceIds.length > 0 && sourceIds.every((id) => previewHiddenSet.has(id));
+    // 병합 소스가 전부 non-pixel인 경우는 드물지만(선택 병합은 대상 종류를 안
+    // 가린다) 그룹 solo와 같은 함정이라 여기도 groupSoloIds로 좁힌다.
+    const soloSourceIds = groupSoloIds(row.leaves.map((l) => l.node));
+    const allSoloed = soloSourceIds.length > 0 && soloSourceIds.every((id) => soloSet.has(id));
     const expanded = expandedMerges.has(row.entryId);
     const sourceNames = row.leaves.map((l) => l.node.name).join(" + ");
     const fullPaths = row.leaves.map((l) => (l.breadcrumb ? `${l.breadcrumb} / ${l.node.name}` : l.node.name));
@@ -567,7 +729,7 @@ export function LayerTree({
     return (
       <div
         key={`merged-${row.entryId}`}
-        className={`tree-row tree-row-leaf tree-row-flat tree-row-merged${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
+        className={`tree-row tree-row-leaf tree-row-flat tree-row-merged${selected ? " selected" : ""}${isMatched ? " matched" : ""}${edgeColour ? " edge-colour" : ""}`}
         style={{ paddingLeft: "8px" }}
         role="listitem"
         aria-selected={selected}
@@ -605,6 +767,21 @@ export function LayerTree({
         />
         <button
           type="button"
+          className={`solo-toggle${allSoloed ? " solo-on" : ""}`}
+          // 그룹 버튼과 같은 이유로 막는다 — 소스가 전부 non-pixel이면 solo에
+          // 넣을 id가 없어 눌러도 아무 일이 없다.
+          disabled={soloSourceIds.length === 0}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSetSolo(soloSourceIds, !allSoloed);
+          }}
+          aria-label="solo 토글"
+          title={soloSourceIds.length === 0 ? "미리보기에 그릴 소스가 없습니다" : "이 병합의 소스만 보기"}
+        >
+          ◉
+        </button>
+        <button
+          type="button"
           className={`eye-toggle${hidden ? " eye-hidden" : ""}`}
           onClick={(e) => {
             e.stopPropagation();
@@ -625,12 +802,22 @@ export function LayerTree({
             {sourceNames} ({row.sourceCount}장 병합)
           </span>
         </span>
+        {edgeColour && (
+          <span className="node-trailing">
+            <span
+              className="node-edge-colour-badge"
+              title="병합된 소스 중 색 경계선 생성의 색 원본으로 지정된 것이 있습니다"
+            >
+              색 원본
+            </span>
+          </span>
+        )}
       </div>
     );
   }
 
   return (
-    <div className="layer-tree">
+    <div className="layer-tree" ref={scrollRef}>
       <div className="layer-filter-bar">
         <div className="layer-filter-row">
           <input
@@ -663,6 +850,16 @@ export function LayerTree({
           <span className="layer-filter-count">
             {filtering ? `${filteredLeaves.length} / ${allLeaves.length}` : `${allLeaves.length}개`}
           </span>
+          {ops.soloIds.length > 0 && (
+            <button
+              type="button"
+              className="solo-clear"
+              onClick={() => onSetSolo(ops.soloIds, false)}
+              title="solo를 모두 풀고 원래 화면으로 돌아갑니다"
+            >
+              solo 해제 ({ops.soloIds.length})
+            </button>
+          )}
         </div>
         {filtering && (
           <div className="layer-filter-row layer-filter-bulk">
@@ -791,6 +988,14 @@ export function LayerTree({
             onClick={() => handleUnmerge(contextMenu.ids)}
           >
             병합에서 빼기
+          </button>
+          <button
+            type="button"
+            disabled={edgeColourTargets(contextMenu.ids).length === 0}
+            title="색 경계선 생성이 자동으로 못 찾은 색 레이어를 직접 표시합니다. 체크박스(내보내기 포함 여부)와는 무관하고, 프리셋에는 저장되지 않습니다."
+            onClick={() => handleToggleEdgeColour(contextMenu.ids)}
+          >
+            {edgeColourButtonLabel(contextMenu.ids)}
           </button>
           <button type="button" onClick={() => handleExclude(contextMenu.ids)}>
             내보내기에서 제외

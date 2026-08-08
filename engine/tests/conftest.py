@@ -18,14 +18,77 @@ def make_image(name, value, x, y, w, h, alpha=255, visible=True, blend=None):
     )
 
 
-def write_psd(path, layers_top_first, width=CANVAS_W, height=CANVAS_H):
+def make_rgb_image(name, rgb, x, y, w, h, alpha=255, visible=True):
+    """채널마다 다른 값을 넣는 픽셀 레이어. 색 경계 테스트에 쓴다 —
+    make_image는 세 채널이 같은 값이라 색이 갈리는 상황을 만들 수 없다."""
+    ch = {i: np.full((h, w), rgb[i], np.uint8) for i in range(3)}
+    ch[-1] = np.full((h, w), alpha, np.uint8)
+    return nested_layers.Image(
+        name=name, channels=ch, top=y, left=x, opacity=255, visible=visible,
+        blend_mode=enums.BlendMode.normal,
+    )
+
+
+def make_image16(name, value, x, y, w, h, alpha=65535, visible=True):
+    """16비트 채널을 든 레이어. 실제 납품 폴더에 16비트 PSD가 섞여 있다."""
+    px = np.full((h, w), value, np.uint16)
+    a = np.full((h, w), alpha, np.uint16)
+    return nested_layers.Image(
+        name=name, channels={0: px, 1: px, 2: px, -1: a},
+        top=y, left=x, opacity=255, visible=visible,
+        blend_mode=enums.BlendMode.normal,
+    )
+
+
+def write_psd(path, layers_top_first, width=CANVAS_W, height=CANVAS_H, clipping=(),
+              version=enums.Version.version_1):
+    """
+    clipping: 클리핑 플래그를 켤 레이어 이름들. nested_layers.Image에는 그 인자가
+    없어서 변환이 끝난 레코드에 직접 세운다.
+
+    version: 30,000px을 넘는 픽스처는 PSB(version 2)로만 쓸 수 있다.
+    """
     apply_pytoshop_patches()
     psd = nested_layers.nested_layers_to_psd(
-        layers_top_first, color_mode=enums.ColorMode.rgb, size=(width, height)
+        layers_top_first, color_mode=enums.ColorMode.rgb, version=version,
+        size=(width, height),
     )
+    if clipping:
+        for record in psd.layer_and_mask_info.layer_info.layer_records:
+            if record.name in clipping:
+                record.clipping = True
     with open(path, "wb") as f:
         psd.write(f)
     return str(path)
+
+
+def attach_mask(psd, name, mask_array, left, top, default_color=0,
+                user_mask_density=None):
+    """
+    변환이 끝난 레코드에 사용자 마스크를 붙인다.
+
+    nested_layers.Image에 마스크 인자가 없어서 write_psd의 clipping과 같은 방식으로
+    레코드를 직접 고친다. 채널 -2가 PSD의 사용자 레이어 마스크다.
+
+    default_color는 psd-tools 쪽에서 mask.background_color로 읽히고, 마스크 bbox
+    **밖**을 그 값으로 채운다 — 그 조합이 실납품 데이터에서 값싼 경로와 어긋난
+    자리라 픽스처가 반드시 덮어야 한다.
+    """
+    import pytoshop.layers as pl
+    from pytoshop import enums as pe
+
+    h, w = mask_array.shape
+    for record in psd.layer_and_mask_info.layer_info.layer_records:
+        if record.name != name:
+            continue
+        record.mask = pl.LayerMask(
+            top=top, left=left, bottom=top + h, right=left + w,
+            default_color=default_color, user_mask_density=user_mask_density,
+        )
+        record.channels[-2] = pl.ChannelImageData(
+            image=mask_array, compression=pe.Compression.raw)
+        return
+    raise AssertionError(f"layer {name!r} not found")
 
 
 @pytest.fixture
@@ -62,3 +125,346 @@ def blend_mode_psd(tmp_path):
         make_image("base", 255, 0, 0, 32, 32),
     ], width=32, height=32)
     return p
+
+
+@pytest.fixture
+def alpha_overlap_psd(tmp_path):
+    """
+    반투명이 서로 겹치는 두 레이어.
+
+    다른 픽스처는 전부 alpha=255라 어떤 합성식을 쓰든 결과가 같다 — 병합 경로를
+    바꿔도 차이가 드러나지 않는다. 여기서는 알파가 0..255로 훑고 지나가며 겹치므로
+    합성 산술과 양자화가 조금만 달라도 값이 갈린다(라인아트의 안티에일리어싱
+    가장자리가 겹치는 상황의 축소판이다).
+    """
+    grad = np.tile(np.linspace(0, 255, 40, dtype=np.uint8), (30, 1))
+    p = tmp_path / "alpha_overlap.psd"
+    write_psd(p, [
+        make_image("top", 210, 15, 10, 40, 30, alpha=grad[:, ::-1].copy()),
+        make_image("bottom", 90, 5, 5, 40, 30, alpha=grad),
+    ])
+    return str(p)
+
+
+@pytest.fixture
+def clip_layer_psd(tmp_path):
+    """
+    그룹 안에서 'shade'가 'line'에 클리핑된 문서. 병합 대상은 line / line2 둘뿐이다.
+
+    실제 납품 PSD에서 압도적으로 흔한 모양이다 — 병합 4건에 걸린 가드 316건 중
+    309건이 이 'base 레이어에 클리핑 레이어가 붙어 있음'이었다. merge_rgba는
+    layer_filter로 병합 대상과 조상만 통과시키므로 shade는 애초에 합성에 끼지
+    못한다. 그런데도 빠른 경로를 막으면 아무 이득도 못 본다.
+    """
+    grad = np.tile(np.linspace(0, 255, 24, dtype=np.uint8), (20, 1))
+    p = tmp_path / "clip.psd"
+    write_psd(p, [
+        nested_layers.Group(name="ART", layers=[
+            make_image("line2", 30, 12, 8, 24, 20, alpha=grad[:, ::-1].copy()),
+            make_image("shade", 180, 4, 4, 24, 20),
+            make_image("line", 120, 4, 4, 24, 20, alpha=grad),
+        ]),
+    ], clipping=("shade",))
+    return str(p)
+
+
+@pytest.fixture
+def masked_clip_psd(tmp_path):
+    """
+    클리핑이 걸린 두 모양을 **마스크와 함께** 든 문서. 'shade'가 'base'에 클리핑된다.
+
+    clip_layer_psd로는 이것을 못 한다 — 그쪽은 마스크가 없다. extract_rgba는
+    마스크가 있을 때만 값싼 경로를 부르므로, 마스크 없는 레이어로 "값싼 경로가
+    거부한다"를 확인하면 거부 이유가 클리핑이 아니라 '마스크 없음'이라서 테스트가
+    공허해진다. 그리고 clip_layer_psd에 마스크를 붙일 수도 없다 — 그 픽스처는
+    _plain / merge_rgba 쪽에서 '마스크 없는 클리핑 base'를 재는 데 쓰이고 있다.
+
+    한 장으로 두 가지를 덮는다:
+      shade  clipping=True        — composite가 본 패스에서 통째로 건너뛴다
+      base   has_clip_layers=True — composite가 shade를 이 위에 합성해 준다
+    """
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd([
+        nested_layers.Group(name="ART", layers=[
+            make_image("shade", 180, 4, 4, 24, 20),
+            make_image("base", 120, 4, 4, 24, 20),
+        ]),
+    ], color_mode=enums.ColorMode.rgb, size=(CANVAS_W, CANVAS_H))
+    for record in psd.layer_and_mask_info.layer_info.layer_records:
+        if record.name == "shade":
+            record.clipping = True
+
+    grad = np.tile(np.linspace(0, 255, 24, dtype=np.uint8), (20, 1))
+    attach_mask(psd, "shade", grad, left=4, top=4, default_color=0)
+    attach_mask(psd, "base", grad, left=4, top=4, default_color=0)
+
+    path = tmp_path / "masked_clip.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
+def hidden_group_psd(tmp_path):
+    """
+    숨겨진 그룹(HIDDEN, pass-through) 안에 보이는 NORMAL 그룹, 그 안에 'line'.
+
+    실제 납품 파일(HotelINTLobbyBarMMESS002의 CHAIR06)의 모양이다. 숨겨진 조상
+    때문에 안쪽 그룹의 bbox가 (0,0,0,0)이 되고, 그 그룹이 pass-through가 아니면
+    psd.composite가 뷰포트를 그 빈 bbox와 교차시켜 내용을 통째로 떨어뜨린다.
+    """
+    p = tmp_path / "hidden_group.psd"
+    write_psd(p, [
+        nested_layers.Group(name="HIDDEN", visible=False, layers=[
+            nested_layers.Group(name="inner", blend_mode=enums.BlendMode.normal, layers=[
+                make_image("line", 40, 34, 4, 20, 16),
+            ]),
+        ]),
+        make_image("line", 90, 4, 4, 20, 16),
+    ])
+    return str(p)
+
+
+#: 30,000px을 넘는 PSB 픽스처의 캔버스. 폭만 넘기고 높이는 낮게 잡아, 한계를
+#: 넘는 좌표를 실제로 쓰면서도 테스트가 몇 MB / 몇 초 안에 끝나게 한다.
+WIDE_W, WIDE_H = 32510, 300
+
+
+@pytest.fixture
+def wide_psb(tmp_path):
+    """
+    폭이 PSD 한계(30,000)를 넘는 PSB. 'line far'는 통째로 30,000 뒤에 있다.
+
+    한계를 넘긴 뒤로도 좌표와 픽셀이 살아남는지 보려면 그 지점 **너머에** 그림이
+    있어야 한다. 캔버스만 크고 내용이 전부 앞쪽에 있으면, 좌표를 32비트로 잘라먹는
+    종류의 버그가 아무 흔적도 남기지 않고 지나간다.
+
+    납품 폴더에는 이런 파일이 없다 — PSB 31장의 축을 전부 재보니 가장 큰 것이
+    16558x10148이었다. 그래도 픽스처로 두는 이유는, 산출물이 원본 확장자를 물려받는
+    이상 언젠가 들어올 수 있는 모양이고, 그때 무엇이 되고 무엇이 안 되는지를
+    (test_render.py의 psd-tools 상한 테스트) 코드로 남겨두기 위해서다.
+    """
+    p = tmp_path / "wide.psb"
+    write_psd(p, [
+        nested_layers.Group(name="*ART", layers=[
+            make_image("line far", 200, 30010, 40, 2500, 100),
+            make_image("line", 50, 100, 20, 5000, 200),
+        ]),
+    ], width=WIDE_W, height=WIDE_H, version=enums.Version.psb)
+    return str(p)
+
+
+@pytest.fixture
+def off_canvas_psd(tmp_path):
+    """
+    레이어 bbox가 캔버스 밖으로 나갔지만 합집합은 30,000 아래인 문서 — 즉 **자르면
+    안 되는** 쪽이다.
+
+    실제 납품 PSD에서 예외가 아니라 다수다: 기준선 25장 195엔트리 중 37엔트리(19%)가
+    캔버스 밖으로 나가 있고, 그중 26개가 병합이며, 전부 30,000 근처에도 못 간다
+    (가장 큰 캔버스가 ~10,000px). 이것들이 지금 그대로 잘 나가고 있으므로 좌표가
+    한 픽셀이라도 움직이면 회귀다.
+
+    알파를 그라데이션으로 둔 것은 의도적이다 — 전부 255면 합성 산술이 어긋나도
+    결과가 같아 보인다.
+    """
+    grad = np.tile(np.linspace(0, 255, 40, dtype=np.uint8), (30, 1))
+    p = tmp_path / "off_canvas.psd"
+    write_psd(p, [
+        make_image("outside", 30, -200, 10, 40, 30, alpha=grad),
+        make_image("spills right", 210, CANVAS_W - 15, 8, 40, 30,
+                   alpha=grad[:, ::-1].copy()),
+        make_image("spills left", 90, -12, -9, 40, 30, alpha=grad),
+    ])
+    return str(p)
+
+
+@pytest.fixture
+def oversize_union_psd(tmp_path):
+    """
+    합집합이 30,000을 넘는 문서 — 즉 자르기가 실제로 걸리는 쪽이다.
+
+    'far right'를 x=30500에 두어 합집합 폭을 30,550으로 벌린다. 픽셀은 40x30짜리
+    세 장뿐이라 진짜 30,000px 배열을 만들지 않고도 진짜 임계값을 지나간다
+    (상수를 monkeypatch로 낮추면 임계값 자체가 맞는지는 확인하지 못한다).
+
+    자른 뒤 남는 모양이 세 갈래를 한꺼번에 덮는다: 통째로 밖이라 빠지는 것
+    ('far right'), 오른쪽이 잘리는 것('spills right'), 왼쪽/위가 잘리는 것
+    ('spills left').
+    """
+    grad = np.tile(np.linspace(0, 255, 40, dtype=np.uint8), (30, 1))
+    p = tmp_path / "oversize_union.psd"
+    write_psd(p, [
+        make_image("far right", 30, 30500, 10, 40, 30, alpha=grad),
+        make_image("spills right", 210, 40, 8, 40, 30, alpha=grad[:, ::-1].copy()),
+        make_image("spills left", 90, -10, -6, 40, 30, alpha=grad),
+    ])
+    return str(p)
+
+
+@pytest.fixture
+def all_outside_union_psd(tmp_path):
+    """
+    두 레이어가 전부 캔버스 왼쪽 밖에 있고, 그 합집합만 30,000을 넘는 문서.
+
+    자르기가 걸리는데(합집합 30,940) 자르고 나면 아무것도 남지 않는 유일한 모양이다.
+    한쪽만 밖으로 나가서는 이 상태를 만들 수 없다 — 캔버스와 겹치는 구간이 남기
+    때문이다.
+    """
+    grad = np.tile(np.linspace(0, 255, 40, dtype=np.uint8), (30, 1))
+    p = tmp_path / "all_outside.psd"
+    write_psd(p, [
+        make_image("way left", 30, -31000, 10, 40, 30, alpha=grad),
+        make_image("near left", 90, -100, 10, 40, 30, alpha=grad),
+    ])
+    return str(p)
+
+
+@pytest.fixture
+def fixture_psd16(tmp_path):
+    """16비트 RGB PSD. 8비트와 같은 모양이되 채널만 uint16이다."""
+    apply_pytoshop_patches()
+    layers = [nested_layers.Group(name="*ART", layers=[
+        make_image16("line", 3000, 0, 0, 16, 12),
+        make_image16("fill", 30000, 0, 0, 32, 24),
+    ])]
+    psd = nested_layers.nested_layers_to_psd(
+        layers, color_mode=enums.ColorMode.rgb,
+        depth=enums.ColorDepth.depth16, size=(CANVAS_W, CANVAS_H),
+    )
+    path = tmp_path / "depth16.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
+def masked_psd(tmp_path):
+    """
+    값싼 마스크 경로가 psd-tools와 같은 픽셀을 내는지 겨루는 픽스처.
+
+    네 장은 각각 실측에서 어긋난 원인을 하나씩 짚는다:
+      plain_mask         마스크 bbox == 레이어 bbox, 배경 0 — 가장 쉬운 경우
+      bg255_mask         배경 255 + 마스크 bbox < 레이어 bbox — 실납품에서 어긋난 조합
+      dense_mask         user_mask_density — _get_mask가 shape에 거는 항
+      half_opacity_mask  opacity != 255 — composite는 걸고 topil()은 안 건다
+    """
+    layers = [
+        make_image("plain_mask", 200, 0, 0, 32, 24),
+        make_image("bg255_mask", 180, 0, 0, 32, 24),
+        make_image("dense_mask", 160, 0, 0, 32, 24),
+        make_image("half_opacity_mask", 140, 0, 0, 32, 24),
+    ]
+    for lyr in layers:
+        lyr.opacity = 128 if lyr.name == "half_opacity_mask" else 255
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd(
+        layers, color_mode=enums.ColorMode.rgb, size=(CANVAS_W, CANVAS_H))
+
+    gradient = np.tile(np.linspace(0, 255, 32, dtype=np.uint8), (24, 1))
+    attach_mask(psd, "plain_mask", gradient, left=0, top=0, default_color=0)
+    # 마스크가 레이어보다 좁고 배경이 255 — 덮이지 않은 오른쪽 절반이 불투명해진다.
+    attach_mask(psd, "bg255_mask", gradient[:, :16], left=0, top=0, default_color=255)
+    attach_mask(psd, "dense_mask", gradient, left=0, top=0, default_color=0,
+                user_mask_density=128)
+    attach_mask(psd, "half_opacity_mask", gradient, left=0, top=0, default_color=0)
+
+    path = tmp_path / "masked.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
+def session(fixture_psd):
+    from psd_engine.session import SessionStore
+    store = SessionStore()
+    return store.get(store.open(fixture_psd))
+
+
+@pytest.fixture
+def plan(session):
+    """
+    included id 목록과 operations로 엔트리를 만든다.
+
+    색 통일까지 여기서 붙인다 — 실제 호출자(rpc.export_psd, batch)도 엔트리를
+    만든 직후에 그렇게 하고, entry_pixels는 `lineRgb`가 없으면 KeyError를 낸다.
+    line_color_ids 기본값 None은 "포함된 것 전부에 건다"는 뜻이다.
+    """
+    from psd_engine.ops import build_export_plan, finalize_names
+    from psd_engine.render import assign_line_color
+
+    def make(included, operations=(), line_color=None, line_color_ids=None):
+        entries = build_export_plan(included, list(operations))
+        finalize_names(entries, session["nodes_by_id"], "pathPrefix")
+        return assign_line_color(entries, line_color, line_color_ids)
+
+    return make
+
+
+#: 아래 픽스처가 도는 값들. 왜 이 셋인지는 픽스처 docstring에 적어 두었다.
+FADED_COLOR, FADED_OPACITY = 200, 90
+
+
+@pytest.fixture
+def faded_over_solid_psd(tmp_path):
+    """
+    불투명도가 있는 잎이 **다른 잎 위에** 얹히는 문서. 256x256에 값을 다 깐다.
+
+    _merge_rgba_fast가 _apply_source의 (shape - alpha) 항을 되살린 것이 정말
+    필요한지 가르는 픽스처다. 그 항을 지운 예전 식은 **대수적으로는 같다** —
+    (1-shape)*ab*cb + (shape-alpha)*ab*cb 가 (1-alpha)*ab*cb 이기 때문이다.
+    갈리는 것은 float32 반올림뿐이라, 픽셀 몇 개가 절삭 경계에 정확히 걸려야
+    테스트가 무언가를 지킨다. masked_psd로는 그것을 못 한다 — 거기서 불투명도가
+    다른 한 장이 맨 아래라 alpha_b가 0이고, 그러면 그 항이 어차피 사라진다.
+
+    그래서 값을 다 깐다. 아래 'solid'는 행마다 색이 0..255로, 위 'fade'는 열마다
+    마스크가 0..255로 간다 — (배경색, 마스크) 65,536쌍 전부다. 그 위에서 색 200,
+    불투명도 90을 고른 이유는 실측이다: 두 식의 결과가 절삭 뒤에 갈리는 픽셀이
+    80개로 (색, 불투명도) 후보 중 가장 많았다(0/17에서는 17개, 255/128에서는 0개).
+    """
+    ramp = np.arange(256, dtype=np.uint8)
+    solid_px = np.tile(ramp.reshape(256, 1), (1, 256))
+    fade_px = np.full((256, 256), FADED_COLOR, np.uint8)
+    opaque = np.full((256, 256), 255, np.uint8)
+    fade = nested_layers.Image(
+        name="fade", channels={0: fade_px, 1: fade_px, 2: fade_px, -1: opaque},
+        top=0, left=0, opacity=FADED_OPACITY, visible=True,
+        blend_mode=enums.BlendMode.normal)
+    solid = nested_layers.Image(
+        name="solid", channels={0: solid_px, 1: solid_px, 2: solid_px, -1: opaque},
+        top=0, left=0, opacity=255, visible=True,
+        blend_mode=enums.BlendMode.normal)
+
+    apply_pytoshop_patches()
+    psd = nested_layers.nested_layers_to_psd(
+        [fade, solid], color_mode=enums.ColorMode.rgb, size=(256, 256))
+    attach_mask(psd, "fade", np.tile(ramp.reshape(1, 256), (256, 1)),
+                left=0, top=0, default_color=0)
+
+    path = tmp_path / "faded_over_solid.psd"
+    with open(path, "wb") as f:
+        psd.write(f)
+    return str(path)
+
+
+@pytest.fixture
+def blend_group_psd(tmp_path):
+    """
+    그룹 안에서 blend가 재현되는지 가르는 픽스처.
+
+    값을 고른 이유가 전부다. base 64 위에 shade 192를 multiply로 얹으면
+    겹치는 자리가 64*192/255 = 48이 되고, 블렌드를 버리고 알파 오버로 겹치면
+    192가 된다 — **차이가 144**라 테스트가 실수를 놓칠 수 없다.
+
+    blend_mode_psd로는 이것을 못 한다. 그쪽은 그룹이 없고, base가 흰색(255)이라
+    255*64/255 = 64로 곱연산과 알파 오버의 결과가 같다.
+    """
+    p = tmp_path / "blend_group.psd"
+    write_psd(p, [
+        nested_layers.Group(name="BLEND", layers=[
+            make_image("shade", 192, 0, 0, 16, 16, blend=enums.BlendMode.multiply),
+            make_image("base", 64, 0, 0, 32, 32),
+        ]),
+    ], width=32, height=32)
+    return str(p)

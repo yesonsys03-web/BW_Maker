@@ -8,6 +8,7 @@ blend_mode=normal`로 기록하므로 **내보낸 PSD는 블렌드·클리핑·�
 평평한 스택**이고, 그 파일의 내장 미리보기도 alpha_composite 누적으로 만들어진다.
 따라서 미리보기가 재현해야 할 대상은 원본 합성이 아니라 그 평평한 알파 합성이다.
 """
+import os
 import re
 from collections import OrderedDict
 
@@ -16,9 +17,72 @@ from PIL import Image
 
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
+#: 병합 빠른 경로를 쓸지. 끄면 예전처럼 psd.composite 한 번으로 간다.
+#:
+#: 끄는 길을 남겨 두는 이유는 두 가지다. 하나는 scripts/export-baseline.py로
+#: "고치기 전 결과"를 더 떠야 할 때(PSD_ENGINE_FAST_MERGE=0), 다른 하나는 빠른
+#: 경로가 어떤 파일에서 어긋났을 때 코드를 되돌리지 않고 앱만 되돌리기 위해서다.
+FAST_MERGE = os.environ.get("PSD_ENGINE_FAST_MERGE", "1") != "0"
+
+#: 병합 뷰포트를 이 크기의 정사각 타일로 나눠 합성한다. 뷰포트가 타일 하나에
+#: 들어가면 호출은 한 번뿐이고, 그때는 예전과 완전히 같은 호출이 된다.
+#:
+#: U자 곡선이다. 타일을 줄이면 합성이 줄지만 psd-tools가 디코딩을 캐싱하지 않아
+#: (numpy()가 매번 다시 푼다) 여러 타일에 걸친 레이어를 반복해서 푼다. 실측
+#: (022bSlime의 92장/54.4Mpx 병합, 결과는 전 크기에서 픽셀 동일):
+#:
+#:     타일   256 512 768 1024 1536 2048 4096 8192
+#:     시간   385 148 133  117  116  119  166  220 (초)
+#:     디코딩 49.9 14.2 8.3  4.9  2.7  1.7  0.6  0.4 (Gpx)
+#:
+#: 1024~2048이 잡음 안에서 평평하다. 그중 2048을 고른 것은 시간이 1536과 3%
+#: 차이인데 디코딩 작업이 1/3이어서다 — 캔버스가 더 크거나 메모리가 빠듯할 때
+#: 그쪽이 덜 위험하다.
+MERGE_TILE_SIZE = 2048
+
 #: 세션당 미리보기 타일 캐시 상한(바이트). 640MB급 PSD를 최대 2세션 열어두는
 #: 상황이라 무제한 캐싱은 곧 메모리 압박이 된다. 초과하면 LRU로 버린다.
 PREVIEW_TILE_BUDGET_BYTES = 192 * 1024 * 1024
+
+#: 그룹 썸네일을 타일로 나눠 합성하기 시작하는 넓이(픽셀 수).
+#:
+#: **이 값이 묶는 것은 메모리다. 시간을 예측하는 값이 아니다.** 시간은 잎의 수와
+#: 겹침이 정하고 넓이는 버퍼 크기를 정한다 — 실측에서 13.4Mpx가 29.4초인데 그보다
+#: 큰 38.3Mpx는 27.8초였다. 우리가 사전에 알 수 있는 것은 넓이뿐이므로 넓이로 자른다.
+#: 다음 사람이 이 값을 성능 손잡이로 읽고 옮기지 않도록 적어 둔다.
+#:
+#: 예산에서 끌어낸 값이다. 썸네일 한 장이 세션 위에 얹는 임시 메모리를 **4GiB**로
+#: 잡는다 — 16GB 기계에서 앱이 세션 2개(약 3GB)와 UI/OS(약 4GB)를 들고도 한 장을
+#: 만들 수 있어야 한다는 뜻이다. 실측한 최악 단가는 488B/px(8.8Mpx에서 임시
+#: 4.29GB, float32 뷰포트 버퍼 30장어치)이므로 4GiB / 488B ≈ 8.8Mpx, 8Mpx로 끊는다.
+#:
+#: Bar027, 그룹당 별도 프로세스, 48px 썸네일 한 장, 예전 경로 → 타일 경로:
+#:
+#:     8.8Mpx  stair 1      15.0s →  25.2s    5.84GB → 5.51GB
+#:    13.4Mpx  front        29.4s →  40.0s    7.54GB → 6.95GB
+#:    16.3Mpx  gold trim     5.9s →   6.6s    4.80GB → 2.88GB
+#:    24.8Mpx  booth        95.9s →  75.0s   11.50GB → 7.34GB
+#:    38.3Mpx  sconces      27.8s →   8.1s    8.07GB → 2.75GB
+#:    73.4Mpx  gold trim    91.2s → 158.4s   15.01GB → 6.68GB
+#:    81.7Mpx  upper wall   24.1GB에서 죽음  →   7.5GB로 살아남음
+#:
+#: 메모리는 어느 크기에서도 타일 쪽이 낫고, 시간은 갈린다. 선을 넘은 뒤 15초가
+#: 25초가 되는 것은 실수가 아니라 일부러 치르는 값이다 — 느린 썸네일은 견딜 수
+#: 있고 OOM은 못 견딘다.
+#:
+#: 단가(488B/px)는 잎이 얼마나 겹치느냐에 달렸고 그건 합성해 보기 전에는 모른다.
+#: 그래서 이 임계값은 흔한 경우를 묶는 것이지 상한을 보장하지는 않는다.
+THUMBNAIL_TILE_PX = 8 * 1024 * 1024
+
+#: 썸네일 타일 한 변. 병합과 따로 두는 이유는 최적점이 다르기 때문이다 — 병합은
+#: 뷰포트가 병합 대상들의 합집합이라 타일마다 걸치는 레이어가 적지만, 그룹 썸네일은
+#: 큰 잎이 여러 타일에 걸쳐 psd-tools가 같은 레이어를 타일마다 다시 디코딩한다
+#: (numpy()가 캐싱하지 않는다 — MERGE_TILE_SIZE 주석의 디코딩 열이 그것이다).
+THUMBNAIL_TILE_SIZE = MERGE_TILE_SIZE
+
+#: PSD(version 1)가 한 축에 담을 수 있는 최대 크기. pytoshop core.py의
+#: max_size_mapping, psd-tools api/utils.py의 MAX_DIMENSION_PSD와 같은 값이다.
+PSD_MAX_DIMENSION = 30000
 
 
 def parse_line_color(value):
@@ -51,8 +115,227 @@ def apply_line_color(rgba, rgb):
     return out
 
 
+def assign_line_color(entries, line_color, line_color_ids=None):
+    """
+    엔트리마다 "여기 덮을 색"을 정해 `lineRgb`에 박아 둔다. 형식 오류는 여기서 난다.
+
+    **색을 엔트리에 실어 보내는 이유.** 내보내기와 검증이 반드시 같은 판단을 봐야
+    하기 때문이다. 예전에는 둘이 `line_color` 문자열을 따로 받아 각자 적용했고,
+    한쪽만 인자를 빠뜨리자 멀쩡한 산출물이 파일마다 "검증 실패"로 나왔다(verify.py
+    docstring에 그 사고가 적혀 있다). 이제 판단은 이 함수 한 번뿐이고 내보내기·
+    래스터·검증은 읽기만 하므로, 그런 식으로 갈라질 자리가 없다.
+
+    `line_color_ids`는 색 통일을 걸 레이어 id — **프리셋 규칙에 걸린 라인 레이어**다.
+    아티스트가 손으로 체크해 넣은 색 레이어는 여기 없으므로 원본 색이 남는다.
+    이것이 PresetDialog가 "모든 **라인 레이어**의 색을 덮습니다"라고 약속한 범위이고,
+    예전 구현은 포함된 레이어를 가리지 않고 전부 덮어 그 약속을 어겼다.
+    None이면 전부 건다 — 규칙을 모르는 호출자(배치처럼 매칭된 것만 내보내는 경로)용이다.
+
+    **병합 엔트리는 소스가 전부 대상일 때만 건다.** 색은 병합이 끝난 뒤 한 번에
+    덮는데, 그것이 레이어마다 덮고 병합한 것과 같아지려면 소스가 모두 같은 색이
+    되어야 하기 때문이다(entry_pixels 참고). 라인과 색 레이어를 손으로 한 엔트리에
+    묶은 경우에는 색 통일을 포기하고 원본 색을 지킨다 — 지우는 쪽이 아니라 남기는
+    쪽으로 기운다. 되돌리려면 병합을 풀면 된다.
+    """
+    rgb = parse_line_color(line_color)
+    ids = None if line_color_ids is None else set(line_color_ids)
+    for entry in entries:
+        hit = rgb is not None and (
+            ids is None or all(sid in ids for sid in entry["sourceIds"])
+        )
+        entry["lineRgb"] = rgb if hit else None
+    return entries
+
+
+def _mask_fast_ok(layer):
+    """
+    값싼 마스크 경로가 psd.composite와 같은 그림을 내는 것이 보장되는 형태인가.
+
+    _plain과 같은 규율이다 — 하나라도 걸리면 예전 경로로 떨어진다. 빠르게 하려다
+    그림을 바꾸는 것보다 느린 편이 낫다. 판단 근거는 Compositor.apply가 실제로
+    읽는 값들이고, 그쪽이 바뀌면 여기도 같이 봐야 한다.
+    """
+    from psd_tools.composite import utils
+    from psd_tools.constants import BlendMode, ColorMode, Tag
+
+    # _get_mask(621행)는 마스크가 없거나 꺼져 있으면 아무것도 걸지 않는다. 값싼
+    # 경로는 반대로 무조건 거는 식이라, 그 두 경우를 여기서 빼야 꺼진 마스크를
+    # 실수로 적용하지 않는다. extract_rgba는 어차피 이 조건에서만 부르지만,
+    # 이 함수만 직접 부르는 호출자(테스트·계측)가 조용히 틀리지 않게 막아 둔다.
+    if layer.mask is None or layer.mask.disabled:
+        return False
+    # composite()는 layer_filter를 안 주면 Layer.is_visible로 채운다(composite.py
+    # 206행). 그래서 숨은 레이어는 apply가 첫 줄에서 되돌아가고(321행) 결과가
+    # 손대지 않은 배경, 즉 전부 [255,255,255,0]이 된다 — 자기 visible이 켜져
+    # 있어도 조상 그룹이 꺼져 있으면 그렇다. 값싼 경로는 가시성을 모르므로 실제
+    # 픽셀을 그려 낸다. 실납품에서 이것 하나가 어긋난 유일한 원인이었다
+    # ('Shelf light 2', visible=True인데 부모 'light wardrobe'가 꺼져 있다.
+    # 필터를 끄고 대조하면 최대차 0으로 같다).
+    if not layer.is_visible():
+        return False
+    # 클리핑 레이어는 composite가 본 패스에서 통째로 건너뛴다(composite.py 329행,
+    # `if not clip_compositing and layer.clipping: return` — Layer.composite는
+    # clip_compositing을 넘기지 않는다). 그래서 결과가 손대지 않은 배경이 되고,
+    # 값싼 경로가 그것을 그리면 없던 그림이 생긴다. _plain(373~388행)이 병합 쪽에서
+    # 이미 같은 이유로 막고 있고, 같은 설명을 적어 두었다.
+    if layer.clipping:
+        return False
+    # 반대쪽. 이 레이어에 클리핑 레이어가 **붙어 있으면** composite가 그것들을 이
+    # 레이어 색 위에 합성해 준다(345~346행의 _apply_clip_layers). 값싼 경로는 자기
+    # 색만 내므로 그 그림이 빠진다.
+    #
+    # _plain은 이것을 일부러 허용하지만(377~386행) 그 근거는 layer_filter에 달려
+    # 있다 — merge_rgba는 병합 대상과 조상만 통과시키는 필터를 주므로, 물려받은
+    # 하위 Compositor가 아무것도 적용하지 못한다. **extract_rgba는 필터를 주지
+    # 않는다.** 그러면 필터가 Layer.is_visible로 채워져(206행) 보이는 클리핑 자식이
+    # 전부 실제로 합성된다. 그래서 _plain의 면제는 여기로 넘어오지 않는다.
+    if layer.has_clip_layers():
+        return False
+    # 마무리 양자화가 "RGBA"로 고정이다. 회색조·CMYK 문서는 채널 수가 달라 같은
+    # 그림을 만들 수 없으므로 예전 경로에 둔다(_fast_mergeable도 같은 이유로 막는다).
+    if layer._psd.color_mode != ColorMode.RGB:
+        return False
+    # 효과·획·칠·벡터마스크는 composite가 그린다. 값싼 경로는 그리지 않는다.
+    if any(getattr(e, "enabled", True) for e in layer.effects):
+        return False
+    if layer.stroke is not None and layer.stroke.enabled:
+        return False
+    if utils.has_fill(layer) or layer.has_vector_mask():
+        return False
+    # 픽셀이 없으면 numpy("color")가 None이고 composite는 다른 것을 그린다.
+    if not layer.has_pixels():
+        return False
+    # 블렌드는 이 함수의 관심사가 아니다 — extract_rgba는 배경 없이 한 장만 뽑고,
+    # 투명한 배경 위에서는 어떤 블렌드도 normal과 결과가 같다. 그래도 knockout은
+    # 식을 바꾸므로 막는다.
+    if layer.blend_mode == BlendMode.PASS_THROUGH:
+        return False
+    if layer.tagged_blocks.get_data(Tag.KNOCKOUT_SETTING, 0):
+        return False
+    # real mask(사용자+벡터 결합)는 별도의 배열이다. force=False인 composite가
+    # 그쪽을 읽으므로, 있으면 값싼 경로가 다른 마스크를 보게 된다.
+    if layer.mask is not None and layer.mask.has_real():
+        return False
+    return True
+
+
+def _mask_shape(layer, viewport):
+    """
+    _get_mask(621행)의 **사용자 마스크** 부분을 그대로 옮긴다. 마스크가 없거나 비면 1.0.
+
+    벡터 마스크 가지는 옮기지 않는다 — 값싼 경로들은 벡터 마스크가 걸린 레이어를
+    아예 받지 않기 때문이다(_mask_fast_ok, _plain 둘 다 막는다).
+
+    real mask를 읽지 않는 것(real_mask=False)이 두 호출자 모두에게 맞다.
+    merge_rgba는 composite를 force=True로 부르고 _get_mask가 `real_mask=not force`를
+    쓰므로 그쪽도 사용자 마스크를 읽는다. _extract_rgba_masked 쪽은 force=False라
+    다를 수 있어 _mask_fast_ok가 has_real()을 아예 막아 둔다.
+
+    호출자가 `layer.mask is not None and not layer.mask.disabled`를 이미 확인했다고
+    본다 — 꺼진 마스크에 이것을 걸면 composite가 걸지 않는 마스크를 거는 셈이 된다.
+    """
+    from psd_tools.composite.composite import paste
+
+    mask_arr = layer.numpy("mask", real_mask=False)
+    shape = 1.0
+    if mask_arr is not None:
+        shape = paste(viewport, layer.mask.bbox, mask_arr,
+                      layer.mask.background_color / 255.0)
+    if layer.mask.parameters:
+        density = layer.mask.parameters.user_mask_density
+        if density is None:
+            density = layer.mask.parameters.vector_mask_density
+        if density is None:
+            density = 255
+        density = float(density) / 255.0
+        shape = density * shape + (1 - density)
+    return shape
+
+
+def _scale(arr, factor):
+    """
+    factor가 정확히 1.0인 float면 곱을 건너뛰고 arr을 **그대로** 돌려준다.
+
+    1.0 곱은 float32에서 무손실이라 값이 같고, bbox 크기 임시 배열 하나를 아낀다.
+    그리고 같은 객체를 돌려주는 것이 _merge_rgba_fast에서 중요하다 — 마스크도
+    불투명도도 없는 레이어는 shape_s와 alpha_s가 같은 배열이 되어 (shape_s -
+    alpha_s)가 정확히 0이 되고, 예전 식과 비트까지 같은 결과가 나온다.
+    """
+    if isinstance(factor, float) and factor == 1.0:
+        return arr
+    return arr * factor
+
+
+def _extract_rgba_masked(layer):
+    """
+    마스크 달린 레이어를 layer.composite 없이 읽는다. 가드를 못 넘으면 None.
+
+    **왜 있는가.** composite는 psd-tools의 float32 전체 경로다. 실측(2026-08-05,
+    HH03_BG-RosieEmporiumINTShop017_CO_v01.psd의 BG 그룹, 잎 140장):
+
+        마스크 없는 잎  ~50 Mpx/s   29.9Mpx 0.52초, 메모리 미미
+        마스크 있는 잎   ~4 Mpx/s   39.6Mpx 10.07초, +5.06GB
+
+    잎 139장 중 마스크 달린 2장이 디코딩 시간의 63%와 peak 13.4GB 전부를 만들었다.
+    이 함수는 export.py와 verify.py, 미리보기, 썸네일이 함께 쓴다.
+
+    **식은 Compositor.apply를 그대로 줄인 것이다.** 배경이 color=1.0, alpha=0.0이라
+    alpha_b가 0이고, 그때 _apply_source는 color_t = alpha*color 로 줄어든다.
+    divide가 0/0을 1.0으로 만들기 때문에 알파 0인 자리의 RGB가 흰색이 된다 —
+    그것이 배경이 드러난 것이고, 값싼 경로도 같은 값을 내야 한다.
+
+    대수적으로 더 줄이지 않는다. _merge_rgba_fast의 docstring이 이유를 적어 두었다.
+    """
+    from psd_tools.composite import utils
+    from psd_tools.constants import Tag
+
+    if not _mask_fast_ok(layer):
+        return None
+
+    color = layer.numpy("color")
+    if color is None:
+        return None
+    shape = layer.numpy("shape")
+    if shape is None:
+        shape = np.ones(color.shape[:2] + (1,), dtype=np.float32)
+
+    # _get_mask(621행). 뷰포트가 레이어 bbox인 경우다.
+    shape_mask = _mask_shape(layer, layer.bbox)
+
+    # _get_const(675행).
+    shape_const = layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) / 255.0
+    opacity_const = layer.opacity / 255.0
+
+    # apply(348~372행). 배경이 비어 있으므로 alpha 계산만 남는다.
+    alpha = shape * (shape_mask * opacity_const) * shape_const
+    out_color = utils.clip(utils.divide(alpha * color, alpha))
+
+    merged = np.concatenate((out_color, alpha), axis=2)
+    return _quantize_like_psd_tools(layer._psd, merged)
+
+
+def _quantize_like_psd_tools(psd, merged):
+    """
+    float32 [0,1] 배열을 composite_pil(22행)과 같은 순서로 uint8 RGBA로 만든다.
+
+    절삭이지 반올림이 아니다. 그리고 문서에 ICC 프로파일이 있으면 같은 후처리를
+    태운다 — _merge_rgba_fast의 마무리와 같다.
+    """
+    from psd_tools.api import pil_io
+    from psd_tools.constants import Resource
+
+    img = Image.fromarray((255 * merged).astype(np.uint8), "RGBA")
+    icc = None
+    if Resource.ICC_PROFILE in psd.image_resources:
+        icc = psd.image_resources.get_data(Resource.ICC_PROFILE)
+    return np.array(pil_io.post_process(img, None, icc).convert("RGBA"))
+
+
 def extract_rgba(layer):
     if layer.mask is not None and not layer.mask.disabled:
+        fast = _extract_rgba_masked(layer)
+        if fast is not None:
+            return fast
         img = layer.composite(viewport=layer.bbox)
     else:
         img = layer.topil()
@@ -71,6 +354,297 @@ def _wanted_ids(psd, layers):
     return wanted
 
 
+def _overlaps(bbox, tile):
+    return not (bbox[2] <= tile[0] or tile[2] <= bbox[0]
+                or bbox[3] <= tile[1] or tile[3] <= bbox[1])
+
+
+def _ancestors(psd, layer):
+    out = []
+    cur = layer.parent
+    while cur is not None and cur is not psd:
+        out.append(cur)
+        cur = cur.parent
+    return out
+
+
+def _tileable(psd, layers):
+    """
+    뷰포트를 잘라 합성해도 되는가.
+
+    psd.composite는 뷰포트에 걸치지 않는 레이어를 건너뛴다(apply의 교집합 검사).
+    보통은 그것이 정확히 우리가 원하는 절약이지만, 그림자·글로우·획처럼 레이어
+    bbox **밖에** 그려지는 효과가 있으면 얘기가 다르다 — 그 레이어를 건너뛴 타일
+    에서는 효과가 통째로 사라져 타일 경계에 자국이 남는다. 그런 문서는 자르지
+    않고 예전처럼 한 번에 합성한다.
+    """
+    for layer in layers:
+        for node in [layer] + _ancestors(psd, layer):
+            if any(getattr(e, "enabled", True) for e in node.effects):
+                return False
+            if node.stroke is not None and node.stroke.enabled:
+                return False
+    return True
+
+
+def _merge_rgba_tiled(psd, layers, viewport):
+    """
+    뷰포트를 타일로 나눠 psd.composite를 부르고 이어붙인다.
+
+    타일마다 **그 타일에 걸치는 레이어만** 통과시키는 것이 요점이다. 뷰포트만 잘라
+    놓고 필터를 그대로 두면 거의 빨라지지 않는다 — Compositor.apply의 뷰포트 밖
+    건너뛰기는 그룹을 면제하기 때문에(`not isinstance(layer, GroupMixin)`), 조상
+    그룹 전부가 타일마다 다시 합성된다. 실측에서 타일 크기를 1024~8192로 바꿔도
+    시간이 250초에서 평평했던 것이 그 때문이다. layer_filter는 그 검사보다 먼저
+    걸리므로, 필터를 좁히면 그 그룹들이 통째로 빠진다.
+    """
+    left, top, right, bottom = viewport
+    out = np.empty((bottom - top, right - left, 4), dtype=np.uint8)
+    for y in range(top, bottom, MERGE_TILE_SIZE):
+        for x in range(left, right, MERGE_TILE_SIZE):
+            tile = (x, y, min(x + MERGE_TILE_SIZE, right), min(y + MERGE_TILE_SIZE, bottom))
+            here = [l for l in layers if _overlaps(l.bbox, tile)]
+            # here가 비면 wanted도 비어 전부 필터에서 걸린다 — 합성기는 초기
+            # 버퍼(흰색/투명)를 그대로 돌려주고, ICC 후처리도 평소대로 걸린다.
+            wanted = _wanted_ids(psd, here)
+            img = psd.composite(
+                viewport=tile,
+                force=True,
+                color=1.0,
+                alpha=0.0,
+                layer_filter=lambda l: id(l) in wanted,
+            )
+            out[y - top:tile[3] - top, x - left:tile[2] - left] = \
+                np.array(img.convert("RGBA"))
+    return out, left, top
+
+
+def _composite_order(psd):
+    """psd.composite가 레이어를 훑는 순서(문서 아래→위). id(layer) -> 순번."""
+    order = {}
+
+    def walk(group):
+        for layer in group:
+            order[id(layer)] = len(order)
+            if layer.is_group():
+                walk(layer)
+
+    walk(psd)
+    return order
+
+
+def _plain(layer, allow_passthrough=False, allow_mask_opacity=False):
+    """
+    psd.composite가 이 레이어에 하는 일 중 빠른 경로가 재현하지 않는 것이 하나라도
+    있으면 False. 하나라도 걸리면 예전 경로로 떨어진다 — 빠르게 하려다 그림을
+    바꾸는 것보다 느린 편이 낫다.
+
+    판단 근거는 psd_tools/composite/composite.py의 Compositor.apply와 _get_mask /
+    _get_const가 실제로 읽는 값들이다. 그쪽이 바뀌면 여기도 같이 봐야 한다.
+
+    allow_mask_opacity는 **병합 대상 잎에만** 준다. 마스크·opacity·fill opacity는
+    _merge_rgba_fast가 apply(348~372행)의 식을 그대로 옮겨 재현하기 때문이다.
+
+    그룹(조상)에는 주지 않는다. 그룹의 그 값들은 자식마다 따로 걸리는 값이 아니라
+    **자식들을 다 합성한 결과 한 장에** 걸리고, 그 결과를 만드는 방법이 블렌드에
+    따라 또 갈린다. normal 그룹은 자식을 별도 Compositor에 모은 뒤(_get_group,
+    715행) 거기에 마스크를 건다 — 겹치는 자식이 있으면 자식마다 거는 것과 결과가
+    다르다. pass-through 그룹은 아예 다른 식으로 간다(_apply_passthrough_source,
+    383행: color * mask + (1 - mask) * color_support, 여기서 color_support가
+    _shape_g 이력을 끌고 온다). 지금 빠른 경로가 pass-through 그룹을 그냥 통과
+    시키는 것은 마스크가 없을 때 그 식이 color 그대로가 되기 때문이고, 마스크가
+    붙으면 그 근거가 사라진다.
+    """
+    from psd_tools.composite import utils
+    from psd_tools.constants import BlendMode, Tag
+
+    blend_ok = layer.blend_mode == BlendMode.NORMAL or (
+        allow_passthrough and layer.blend_mode == BlendMode.PASS_THROUGH
+    )
+    if not blend_ok:
+        return False
+    if not allow_mask_opacity:
+        if layer.opacity != 255:
+            return False
+        if layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) != 255:
+            return False
+    # knockout은 _apply_source의 식을 통째로 바꾼다(429~437행): alpha_g가 union이
+    # 아니게 되고 backdrop이 _color_0/_alpha_0로 바뀐다. shape == alpha였을 때는
+    # 그 차이가 대부분 상쇄되어 여기 없이도 버텼지만, 마스크나 opacity가 들어오면
+    # shape != alpha가 되어 (shape - alpha) * alpha_0 * color_0 항이 살아난다.
+    # _mask_fast_ok가 같은 이유로 이미 막고 있다. 납품 25장에는 하나도 없다.
+    if layer.tagged_blocks.get_data(Tag.KNOCKOUT_SETTING, 0):
+        return False
+    # psd.composite는 본 패스에서 클리핑 레이어를 통째로 건너뛴다(apply의
+    # `if not clip_compositing and layer.clipping: return`). 빠른 경로가 그것을
+    # 그리면 없던 그림이 생긴다.
+    #
+    # 반대로 이 레이어에 **붙어 있는** 클리핑 레이어(layer.clip_layers)는 막지
+    # 않는다. merge_rgba의 layer_filter가 병합 대상과 조상만 통과시키므로 그것들은
+    # 어차피 걸러지고, _apply_clip_layers가 만드는 하위 Compositor도 같은 filter를
+    # 물려받아 아무것도 적용하지 못한 채 backdrop 배열을 그대로 돌려준다. 그리고
+    # 클리핑 레이어는 정의상 clipping=True라, 만약 그것이 병합 대상이거나 조상이면
+    # 바로 위 검사에서 이미 걸린다 — 그래서 통과한 경우에는 no-op이 보장된다.
+    #
+    # 이 구분이 이득의 대부분이다. 처음에는 has_clip_layers()도 막았는데, 실제
+    # 납품 PSD에서 병합 4건에 걸린 가드 316건 중 309건이 그것이어서 빠른 경로를
+    # 탄 병합이 하나도 없었다(1.4배에 그쳤다).
+    if layer.clipping:
+        return False
+    if layer.mask is not None and not layer.mask.disabled and not allow_mask_opacity:
+        return False
+    # 벡터 마스크는 통과시키지 않는다. _get_mask의 두 번째 가지(645행)는 force면
+    # 무조건 도형을 그리는데(merge_rgba가 force=True다) _mask_shape은 그 가지를
+    # 옮기지 않았다.
+    if layer.vector_mask is not None and not layer.vector_mask.disabled:
+        return False
+    if any(getattr(e, "enabled", True) for e in layer.effects):
+        return False
+    if layer.stroke is not None and layer.stroke.enabled:
+        return False
+    # merge_rgba는 force=True로 부른다. 그때 psd.composite는 칠(fill) 레이어를
+    # 채널 대신 다시 그리고 벡터 마스크에 획을 입힌다.
+    if utils.has_fill(layer) or layer.has_vector_mask():
+        return False
+    return True
+
+
+def _fast_mergeable(psd, layers):
+    """
+    레이어들과 그 조상 그룹이 전부 '평범'하면 빠른 경로를 쓸 수 있다.
+
+    잎에는 마스크·불투명도를 허용한다(_plain의 allow_mask_opacity). 실측
+    2026-08-06, 납품 25장의 병합 55건 인구조사:
+
+        빠른 경로 32건(58%) → 36건(65%)   빠른 361.3 → 397.6 Mpx
+
+    풀린 4건은 3~6배 빨라졌다(그 파일들의 픽셀 시간 합 32.3초 → 7.7초). 그중
+    가장 큰 것이 VtINTVoxOffice006의 'BG' 9장 11.6초 → 1.8초다.
+
+    **이것으로 풀리지 않는 쪽을 적어 둔다.** 남은 느린 405.2 Mpx의 대부분은 잎이
+    아니라 **조상 그룹**이 막고 있다(ancestor:mask 132.3 Mpx, ancestor:opacity
+    205.2 Mpx). 프로파일한 파일 VtINTVoxOffice069의 'BG'(38장 123.8초)와 'OL'
+    (11장 68.4초)이 정확히 그 경우라 이 변경으로 1초도 줄지 않는다 — 'OL'은 잎이
+    하나도 걸리지 않고 pass-through 그룹 'light2'의 마스크 하나에 걸려 있으며,
+    'BG'는 거기에 잎 'LINE'의 OuterGlow가 더해진다. 그쪽을 풀려면 그룹의 자식을
+    별도 버퍼에 먼저 합성하고 _apply_passthrough_source(383행)까지 옮겨야 한다 —
+    가드를 넓히는 일이 아니라 다른 크기의 일이다.
+    """
+    from psd_tools.constants import ColorMode
+
+    if psd.color_mode != ColorMode.RGB:
+        return False
+    for layer in layers:
+        if layer.is_group() or not _plain(layer, allow_mask_opacity=True):
+            return False
+        cur = layer.parent
+        while cur is not None and cur is not psd:
+            # 그룹의 마스크·불투명도는 psd.composite가 자식에 적용한다.
+            if not _plain(cur, allow_passthrough=True):
+                return False
+            cur = cur.parent
+    return True
+
+
+def _merge_rgba_fast(psd, layers, viewport):
+    """
+    psd.composite와 같은 그림을, 레이어를 뷰포트 크기로 부풀리지 않고 만든다.
+
+    비싼 것은 합성식이 아니라 psd-tools가 레이어마다 하는 paste다 — 0.1Mpx짜리
+    트림 한 장도 병합 그룹의 합집합 뷰포트(실측 54Mpx)로 늘린 뒤 float32로 열댓
+    번 훑는다. 여기서는 각 레이어의 bbox 안에서만 같은 계산을 한다.
+
+    식은 Compositor.apply(348~372행)와 _apply_source의 normal·knockout 아님 경우를
+    그대로 옮긴 것이다. 대수적으로 줄이지 않는다 — float32에서 (1-a)*c + a*c 는 c 와
+    같은 값이 아니고, 그 마지막 비트가 절삭 경계에 걸리면 픽셀 값이 1 달라진다.
+
+    **shape와 alpha를 나눠 들고 간다.** 예전에는 둘이 같다고 보고 (shape - alpha)
+    항을 지웠는데, 마스크나 opacity가 붙으면 그 둘이 갈라진다. apply가 하는 일은
+    이렇다 — _get_object가 alpha를 shape의 **복사본**으로 먼저 떠 놓고(alpha =
+    shape * 1.0), 그 뒤에 shape에만 마스크를 곱하고(shape *= shape_mask) alpha에는
+    마스크와 불투명도를 함께 곱한다(alpha *= shape_mask * opacity_mask *
+    opacity_const). 그래서 alpha 쪽 마스크는 곱해진 shape가 아니라 원래 shape에
+    걸린다. 마지막으로 둘 다 fill opacity(shape_const)를 곱해 _apply_source로 간다.
+    """
+    from psd_tools.api import pil_io
+    from psd_tools.composite import utils
+    from psd_tools.constants import Resource, Tag
+
+    left, top, right, bottom = viewport
+    # psd.composite(color=1.0, alpha=0.0)의 시작 상태와 같다.
+    color = np.ones((bottom - top, right - left, 3), dtype=np.float32)
+    alpha_g = np.zeros((bottom - top, right - left, 1), dtype=np.float32)
+
+    order = _composite_order(psd)
+    for layer in sorted(layers, key=lambda l: order[id(l)]):
+        bbox = layer.bbox
+        if bbox == (0, 0, 0, 0):
+            continue
+        src = layer.numpy("color")
+        if src is None:
+            continue
+        shape = layer.numpy("shape")
+        if shape is None:
+            shape = np.ones(src.shape[:2] + (1,), dtype=np.float32)
+        # _get_mask(621행). composite는 마스크를 병합 뷰포트 전체에 붙이지만 여기서는
+        # 레이어 bbox에만 붙인다 — bbox 밖은 _get_object의 shape가 0이라(paste의
+        # 기본 배경) shape_s도 alpha_s도 0이고, 그 자리에서 apply는 색도 알파도
+        # 바꾸지 않는다. 마스크 bbox가 레이어보다 커도 그 바깥은 버려도 되는 이유다.
+        shape_mask = 1.0
+        if layer.mask is not None and not layer.mask.disabled:
+            shape_mask = _mask_shape(layer, bbox)
+        h, w = src.shape[:2]
+        y0, x0 = bbox[1] - top, bbox[0] - left
+        # merge_rgba가 뷰포트를 캔버스로 자른 경우에는 레이어가 뷰포트 밖으로
+        # 걸칠 수 있다. 겹치는 부분만 남긴다 — 음수로 슬라이스하면 예외 없이 배열
+        # 반대쪽 끝을 집어 엉뚱한 자리에 그린다.
+        cy0, cx0 = max(0, -y0), max(0, -x0)
+        cy1 = h - max(0, y0 + h - (bottom - top))
+        cx1 = w - max(0, x0 + w - (right - left))
+        if cy1 <= cy0 or cx1 <= cx0:
+            continue
+        if (cy0, cx0, cy1, cx1) != (0, 0, h, w):
+            src, shape = src[cy0:cy1, cx0:cx1], shape[cy0:cy1, cx0:cx1]
+            if isinstance(shape_mask, np.ndarray):
+                shape_mask = shape_mask[cy0:cy1, cx0:cx1]
+            h, w = src.shape[:2]
+            y0, x0 = y0 + cy0, x0 + cx0
+        box = (slice(y0, y0 + h), slice(x0, x0 + w))
+
+        # _get_const(675행). 그리고 apply(348~352행) — _get_mask의 opacity는 언제나
+        # 1.0이라 상수로 적는다. 곱하는 순서를 그대로 지킨다.
+        shape_const = layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) / 255.0
+        opacity_const = layer.opacity / 255.0
+        mask = _scale(_scale(shape_mask, 1.0), opacity_const)
+        shape_s = _scale(_scale(shape, shape_mask), shape_const)
+        # 마스크만 있고 불투명도가 255면 mask가 shape_mask 그대로다 — 그때 alpha_s는
+        # shape_s와 값이 같으므로 배열 하나를 더 만들지 않는다. 마스크도 불투명도도
+        # 없으면 둘 다 shape 그 자체라 (shape_s - alpha_s)가 정확히 0이 되고, 예전
+        # 식과 비트까지 같은 결과가 나온다.
+        alpha_s = shape_s if mask is shape_mask else \
+            _scale(_scale(shape, mask), shape_const)
+        color_b = color[box]
+        alpha_b = alpha_g[box]
+        alpha_new = utils.union(alpha_b, alpha_s)
+        color_t = (shape_s - alpha_s) * alpha_b * color_b + alpha_s * (
+            (1.0 - alpha_b) * src + alpha_b * src
+        )
+        color[box] = utils.clip(
+            utils.divide((1.0 - shape_s) * alpha_b * color_b + color_t, alpha_new)
+        )
+        alpha_g[box] = alpha_new
+
+    # 마무리도 composite_pil과 같은 순서로 한다 — 절삭 양자화, 그리고 문서에
+    # ICC 프로파일이 있으면 같은 후처리를 태운다.
+    merged = np.concatenate((color, alpha_g), axis=2)
+    img = Image.fromarray((255 * merged).astype(np.uint8), "RGBA")
+    icc = None
+    if Resource.ICC_PROFILE in psd.image_resources:
+        icc = psd.image_resources.get_data(Resource.ICC_PROFILE)
+    img = pil_io.post_process(img, None, icc)
+    return np.array(img.convert("RGBA")), left, top
+
+
 def merge_rgba(psd, layers):
     boxes = [l.bbox for l in layers if l.bbox != (0, 0, 0, 0)]
     if not boxes:
@@ -79,7 +653,30 @@ def merge_rgba(psd, layers):
     top = min(b[1] for b in boxes)
     right = max(b[2] for b in boxes)
     bottom = max(b[3] for b in boxes)
+    # 캔버스 밖으로 나간 레이어 bbox는 그대로 둔다. PSD는 그런 bbox를 정상적으로
+    # 들고 있고(납품 25장 중 13장이 그렇다), 합집합이 캔버스보다 커지는 것도 정상이다.
+    # 잘라내면 산출물 좌표가 원본과 어긋나는데, 그 좌표는 나중에 합성할 때 그대로
+    # 맞아야 한다(export_psd_split 참고).
+    #
+    # 단 합집합이 30,000px를 넘으면 합성 자체를 못 한다 — 캔버스가 11901x7297인
+    # 한 장이 32510x9335 뷰포트를 만들어 내보내기가 통째로 죽은 적이 있다. 그때만
+    # 마지막 수단으로 캔버스까지 자른다. 캔버스가 이 한계 안에 있는 한 자르고 나면
+    # 반드시 통과하고, 버려지는 것은 포토샵에서 어차피 보이지 않는 영역이다.
+    if right - left > PSD_MAX_DIMENSION or bottom - top > PSD_MAX_DIMENSION:
+        left, top = max(0, left), max(0, top)
+        right, bottom = min(psd.width, right), min(psd.height, bottom)
+        if right <= left or bottom <= top:
+            # 전부 캔버스 밖이면 그릴 것이 없다 — 빈 레이어와 같이 다룬다. 0x0 배열을
+            # 돌려주면 export가 그것을 레이어로 기록하려다 훨씬 뒤에서 터진다.
+            raise ValueError("merge: all source layers are outside the canvas")
+    if FAST_MERGE and _fast_mergeable(psd, layers):
+        return _merge_rgba_fast(psd, layers, (left, top, right, bottom))
     wanted = _wanted_ids(psd, layers)
+    # 빠른 경로를 못 쓰는 병합(마스크·클리핑·효과가 낀 것)이라도, 뷰포트를 잘라
+    # 부르면 부풀림은 줄일 수 있다. 합성은 psd-tools가 그대로 하므로 마스크·
+    # 그룹 semantics를 여기서 재현하지 않는다.
+    if FAST_MERGE and _tileable(psd, layers):
+        return _merge_rgba_tiled(psd, layers, (left, top, right, bottom))
     img = psd.composite(
         viewport=(left, top, right, bottom),
         force=True,
@@ -97,6 +694,73 @@ def _save_png(img, out_dir, stem):
     return path
 
 
+def _group_rgba_tiled(psd, group, bbox, leaves, always_wanted):
+    """
+    그룹 bbox를 타일로 나눠 합성하고 **전해상도** RGBA로 이어붙인다.
+
+    수법도 이유도 _merge_rgba_tiled와 같다 — 타일마다 그 타일에 걸치는 자손만
+    통과시키는 것이 요점이다. 뷰포트만 자르고 필터를 그대로 두면 거의 빨라지지
+    않는다(Compositor.apply의 뷰포트 밖 건너뛰기가 그룹을 면제하므로 중첩 그룹이
+    타일마다 다시 합성된다).
+
+    다른 점이 둘 있다. 합성을 psd가 아니라 group에서 시작한다 — 예전 코드가 그렇고,
+    그래야 그룹 자신의 불투명도·마스크·블렌드가 똑같이 걸린다. 그리고 축소하지 않고
+    전해상도로 모은다. 축소는 호출자가 예전처럼 마지막에 thumbnail() 한 번으로 한다.
+    타일마다 축소하면 리샘플링이 달라져 나오는 썸네일이 바뀐다 — 그러면 이 경로는
+    "같은 그림을 싸게"가 아니라 "다른 그림"이 된다.
+
+    캔버스로 자르지 않는다. 캔버스 밖에 있는 그림도 그 그룹의 내용이고 썸네일에
+    보이는 것이 맞다. 여기서 묶는 것은 크기가 아니라 메모리다.
+
+    **_tileable을 쓰지 않는다.** 병합 쪽은 그 가드로 효과(그림자·글로우)가 있는
+    문서를 걸러 낸다 — 레이어 bbox 밖에 그려지는 효과는 그 레이어를 건너뛴 타일에서
+    사라져 이음매가 남기 때문이다. 여기서 쓰지 않는 근거는 둘 다 실측이다.
+
+    하나. 그 가드는 정작 필요한 곳을 못 지킨다. Bar027의 *ART는 잎 559장짜리
+    290Mpx 그룹인데 그 안의 1Mpx짜리 'neon' 한 장에 효과가 있다는 이유로 _tileable이
+    False가 되고, 그룹 전체가 예전 경로로 떨어진다 — 24GB를 넘겨 끝나지 않는 바로
+    그 경우다. 559장 중 1장 때문에 나머지 558장의 부풀림을 그대로 떠안는다.
+
+    둘. **이 psd-tools 버전은 그 효과를 bbox 밖에 그리지 않는다.** 즉 이음매가 생길
+    원인 자체가 없다. 효과가 켜진 잎을 bbox보다 400px 넉넉한 뷰포트로 합성해 보면:
+
+        'neon' OuterGlow 865x1103 → bbox 밖 알파 최대 0 (0 px)
+        'neon' OuterGlow 564x718  → bbox 밖 알파 최대 0 (0 px)
+        'neon' OuterGlow 574x791  → bbox 밖 알파 최대 0 (0 px)
+
+    그래서 타일로 썰어도 그림이 같다. 실제로 효과 때문에 _tileable이 False가 되는
+    그룹들을 실제 타일(2048)보다 잘게 512로 썰어(=이음매를 일부러 4배로 늘려) 만든
+    썸네일과 한 번에 합성한 썸네일을 대조하면 전부 최대차 0이었다:
+
+        neon 1.0Mpx/1장, light 4.1Mpx/1장, web 9.9Mpx/8장,
+        spider neon 9.9Mpx/8장, spider neon 9.9Mpx/7장
+
+    범위를 분명히 해 둔다. 확인한 효과는 이 납품 데이터에 있는 OuterGlow뿐이고,
+    확인한 것은 "psd-tools가 bbox 밖에 안 그린다"는 사실이지 "이음매가 나도 썸네일
+    배율이라 안 보인다"가 아니다. psd-tools가 언젠가 효과를 bbox 밖까지 그리게 되면
+    이 근거는 사라진다 — 그때는 여기와 _tileable을 같이 다시 봐야 한다.
+    """
+    # bbox는 호출자가 이미 구한 것을 받는다 — Group.bbox는 부를 때마다 자손을 다시
+    # 훑는 계산 속성이라, 559장짜리 그룹에서 두 번 부를 이유가 없다.
+    left, top, right, bottom = bbox
+    step = THUMBNAIL_TILE_SIZE
+    out = np.empty((bottom - top, right - left, 4), dtype=np.uint8)
+    for y in range(top, bottom, step):
+        for x in range(left, right, step):
+            tile = (x, y, min(x + step, right), min(y + step, bottom))
+            here = [l for l in leaves if _overlaps(l.bbox, tile)]
+            # here가 비어도 always_wanted(그룹과 그 조상)는 남긴다 — 그룹 자신이
+            # 걸러지면 빈 타일에서 합성기가 돌려주는 것이 달라진다.
+            wanted = _wanted_ids(psd, here) | always_wanted
+            img = group.composite(
+                viewport=tile, force=True, color=1.0, alpha=0.0,
+                layer_filter=lambda l: id(l) in wanted,
+            )
+            out[y - top:tile[3] - top, x - left:tile[2] - left] = \
+                np.array(img.convert("RGBA"))
+    return out
+
+
 def render_thumbnails(session, layer_ids, max_size, out_dir):
     psd = session["psd"]
     result = {}
@@ -112,12 +776,24 @@ def render_thumbnails(session, layer_ids, max_size, out_dir):
                 cur = cur.parent
             # Collect visible descendants
             descendant_ids = {id(desc) for desc in layer.descendants() if desc.visible}
-            img = layer.composite(
-                force=True,
-                color=1.0,
-                alpha=0.0,
-                layer_filter=lambda l: id(l) in ancestors_and_self or id(l) in descendant_ids,
-            )
+            # 큰 그룹만 타일 경로로 보낸다. 48px 그림 한 장을 만들자고 그룹 bbox
+            # 전체를 한 번에 합성하면 실측에서 73Mpx 그룹 하나가 91초/15GB였고
+            # 291Mpx짜리는 24GB를 넘겨 끝나지 않았다. 작은 그룹은 예전 호출 그대로
+            # 둔다 — 잘 나오고 있는 것을 건드리지 않는다.
+            bbox = layer.bbox
+            if (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) > THUMBNAIL_TILE_PX:
+                leaves = [d for d in layer.descendants()
+                          if d.visible and not d.is_group()]
+                img = Image.fromarray(
+                    _group_rgba_tiled(psd, layer, bbox, leaves, ancestors_and_self),
+                    "RGBA")
+            else:
+                img = layer.composite(
+                    force=True,
+                    color=1.0,
+                    alpha=0.0,
+                    layer_filter=lambda l: id(l) in ancestors_and_self or id(l) in descendant_ids,
+                )
             if img is None or img.width <= 0 or img.height <= 0:
                 # Group has no visible pixel content (e.g. all descendants are
                 # themselves empty/hidden) — not a thumbnail target.
@@ -196,19 +872,26 @@ def _preview_tile(session, layer_id, scale):
     return entry
 
 
-def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=None):
+def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=None,
+                   line_color_ids=None, edge_overlays=None):
     """
     내보내기 결과 미리보기: 선택된 레이어의 픽셀을 문서 순서(아래→위)대로
     알파 합성한다. export_psd가 모든 레이어를 normal/255로 기록하므로 이것이
     내보낸 PSD가 실제로 보이게 될 모습이다.
 
-    line_color가 주어지면 합성이 끝난 뒤 한 번만 덮는다. 레이어마다 덮고 합성한
-    것과 결과가 동일하기 때문이다 — 모든 원본 RGB가 같은 값 C면 알파 오버의
-    결과도 항상 C다. 타일 캐시를 색깔별로 나눌 필요도 없어진다.
+    line_color는 **레이어마다** 건다(line_color_ids에 든 것만 — 뜻은
+    assign_line_color와 같다). 예전에는 합성이 끝난 캔버스에 한 번만 덮었는데,
+    그 지름길은 "모든 소스가 같은 색이 되므로 결과도 같은 색"이라는 등식에
+    기대고 있었다. 색 통일 대상이 일부뿐이면 그 등식이 깨지므로 지름길도 함께
+    사라진다 — 손으로 체크해 넣은 색 레이어까지 검게 칠하던 것이 그 결과였다.
+
+    타일 캐시는 여전히 색깔별로 나누지 않는다. 캐시에는 원본 픽셀만 담고 덮는
+    것은 합성 직전에 사본에 하므로, 캐시된 타일은 색 설정이 바뀌어도 그대로 쓴다.
 
     배경은 투명하게 둔다 — 흰색/체커/검정은 UI가 뒤에 깔아 고른다.
     """
     rgb = parse_line_color(line_color)
+    ids = None if line_color_ids is None else set(line_color_ids)
     psd = session["psd"]
     scale = preview_scale(psd, max_size)
     pw = max(1, round(psd.width * scale))
@@ -229,10 +912,50 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
             continue
         if (sx0, sy0, sx1, sy1) != (0, 0, img.width, img.height):
             img = img.crop((sx0, sy0, sx1, sy1))
+        if rgb is not None and (ids is None or lid in ids):
+            # 캐시된 타일은 건드리지 않는다 — apply_line_color가 사본을 만든다.
+            img = Image.fromarray(apply_line_color(np.asarray(img), rgb), "RGBA")
         canvas.alpha_composite(img, dest=(x0 + sx0, y0 + sy0))
 
-    if rgb is not None:
-        canvas = Image.fromarray(apply_line_color(np.asarray(canvas), rgb), "RGBA")
+    # 생성된 색 경계 획. 내보내기에서는 라인 엔트리에 합쳐지므로 여기서도 라인과
+    # 같은 자리에 놓이면 되는데, 라인이 스택 맨 위인 경우가 대부분이라 마지막에
+    # 얹는다. 미리보기 배율로 줄여서 얹는다.
+    #
+    # 스택 순서는 여기서 재현하지 않는다 — 알고 있고 일부러 남겨 둔 것이다. 라인이
+    # 색보다 아래인 문서에서만 드러나고, 고치려면 미리보기 합성 구조를 다시 짜야
+    # 한다(내보내기는 라인 엔트리 자리에 합치는데 미리보기는 레이어를 따로따로
+    # 합성하기 때문).
+    visible_ids = set(visible_layer_ids)
+    for overlay in edge_overlays or []:
+        # 이 뷰의 라인이 지금 화면에 없으면 그릴 게 없다 — attach_overlays가
+        # 내보내기 플랜에 없는 뷰를 건너뛰는 것과 같은 규칙이고 판단 기준도 같다:
+        # lineIds가 지금 그려지는 레이어(visible_layer_ids)와 겹치는가.
+        line_ids = set(overlay["lineIds"])
+        if not (line_ids & visible_ids):
+            continue
+        arr = overlay["rgba"]
+        # 색 통일 범위도 레이어별 루프와 같은 규칙을 쓴다. assign_line_color는
+        # 엔트리의 sourceIds가 **전부** ids 안에 있을 때만 색을 건다(섞이면
+        # 원본색을 지킨다) — 여기서는 엔트리 대신 뷰의 lineIds에 같은 전부-포함
+        # 조건을 적용한다. 어차피 lineIds가 한 장뿐인 흔한 경우에는 레이어별
+        # 루프의 `lid in ids`와 똑같아진다.
+        if rgb is not None and (ids is None or line_ids <= ids):
+            arr = apply_line_color(arr, rgb)
+        h, w = arr.shape[:2]
+        x0, y0 = round(overlay["left"] * scale), round(overlay["top"] * scale)
+        tw = max(1, round((overlay["left"] + w) * scale) - x0)
+        th = max(1, round((overlay["top"] + h) * scale) - y0)
+        img = Image.fromarray(arr, "RGBA")
+        if (tw, th) != img.size:
+            img = img.resize((tw, th), Image.LANCZOS)
+        sx0, sy0 = max(0, -x0), max(0, -y0)
+        sx1 = img.width - max(0, x0 + img.width - pw)
+        sy1 = img.height - max(0, y0 + img.height - ph)
+        if sx1 <= sx0 or sy1 <= sy0:
+            continue
+        if (sx0, sy0, sx1, sy1) != (0, 0, img.width, img.height):
+            img = img.crop((sx0, sy0, sx1, sy1))
+        canvas.alpha_composite(img, dest=(x0 + sx0, y0 + sy0))
 
     return _save_png(canvas, out_dir, "preview")
 
