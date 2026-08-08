@@ -27,6 +27,7 @@ EDGE_DEFAULTS = {
     "minLength": 8,     # 이보다 짧은 조각은 선이 아니라 점이다
     "lineAlpha": 64,    # 기존 라인으로 칠 알파 문턱. LINES가 79.7% 반투명이라 낮게 잡는다
     "colourMode": "composite",  # 색 그림을 만드는 방법. "paste"는 A/B 비교용 — COLOUR_MODES 참고
+    "edgeMode": "region",       # 색 경계를 찾는 방법. EDGE_MODES 참고
 }
 
 #: 뷰의 색 그림을 만드는 두 가지 방법.
@@ -46,6 +47,23 @@ EDGE_DEFAULTS = {
 #: 무해한 자리인지는 픽셀 수로 가릴 수 없어서, 사람이 두 결과를 눈으로 비교할 수
 #: 있도록 옵션으로 둔다. 판정이 끝나면 둘 중 하나만 남기고 이 옵션은 없앤다.
 COLOUR_MODES = ("composite", "paste")
+
+#: 뷰의 색 경계를 찾는 두 가지 방법.
+#:
+#: `region`이 기본이다 — 색 그림을 평평한 색 영역으로 나눠(`segment_colours`) 라벨이
+#: 바뀌는 자리를 두른다(`region_boundary`). `change`는 지금까지의 동작으로, 중앙차분
+#: 으로 색차를 재고 비최대 억제로 능선을 남긴다(`colour_change`).
+#:
+#: 그 두 단계가 아티스트가 "지글거린다"고 한 것을 만들었다. **부풀리기 전 1px
+#: 마스크를 그리면 갈린다** — `change`의 중심선은 끊기고 겹줄이 나고 가시가 돋는데
+#: `region`은 이어진 한 줄이다. 알파만 보면 판정이 기운다: `stroke_rgba`가 마지막에
+#: 블러 0.8을 걸어 `change`의 계단을 이미 덮어 놓기 때문이다.
+#:
+#: 실측 세 파일에서 `region` 마스크는 `change`가 잡던 것의 89.3~97.7%를 담고, 최종
+#: 경계 픽셀은 +5% / +50% / +91%로 늘어난다. 늘어난 폭이 파일마다 크게 다르고 그
+#: 초과분이 진짜 경계인지는 눈으로 봐야 하므로, `change`를 남겨 같은 세션에서 비교할
+#: 수 있게 둔다. 판정이 끝나면 둘 중 하나만 남기고 이 옵션은 없앤다.
+EDGE_MODES = ("region", "change")
 
 #: 중앙차분이 몇 px 떨어진 픽셀끼리 비교할지 — 안티에일리어싱 전이가 이 폭
 #: 안에 있다고 본다. 문턱(threshold)이 아니라 이 반경이 진짜 손잡이다: 아티스트
@@ -474,7 +492,11 @@ def build_overlay(colour_rgba, line_alpha, opts):
     돌려주는 것은 입력과 같은 크기의 RGBA다. 그릴 것이 없으면 알파가 전부 0이다.
     """
     o = {**EDGE_DEFAULTS, **(opts or {})}
-    raw_mask, colour = colour_change(colour_rgba, o["threshold"])
+    if o.get("edgeMode") == "change":
+        raw_mask, colour = colour_change(colour_rgba, o["threshold"])
+    else:
+        raw_mask, colour = region_boundary(*segment_colours(colour_rgba),
+                                           o["threshold"])
     subtracted = subtract_lines(raw_mask, line_alpha, o["gap"], o["lineAlpha"])
     labels, count = label_components(subtracted)
     dropped = drop_small(subtracted, labels, count, o["minLength"])

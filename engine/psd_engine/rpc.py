@@ -53,7 +53,7 @@ RENDER_DIR_GENERATIONS = 3
 OVERLAY_CACHE_PER_SESSION = 8
 
 #: opts 중 실제로 그려지는 픽셀을 바꾸는 설정만 뽑아 캐시 키로 쓴다
-#: (edges.EDGE_DEFAULTS·build_overlay가 읽는 것과 정확히 같은 다섯 개).
+#: (edges.EDGE_DEFAULTS·build_overlay가 읽는 것과 정확히 같은 여섯 개).
 #: "enabled"는 이 값이 캐시 키에 들어갈 필요가 없다 — _cached_plan_overlays는
 #: 호출부가 이미 enabled를 확인한 뒤에만 부른다. "manualColourIds"도 뺀다 —
 #: 그게 바뀌면 뷰 자체(view["colourIds"]/view["lineIds"])가 달라지므로 뷰
@@ -67,8 +67,11 @@ OVERLAY_CACHE_PER_SESSION = 8
 #: colourMode도 여기 들어간다. 그리는 픽셀을 바꾸는 설정이면 예외 없이 키에 있어야
 #: 한다 — 빠진 채로 두면 같은 세션에서 모드만 바꿨을 때 이전 모드의 오버레이가 캐시에서
 #: 그대로 나오고, 두 방법을 비교하려던 사람은 "차이 없음"이라는 틀린 판정을 얻는다.
-#: 비교하려고 만든 옵션이 비교를 막는 셈이다.
-_PIXEL_SETTINGS = ("threshold", "gap", "width", "minLength", "lineAlpha", "colourMode")
+#: 비교하려고 만든 옵션이 비교를 막는 셈이다. edgeMode도 같은 이유로 들어간다 —
+#: region/change 두 검출을 같은 세션에서 비교하려고 만든 옵션이니, 키에서 빠지면
+#: 그 비교 자체가 막힌다.
+_PIXEL_SETTINGS = ("threshold", "gap", "width", "minLength", "lineAlpha",
+                   "colourMode", "edgeMode")
 
 
 def _edge_settings_key(opts):

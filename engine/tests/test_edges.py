@@ -1,6 +1,7 @@
 import numpy as np
 
-from psd_engine.edges import EDGE_DEFAULTS, colour_change, region_boundary, segment_colours
+from psd_engine.edges import (
+    EDGE_DEFAULTS, EDGE_MODES, colour_change, region_boundary, segment_colours)
 
 
 def _rgba(rows, alpha=255):
@@ -128,6 +129,38 @@ def test_region_boundary_handles_a_view_with_no_flat_colours():
     mask, colour = region_boundary(labels, flats, EDGE_DEFAULTS["threshold"])
     assert not mask.any()
     assert colour.shape == (4, 4, 3)
+
+
+def test_edge_mode_defaults_to_region():
+    # 아티스트가 신고한 결함이 change의 동작이다. 기본을 결함 쪽에 두면 고친 것을
+    # 보려고 스위치를 찾아야 한다.
+    assert EDGE_DEFAULTS["edgeMode"] == "region"
+    assert set(EDGE_MODES) == {"region", "change"}
+
+
+def test_edge_mode_picks_which_detection_runs():
+    # 중앙차분(k=3)은 문턱을 넘는 고지의 왼쪽 끝인 x=3에, 라벨 경계는 두 색이 실제로
+    # 맞닿는 x=5에 획을 세운다. 어느 자리에 섰는지로 어느 검출이 돌았는지 갈린다.
+    red, black = [200, 20, 40], [10, 10, 10]
+    rgba = _rgba([[red] * 6 + [black] * 6] * 8)
+    line = np.zeros((8, 12), np.uint8)
+    opts = {**EDGE_DEFAULTS, "width": 1, "gap": 0, "minLength": 1}
+    change = build_overlay(rgba, line, {**opts, "edgeMode": "change"})
+    region = build_overlay(rgba, line, {**opts, "edgeMode": "region"})
+    assert int(change[..., 3].sum(0).argmax()) == 3, "change가 옛 검출을 안 썼다"
+    assert int(region[..., 3].sum(0).argmax()) == 5, "region이 라벨 경계를 안 썼다"
+
+
+def test_edge_mode_absent_behaves_as_region():
+    # 프런트가 이 키를 안 실어 보내도 기본 동작이어야 한다.
+    red, black = [200, 20, 40], [10, 10, 10]
+    rgba = _rgba([[red] * 6 + [black] * 6] * 8)
+    line = np.zeros((8, 12), np.uint8)
+    opts = {k: v for k, v in EDGE_DEFAULTS.items() if k != "edgeMode"}
+    opts = {**opts, "width": 1, "gap": 0, "minLength": 1}
+    without = build_overlay(rgba, line, opts)
+    explicit = build_overlay(rgba, line, {**opts, "edgeMode": "region"})
+    assert (without == explicit).all(), "키가 없을 때와 region을 줬을 때가 다르다"
 
 
 def test_colour_change_reports_the_darker_side_colour():

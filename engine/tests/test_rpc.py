@@ -535,6 +535,31 @@ def test_render_preview_recomputes_when_the_colour_mode_changes(tmp_path, monkey
         f"모드가 바뀌었는데도 캐시를 재사용했다: {len(calls)}번만 호출됨")
 
 
+def test_render_preview_recomputes_when_the_edge_mode_changes(tmp_path, monkeypatch):
+    # edgeMode는 그려지는 획 자체를 바꾼다. 캐시 키에서 빠져 있으면, 두 검출을
+    # 비교하려고 모드만 바꿔 다시 렌더한 사람이 **이전 모드의 오버레이를 그대로
+    # 보고** "차이 없음"이라는 틀린 판정을 내린다 — colourMode 때와 같은 함정이다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "edgeMode": "region"})
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True, "edgeMode": "change"})
+
+    assert len(calls) == 2, (
+        f"모드가 바뀌었는데도 캐시를 재사용했다: {len(calls)}번만 호출됨")
+
+
 def test_render_preview_toggling_visibility_does_not_recompute_a_view_already_cached(
     tmp_path, monkeypatch
 ):
