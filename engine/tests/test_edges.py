@@ -1,6 +1,6 @@
 import numpy as np
 
-from psd_engine.edges import EDGE_DEFAULTS, colour_change
+from psd_engine.edges import EDGE_DEFAULTS, colour_change, segment_colours
 
 
 def _rgba(rows, alpha=255):
@@ -40,6 +40,43 @@ def test_colour_change_ignores_edges_against_transparency():
     rgba[:, 4:, 3] = 0
     mask, _ = colour_change(rgba, EDGE_DEFAULTS["threshold"])
     assert not mask.any()
+
+
+def test_segment_colours_splits_two_flat_regions():
+    red, black = [200, 20, 40], [10, 10, 10]
+    rgba = _rgba([[red] * 6 + [black] * 6] * 4)
+    labels, flats = segment_colours(rgba)
+    assert len(flats) == 2, f"평평한 색이 둘이 아니다: {flats.tolist()}"
+    assert (labels[:, :6] == labels[0, 0]).all(), "왼쪽이 한 영역으로 안 묶였다"
+    assert (labels[:, 6:] == labels[0, 11]).all(), "오른쪽이 한 영역으로 안 묶였다"
+    assert labels[0, 0] != labels[0, 11], "다른 두 색이 같은 영역이 됐다"
+
+
+def test_segment_colours_leaves_transparent_pixels_unlabelled():
+    # 실루엣(색 vs 투명)은 이미 라인이 그리는 자리다. 영역이 되면 안 된다.
+    red = [200, 20, 40]
+    rgba = _rgba([[red] * 8] * 4)
+    rgba[:, 4:, 3] = 0
+    labels, _ = segment_colours(rgba)
+    assert (labels[:, 4:] == -1).all(), "투명한 자리에 라벨이 붙었다"
+    assert (labels[:, :4] >= 0).all(), "불투명한 자리에 라벨이 안 붙었다"
+
+
+def test_segment_colours_assigns_an_antialiased_pixel_to_the_nearer_flat():
+    # 안티에일리어싱 잔여는 개수가 적어 평평한 색이 못 된다(한 뷰에 600~1900개).
+    # 가까운 쪽에 붙어야 경계가 전이 한가운데에 선다.
+    dark, light, blend = [100, 100, 100], [200, 200, 200], [120, 120, 120]
+    rgba = _rgba([[dark] * 5 + [blend] + [light] * 5])
+    labels, flats = segment_colours(rgba, floor=0.15)
+    assert len(flats) == 2, f"전이색이 자기 영역을 차지했다: {flats.tolist()}"
+    assert labels[0, 5] == labels[0, 0], "전이 픽셀이 먼 쪽에 붙었다"
+
+
+def test_segment_colours_handles_a_fully_transparent_view():
+    rgba = _rgba([[[0, 0, 0]] * 4] * 4, alpha=0)
+    labels, flats = segment_colours(rgba)
+    assert (labels == -1).all()
+    assert flats.shape == (0, 3)
 
 
 def test_colour_change_reports_the_darker_side_colour():

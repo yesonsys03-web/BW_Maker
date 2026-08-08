@@ -57,6 +57,60 @@ COLOUR_MODES = ("composite", "paste")
 ANTIALIAS_RADIUS = 3
 
 
+#: 평평한 색으로 칠 최소 점유율 — 그 뷰 불투명 픽셀 대비.
+#:
+#: **상위 N개로 자르면 안 된다.** 상위 12색이 화면의 95.0~98.6%를 덮지만, 못 덮는
+#: 1.4~5.0%가 곧 리본·작은 별 같은 작은 것들이고 지글거린다고 지목된 대상이 정확히
+#: 그것들이다. 개수 바닥값으로 자르면 작아도 평평하면 살아남는다.
+#:
+#: 실측 세 파일(뷰 0)에서 서로 다른 색 2632~3696개 중 이 값이 평평한 색 12~21개를
+#: 남긴다. 프리셋 키로 노출하지 않는다 — 아티스트가 돌릴 손잡이가 하나 더 느는
+#: 값어치가 없다. ANTIALIAS_RADIUS와 같은 성격의 상수다.
+FLAT_COLOUR_FLOOR = 0.0005
+
+
+def _pack_rgb(rgb):
+    return ((rgb[..., 0].astype(np.uint32) << 16)
+            | (rgb[..., 1].astype(np.uint32) << 8)
+            | rgb[..., 2].astype(np.uint32))
+
+
+def _unpack_rgb(keys):
+    return np.stack([(keys >> 16) & 255, (keys >> 8) & 255, keys & 255],
+                    -1).astype(np.int16)
+
+
+def segment_colours(rgba, floor=FLAT_COLOUR_FLOOR):
+    """
+    합성된 색 그림을 평평한 색 영역으로 나눈다. (labels, flats)를 돌려준다.
+
+    labels는 입력과 같은 크기의 int32이고 **투명한 자리는 -1**이다. 나머지는 flats의
+    행 번호이고 flats는 (F,3) int16이다.
+
+    평평한 색 = 개수가 floor 이상인 색(FLAT_COLOUR_FLOOR 참고). 나머지는 대부분
+    1픽셀짜리 안티에일리어싱 잔여이고, **가장 가까운 평평한 색**에 붙인다. 거리는
+    채널 최대차 — threshold와 같은 척도라 region_boundary의 게이트와 어긋나지 않는다.
+
+    33 Mpx를 픽셀마다 재지 않는다. 한 뷰의 서로 다른 색은 2600~3700개뿐이므로 **색마다
+    한 번** 재고 역인덱스로 펼친다 — 실측 11717x2820 뷰에서 분할이 2.4초다.
+    """
+    solid = rgba[..., 3] > 127
+    labels = np.full(solid.shape, -1, np.int32)
+    if not solid.any():
+        return labels, np.zeros((0, 3), np.int16)
+    keys = _pack_rgb(rgba[..., :3])[solid]
+    vals, inv, counts = np.unique(keys, return_inverse=True, return_counts=True)
+    cut = max(1, int(round(floor * int(solid.sum()))))
+    keep = np.nonzero(counts >= cut)[0]
+    if len(keep) == 0:
+        # 바닥값이 그 뷰에 비해 너무 높다 — 제일 흔한 색 하나라도 남겨야 라벨이 선다.
+        keep = np.array([int(counts.argmax())])
+    flats = _unpack_rgb(vals[keep])
+    nearest = np.abs(_unpack_rgb(vals)[:, None, :] - flats[None, :, :]).max(2).argmin(1)
+    labels[solid] = nearest[inv].astype(np.int32)
+    return labels, flats
+
+
 def colour_change(rgba, threshold):
     """
     이웃과 색이 달라지는 자리와, 그 자리에 쓸 색(양쪽 중 어두운 쪽)을 돌려준다.
