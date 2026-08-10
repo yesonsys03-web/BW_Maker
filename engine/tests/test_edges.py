@@ -270,8 +270,9 @@ def test_colour_change_still_ignores_colour_against_transparency_even_with_a_rea
     assert not mask.any(), "불투명-투명 경계가 색 경계로 잡혔다"
 
 
-from psd_engine.edges import (ANTIALIAS_RADIUS, build_overlay, drop_small,
-                              label_components, stroke_rgba, subtract_lines)
+from psd_engine.edges import (ANTIALIAS_RADIUS, _grow_diamond, _morph,
+                              build_overlay, drop_small, label_components,
+                              stroke_rgba, subtract_lines)
 
 
 def test_subtract_lines_removes_the_boundary_that_already_has_a_line():
@@ -1050,3 +1051,71 @@ def test_paste_colour_applies_the_layers_mask(tmp_path):
     out = _paste_colour([layer], (0, 0, 8, 8))
     assert out[:, 4:, 3].max() == 0, "마스크로 가려진 자리가 불투명하게 남았다"
     assert out[:, :4, 3].max() > 0, "마스크로 가려지지 않은 자리까지 지워졌다"
+
+
+def test_grow_diamond_stays_inside_the_square_of_the_same_radius():
+    """
+    마름모 팽창은 같은 반지름의 정사각 팽창에 **포함**되고, 대각선에서 실제로 덜
+    자란다. 두 조건이 다 필요하다 — 포함만 보면 아무것도 안 자라는 구현이 통과하고,
+    "덜 자란다"만 보면 엉뚱한 자리로 자라는 구현이 통과한다.
+
+    포함 관계가 곧 `stroke_rgba`가 라벨 키우기를 정사각으로 남겨둔 근거다: 색이 획을
+    항상 덮으므로 검은 후광(BLUR_REACH 주석)이 되살아나지 않는다.
+
+    **`stroke_rgba`가 실제로 이걸 쓰는지도 여기서 본다.** 함수만 따로 재면 호출부를
+    정사각으로 되돌려도 통과한다 — 첫 판이 그랬다. 그리고 갈리는 자리는 대각선뿐이다:
+    수평선의 세로 단면은 두 방식이 **완전히 같아서**, 직선으로 재는 테스트는 아무것도
+    못 가른다.
+    """
+    mask = np.zeros((9, 9), bool)
+    mask[4, 4] = True
+    dia = _grow_diamond(mask, 1)
+    sq = _morph(mask, 3, grow=True)
+    assert (dia & ~sq).sum() == 0, "마름모가 정사각 밖으로 자랐다"
+    assert dia[3, 4] and dia[4, 3], "상하좌우로 안 자랐다"
+    assert not dia[3, 3], "대각선까지 자랐다 — 정사각과 다를 게 없다"
+    assert sq[3, 3], "픽스처가 잘못됐다: 정사각이 대각선으로 안 자란다"
+
+    colour = np.zeros((9, 9, 3), np.uint8)
+    colour[4, 4] = [10, 10, 10]
+    labels, _ = label_components(mask)
+    alpha = stroke_rgba(mask, labels, colour, width=3)[..., 3]
+    axis, diag = int(alpha[3, 4]), int(alpha[3, 3])
+    # 이 비율은 팽창 모양과 STROKE_BLUR 둘 다에 걸린다 — 어느 쪽을 건드려도 여기서
+    # 걸리므로, 굵기가 조용히 움직이는 일은 없다. 실측: 마름모+σ0.6은 56/161=0.35,
+    # 정사각+σ0.6은 184/213=0.86, 마름모+σ0.8도 0.5를 넘는다.
+    assert diag < axis * 0.5, (
+        f"획이 대각선으로 더 자랐다 (축 {axis}, 대각 {diag}) — 팽창 모양이 정사각으로 "
+        "돌아갔거나 STROKE_BLUR가 커졌다. 둘 다 획을 굵게 만든다")
+
+
+def test_stroke_rgba_keeps_an_opaque_core_when_it_thins_the_stroke():
+    """
+    획을 얇게 만들되 **흐려지면 안 된다** — 아티스트가 요구한 것은 굵기이지 농도가
+    아니다.
+
+    굵기를 width로 줄이는 길이 여기서 막힌다. width 1은 팽창이 없어 1px 마스크에
+    블러만 걸리므로 심이 옅어진다. 실제 경계에서는 알파 중앙값이 190에서 41까지
+    떨어졌고, 기존 선과 맞닿는 픽셀도 347에서 175로 절반이 됐다.
+
+    **대각선으로 잰다.** 수평선은 이 성질을 못 잡는다 — 깨끗한 가로 1px 선은 작은
+    블러를 잘 견뎌서, STROKE_BLUR를 0.4로 내린 뒤에는 팽창 없이도 217이 나왔다(첫
+    판이 그래서 깨졌다). 실제 색 경계는 대부분 대각이거나 계단이고, 거기서는 팽창이
+    있고 없고가 251 대 187로 갈린다.
+
+    블러가 걸리므로 심도 정확히 255는 아니다.
+    """
+    mask = np.zeros((11, 21), bool)
+    for i in range(1, 10):
+        mask[i, i + 2] = True
+    colour = np.zeros((11, 21, 3), np.uint8)
+    colour[mask] = [10, 10, 10]
+    labels, _ = label_components(mask)
+
+    out = stroke_rgba(mask, labels, colour, width=3)[..., 3]
+    assert int(out.max()) >= 240, "획의 심이 옅어졌다"
+
+    bare = stroke_rgba(mask, labels, colour, width=1)[..., 3]
+    assert int(bare.max()) < int(out.max()) * 0.85, (
+        f"팽창이 있으나 없으나 심의 농도가 같다 (있음 {int(out.max())}, "
+        f"없음 {int(bare.max())}) — 이 픽스처는 농도 손실을 못 잡는다")
