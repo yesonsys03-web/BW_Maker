@@ -1267,3 +1267,28 @@ test("clearing the list while a save is in flight does not re-open the project",
   );
   expect(screen.getByText("저장 안 된 작업")).toBeTruthy();
 });
+
+/**
+ * 일곱 번째 문. restoreProject는 fresh만 받으므로(그게 맞다 — 버린 항목을
+ * 되살리면 안 된다) 수정시각이 어긋난 파일은 App이 addFiles로 따로 넣어야 한다.
+ * 그 한 줄을 지워도 전부 초록불이었다: FilePanel의 배지 테스트는 파일이 이미
+ * 목록에 있다고 전제한 컴포넌트 테스트라 이 배선을 증명하지 못한다. 지우면
+ * 아티스트는 자기 파일이 사라진 것으로 보고, 배지는 아무 데도 안 붙는다.
+ */
+test("opening a project keeps the files whose PSD changed in the list, with the badge", async () => {
+  const MOVED = "/cuts/moved.psd";
+  const fixture = projectWithOnePreview();
+  fixture.project.files.push({ ...fixture.project.files[0], path: MOVED });
+  vi.mocked(loadProjectFrom).mockResolvedValue({ project: fixture.project, previews: fixture.previews });
+  // 저장된 mtime은 둘 다 1700이다. MOVED만 디스크에서 달라졌다.
+  engine.psdMtimes.mockResolvedValue({ [RESTORED]: 1700, [MOVED]: 1899 });
+  vi.mocked(openDialog).mockResolvedValue("/proj/작업.bwproj" as never);
+
+  render(<App />);
+  click(screen.getByRole("button", { name: "프로젝트 열기..." }));
+  await waitFor(() => expect(screen.getByText("작업.bwproj")).toBeTruthy());
+
+  // 목록에 남아 있고, 왜 작업이 없는지가 그 자리에 적혀 있다.
+  await waitFor(() => expect(fileRow("moved.psd")).toBeTruthy());
+  expect(fileRow("moved.psd").textContent).toContain("파일이 바뀜");
+});

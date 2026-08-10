@@ -75,8 +75,16 @@ export interface AppState {
    * 처리된 파일의 id가 남는다. 그 숫자들은 지금 보고 있는 파일에서 전혀 다른
    * 레이어를 가리키고, "라인만"에 mask·fill·grain 같은 것이 섞여 나온다.
    * opsByPath와 같은 모양으로 두는 이유가 이것이다.
+   *
+   * 값이 `| undefined`인 것은 실수가 아니다. **"키가 없다"와 "빈 배열"은 다른
+   * 사실이고**, 그 차이가 내보내기를 뒤집는다: 키가 없으면 엔진은 목록이 없는
+   * 것으로 읽어 색 통일을 포함된 레이어 **전부**에 걸고(render.py의 `ids is
+   * None`), []이면 반대로 **아무 데도** 안 건다. 이 저장소는
+   * noUncheckedIndexedAccess를 켜지 않아 `Record<string, number[]>`이면 조회
+   * 결과가 항상 있는 것처럼 보이고, "없으면 []로 두면 되겠네" 하는 편집이
+   * 타입에서 하나도 안 걸린다.
    */
-  matchedIdsByPath: Record<string, number[]>;
+  matchedIdsByPath: Record<string, number[] | undefined>;
   errors: ErrorEntry[];
   /**
    * 프로젝트에서 복원한 파일의 수정시각. openSuccess가 이걸 보고 복원한 작업을

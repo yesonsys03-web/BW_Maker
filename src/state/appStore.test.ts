@@ -15,6 +15,7 @@ vi.mock("../lib/engine", async () => {
 });
 
 import { EngineRpcError } from "../lib/engine";
+import { parseProject } from "../lib/project";
 import type { Preset, TreeNode } from "../lib/types";
 import {
   appReducer,
@@ -1079,6 +1080,76 @@ describe("restoreProject", () => {
     } as never);
 
     expect(s.files[0].presetApplied).toBe(true);
+  });
+
+  // 아티스트가 명시한 요구는 "되살리는 것은 화면 그대로 전부 — 눈·solo까지"다.
+  // OpsState는 일곱 필드이고, 어느 하나가 왕복에서 떨어져도 앱은 아무 말 없이
+  // 그 만큼 덜 되살린다. 지금까지 잠긴 것은 includedIds·manualLineIds·entries
+  // 셋뿐이었고 previewHiddenIds(눈)·soloIds(solo)·edgeColourIds·ops(병합·
+  // 이름변경·순서변경)는 떨어뜨려도 전부 초록불이었다.
+  //
+  // 디스크에 적히는 모양 그대로 왕복시킨다(JSON → parseProject → restoreProject).
+  // 필드가 빠질 수 있는 자리가 리듀서 말고 직렬화 경계에도 있기 때문이다.
+  test("a saved project brings back all seven fields of the work, not just the three that were locked", () => {
+    const ops = {
+      includedIds: [1, 2, 3],
+      previewHiddenIds: [2],
+      soloIds: [3],
+      edgeColourIds: [1],
+      manualLineIds: [2, 3],
+      ops: [{ op: "rename", layerId: 1, name: "LINE" }],
+      entries: [{ entryId: 1, sourceIds: [1], name: "LINE" }],
+    };
+    const onDisk = JSON.stringify({
+      version: 1,
+      preset: null,
+      files: [{
+        path: "/cuts/a.psd", mtime: 1700, tree: RESTORED_TREE, matchedIds: [1],
+        ops, previewKey: "k", previewFile: "a.png",
+      }],
+    });
+
+    const s = appReducer(initialAppState, {
+      type: "restoreProject",
+      entries: parseProject(onDisk).files,
+    });
+
+    expect(s.opsByPath["/cuts/a.psd"]).toEqual(ops);
+  });
+
+  // []는 "프리셋을 걸었는데 한 장도 안 걸렸다"이다 — null("건 적이 없다")과
+  // 다른 사실이고, 버리면 그 파일의 색 통일이 매칭된 라인이 아니라 **포함된
+  // 전부**에 걸린다(엔진은 목록이 없으면 "전부 해당"으로 읽는다: render.py).
+  // 위의 테스트가 null 쪽을 잠갔고, 여기가 그 반대 방향이다.
+  test("restoring an entry whose preset matched nothing keeps the empty list, not no list", () => {
+    const s = appReducer(initialAppState, {
+      type: "restoreProject",
+      entries: [{
+        path: "/cuts/a.psd", mtime: 1700, tree: RESTORED_TREE as never, matchedIds: [],
+        ops: RESTORED_OPS as never, previewKey: "k", previewFile: "a.png",
+      }],
+    } as never);
+
+    expect(s.matchedIdsByPath).toHaveProperty("/cuts/a.psd");
+    expect(s.matchedIdsByPath["/cuts/a.psd"]).toEqual([]);
+  });
+
+  // 엔진 재시작도 같은 방향으로 무를 수 있는 자리다. 복원 경로의 matchedIds를
+  // 지키는 그 루프가 []를 "없는 것"으로 읽어 떨어뜨리면 같은 뒤집힘이 난다 —
+  // 그리고 복원본에는 자동 적용이 안 걸리므로 되돌아올 길이 없다.
+  test("an engine restart keeps a restored empty match list instead of dropping it", () => {
+    const restoredEmpty = appReducer(initialAppState, {
+      type: "restoreProject",
+      entries: [{
+        path: "/cuts/a.psd", mtime: 1700, tree: RESTORED_TREE as never, matchedIds: [],
+        ops: RESTORED_OPS as never, previewKey: "k", previewFile: "a.png",
+      }],
+    } as never);
+
+    const s = appReducer(restoredEmpty, { type: "engineRestarted" });
+
+    expect(s.matchedIdsByPath).toHaveProperty("/cuts/a.psd");
+    expect(s.matchedIdsByPath["/cuts/a.psd"]).toEqual([]);
   });
 
   // 평범하게 연 파일은 그대로 false여야 한다 — 로드 큐가 자동 적용을 걸 자리가
