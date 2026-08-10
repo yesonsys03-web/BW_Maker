@@ -50,3 +50,34 @@ test("the same key always makes the same preview file name", () => {
   expect(previewFileName("k")).toBe(previewFileName("k"));
   expect(previewFileName("k")).not.toBe(previewFileName("k2"));
 });
+
+import { reconcileProject } from "./project";
+
+function entryAt(path: string, mtime: number) {
+  return {
+    path, mtime, tree: [], matchedIds: [], previewKey: "k", previewFile: "a.png",
+    ops: { includedIds: [], previewHiddenIds: [], soloIds: [], edgeColourIds: [], manualLineIds: [], ops: [], entries: [] },
+  } as never;
+}
+
+test("a file whose mtime still matches keeps its work", () => {
+  const p = { version: 1 as const, preset: null, files: [entryAt("/a.psd", 1700)] };
+  const { fresh, stale } = reconcileProject(p, { "/a.psd": 1700 });
+  expect(fresh.map((e) => e.path)).toEqual(["/a.psd"]);
+  expect(stale).toEqual([]);
+});
+
+// 저장된 것은 전부 레이어 id이고, PSD가 바뀌면 id가 밀린다. 조용히 붙이면
+// "라인 지정"이 엉뚱한 레이어를 가리킨다.
+test("a file that was saved in Photoshop since loses its work and is named", () => {
+  const p = { version: 1 as const, preset: null, files: [entryAt("/a.psd", 1700)] };
+  const { fresh, stale } = reconcileProject(p, { "/a.psd": 1800 });
+  expect(fresh).toEqual([]);
+  expect(stale).toEqual(["/a.psd"]);
+});
+
+test("a file that is gone from disk is stale too", () => {
+  const p = { version: 1 as const, preset: null, files: [entryAt("/a.psd", 1700)] };
+  const { stale } = reconcileProject(p, {});
+  expect(stale).toEqual(["/a.psd"]);
+});

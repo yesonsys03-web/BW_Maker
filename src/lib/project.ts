@@ -104,3 +104,23 @@ export function parseProject(raw: string): ProjectFile {
 export function serializeProject(p: ProjectFile): string {
   return JSON.stringify(p, null, 2);
 }
+
+/**
+ * 저장된 항목 중 아직 쓸 수 있는 것과, 파일이 바뀌어 버려야 하는 것을 가른다.
+ *
+ * 판정은 경로 + 수정시각이고 이 앱이 이미 쓰는 규약이다(previewCacheKey).
+ * 버린 파일의 경로를 돌려주는 것이 요점이다 — 조용히 지우면 아티스트는 자기가
+ * 한 지정이 왜 없는지 알 수 없다.
+ */
+export function reconcileProject(
+  project: ProjectFile,
+  mtimes: Record<string, number | undefined>
+): { fresh: ProjectEntry[]; stale: string[] } {
+  const fresh: ProjectEntry[] = [];
+  const stale: string[] = [];
+  for (const entry of project.files) {
+    if (mtimes[entry.path] === entry.mtime) fresh.push(entry);
+    else stale.push(entry.path);
+  }
+  return { fresh, stale };
+}
