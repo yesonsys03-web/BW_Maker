@@ -1040,6 +1040,11 @@ describe("restoreProject", () => {
     } as never);
 
     expect(s.opsByPath["/cuts/a.psd"].manualLineIds).toEqual([]);
+    // 매칭 결과도 같이 버려야 한다. 이 검증 게이트가 engineRestarted가 복원
+    // 경로의 matchedIdsByPath를 붙드는 근거이므로(appStore.tsx의 그 주석),
+    // 여기가 무르면 바뀐 PSD의 옛 id가 되살아나 영영 남는다 — 그리고
+    // matchedIds는 표시용이 아니라 내보내기 인자다(ExportDialog → render.py).
+    expect(s.matchedIdsByPath).not.toHaveProperty("/cuts/a.psd");
   });
 
   // presetApplied가 정직해야 로드 큐가 자동 적용을 다시 걸지 않는다(App.tsx의
