@@ -4,8 +4,13 @@ import type { EdgeLines, OutputFormat, Preset } from "./types";
 
 const PRESETS_FILENAME = "presets.json";
 
-/** 색 지정 레이어를 걸러내는 기본 어휘. 엔진 DEFAULT_EXCLUDE_TOKENS와 같다. */
-export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"];
+/**
+ * 선화가 아닌 레이어를 걸러내는 기본 어휘. 엔진 DEFAULT_EXCLUDE_TOKENS와 같다.
+ *
+ * `height`는 키 기준선(`CHARACTER HEIGHT LINE` 등)을 뺀다 — 이름에 line이 들어
+ * 있어 include 규칙에 걸리지만 선화가 아니다. 근거 수치는 엔진 쪽 주석에 있다.
+ */
+export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color", "height"];
 
 /**
  * 색 경계선 생성 기본값. 엔진 EDGE_DEFAULTS(engine/psd_engine/edges.py)와

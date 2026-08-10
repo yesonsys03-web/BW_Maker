@@ -1,6 +1,7 @@
 import { beforeEach, expect, test, vi } from "vitest";
 // 엔진 소스를 그대로 읽어 두 언어의 기본값을 대조한다(아래 마지막 테스트).
 import edgesSource from "../../engine/psd_engine/edges.py?raw";
+import matchingSource from "../../engine/psd_engine/matching.py?raw";
 
 const appDataDirMock = vi.fn();
 const joinMock = vi.fn();
@@ -20,7 +21,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   writeTextFile: (...a: unknown[]) => writeTextFileMock(...a),
 }));
 
-import { DEFAULT_EDGE_LINES, DEFAULT_PRESET, isValidLineColor, loadPresets, parsePresets, savePresets } from "./presets";
+import { DEFAULT_EDGE_LINES, DEFAULT_EXCLUDE_TOKENS, DEFAULT_PRESET, isValidLineColor, loadPresets, parsePresets, savePresets } from "./presets";
 import type { Preset } from "./types";
 
 const APP_DATA_DIR = "/mock/appdata";
@@ -53,7 +54,8 @@ test("DEFAULT_PRESET matches the brief contract", () => {
     roleTokens: ["UL", "OL_UL", "OL"],
     mergeRule: "role",
     splitLayers: false,       // 기본은 한 파일에 모두
-    excludeTokens: ["col", "colour", "color"],  // line col 류는 색 지정이다
+    // line col 류는 색 지정이고, HEIGHT LINE 류는 키 기준선이라 둘 다 선화가 아니다
+    excludeTokens: ["col", "colour", "color", "height"],
     outputFormat: "psd",      // 기본은 원본 따름
     // 기본은 꺼짐, width 0 = 자동, colourMode는 지금까지의 정확한 경로,
     // edgeMode는 region(새 기본)
@@ -365,7 +367,10 @@ test("presets saved before excludeTokens existed load with the default vocabular
 
   const [loaded] = await loadPresets();
 
-  expect(loaded.excludeTokens).toEqual(["col", "colour", "color"]);
+  // 어휘가 늘면 옛 프리셋도 늘어난 쪽을 받는다 — 그게 이 마이그레이션의 요점이다.
+  // (2026-08-10에 키 기준선을 빼려고 "height"가 들어왔다.)
+  expect(loaded.excludeTokens).toEqual(DEFAULT_EXCLUDE_TOKENS);
+  expect(loaded.excludeTokens).toContain("height");
 });
 
 test("an empty excludeTokens list is kept, not replaced by the default", async () => {
@@ -494,4 +499,19 @@ test("the five numeric edge-line defaults match the engine's EDGE_DEFAULTS", () 
   for (const value of ["region", "change"]) {
     expect(emodes![1], `EDGE_MODES에 ${value}가 없다`).toContain(`"${value}"`);
   }
+});
+
+test("excludeTokens의 기본 어휘가 엔진과 프런트에서 같다", () => {
+  // 이 대조가 없어서 두 곳을 손으로 맞춰야 했다. 이 저장소는 같은 결함을 이미 한 번
+  // 냈다 — 엔진에서 width=0이 "자동"인데 프런트가 항상 5를 보내 자동이 한 번도 안
+  // 돌았고, 각자 자기 쪽 상수만 봐서 양쪽 테스트가 모두 통과했다.
+  //
+  // 파이썬 리스트를 그대로 읽어 비교한다. 주석에 예시 목록이 있어도 `=` 오른쪽의
+  // 대괄호만 잡으므로 걸리지 않는다.
+  const m = /^DEFAULT_EXCLUDE_TOKENS\s*=\s*\[([^\]]*)\]/m.exec(matchingSource);
+  expect(m, "matching.py에서 DEFAULT_EXCLUDE_TOKENS를 못 찾았다").not.toBeNull();
+  const engine = [...m![1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+  expect(engine, "엔진과 프런트의 excludeTokens 기본값이 다르다").toEqual(
+    DEFAULT_EXCLUDE_TOKENS,
+  );
 });

@@ -61,7 +61,24 @@ SKIP_BLEND_MODE = "blendMode"
 #: `line col`, `LINE_COL`, `Line Colour`, `Wall_Line_Col`이 18장 나왔다.
 #: 프리셋이 덮어쓸 수 있다 — 네 규칙 중 이것만 어휘에 의존하기 때문이다.
 #: src/lib/presets.ts의 DEFAULT_EXCLUDE_TOKENS와 같은 값이어야 한다.
-DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color"]
+#:
+#: `height`는 키 기준선을 뺀다(`CHARACTER HEIGHT LINE` 등). 이름에 line이 들어 있어
+#: include 규칙에 걸리지만 선화가 아니라 참고선이다. 아티스트가 2026-08-10에 지목했다.
+#:
+#: **구가 아니라 단일 토큰이어야 한다.** `has_any_token`은 이름의 토큰 하나하나를
+#: 비교하므로 "height line"처럼 두 낱말을 넣으면 영영 안 걸린다.
+#:
+#: 넣기 전에 두 폴더를 전수로 셌다 — `EXTRA REFS`를 BG에서만 확인하고 캐릭터
+#: 프리셋에 넣었다가 한 장의 진짜 선화 후보를 빼먹은 적이 있어서다:
+#:
+#:     캐릭터 100장  include('line') 잎 1012개 중 height 토큰 120개 (79장)
+#:                   전부 HEIGHT LINE 변형(HEIGHT LINE 49 / CHARACTER ~ 37 /
+#:                   CHARLIE ~ 31 / 공백·Copy 변형 3). **오탐 0.**
+#:     BG 26장       0개
+#:
+#: 지금 실제로 내보내지던 것은 36장 72잎이다. 오버레이는 영향 없다 — 키 기준선이
+#: 뷰 바깥에 있어 `character._line_leaves`가 애초에 보지 않는다(전수 0건).
+DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color", "height"]
 
 
 def _leaf_skip_reason(node, exclude_tokens):

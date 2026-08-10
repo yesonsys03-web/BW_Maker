@@ -622,3 +622,35 @@ def test_a_line_from_another_group_does_not_silence_this_one():
 
     assert matched == [1]
     assert [(s["id"], s["reason"]) for s in skipped] == [(3, "noPixels")]
+
+
+def test_height_reference_lines_are_excluded_but_real_lines_are_kept():
+    """
+    키 기준선(`CHARACTER HEIGHT LINE` 등)은 이름에 line이 들어 있어 include 규칙에
+    걸리지만 선화가 아니다. 아티스트가 2026-08-10에 지목했고, 그때 실제로 납품
+    캐릭터 36장이 이것을 선화로 내보내고 있었다(잎 72개).
+
+    **상수 목록만 보는 테스트로는 이걸 못 지킨다** — `excludeTokens`가 실제로
+    걸러내는지는 매칭을 돌려봐야 안다. 그리고 같은 이름의 진짜 선화를 데려가지
+    않는지도 같이 본다: 걸러내기만 하는 규칙은 전부 걸러내도 통과한다.
+
+    구가 아니라 단일 토큰이어야 한다는 것도 여기서 걸린다 — has_any_token은
+    토큰 하나씩만 비교하므로 "height line"을 넣으면 아무것도 안 걸러진다.
+    """
+    tree = [
+        _group(0, "EXTRA REFS", [], [
+            _node(1, "CHARACTER HEIGHT LINE", "pixel", True,
+                  path=["EXTRA REFS", "CHARACTER HEIGHT LINE"]),
+            _node(2, "HEIGHT LINE", "pixel", True,
+                  path=["EXTRA REFS", "HEIGHT LINE"]),
+        ]),
+        _group(3, "FRONT", [], [
+            _node(4, "LINES", "pixel", True, path=["FRONT", "LINES"]),
+            _node(5, "MOUTH LINE", "pixel", True, path=["FRONT", "MOUTH LINE"]),
+        ]),
+    ]
+
+    matched, skipped = match_preset(tree, _preset(excludeGroupPrefixes=[]))
+
+    assert matched == [4, 5], "진짜 선화가 함께 걸러졌다"
+    assert {s["id"] for s in skipped} == {1, 2}, "키 기준선이 안 걸러졌다"
