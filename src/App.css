@@ -298,6 +298,26 @@ input[type="text"] {
   border-color: var(--accent);
 }
 
+/* 규칙이 라인을 하나도 못 잡은 파일. 한 장씩 열어보지 않고 목록에서 바로
+   가려내라고 있는 표시다.
+
+   .active 뒤에 둔다 — 같은 특정도라 순서로 이긴다. 활성 행에서도 이 표시가
+   남아야 한다: 확인하려고 그 파일을 누른 순간 표시가 사라지면, 방금 무엇을
+   보고 눌렀는지가 화면에서 없어진다. 테두리는 .active 것을 그대로 둔다. */
+.file-list-item.needs-line {
+  background: #33291a;
+}
+
+.file-list-item.needs-line.active {
+  background: #4a3a20;
+  border-color: var(--accent);
+}
+
+.status-badge.status-needs-line {
+  color: #f2c94c;
+  border-color: #7a6a2a;
+}
+
 .file-list-remove {
   flex-shrink: 0;
   background: transparent;

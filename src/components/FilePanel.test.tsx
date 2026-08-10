@@ -1,0 +1,87 @@
+// @vitest-environment jsdom
+/**
+ * 규칙이 라인을 하나도 못 잡은 파일은 목록에서 바로 보여야 한다.
+ *
+ * 그 자리를 찾느라 파일을 한 장씩 열어보는 것이 오래 걸린다고 아티스트가 지목한
+ * 작업이다(2026-08-10). 표시는 "열림" 옆의 `라인필요` 배지와 행 하이라이트 둘.
+ *
+ * 조건은 **내보낼 장수 0**이지 "미리보기가 비었나"가 아니다 — 눈을 다 꺼둔
+ * 파일도 미리보기는 비는데, 그건 아티스트가 일부러 한 것이라 "라인필요"라고
+ * 말하면 거짓말이 된다. entryCounts는 프리셋이 걸린 파일만 담으므로, 아직 안
+ * 걸린 파일에는 아무 표시도 안 붙는다.
+ */
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
+}));
+
+import { FilePanel } from "./FilePanel";
+import type { FileEntry } from "../state/appStore";
+
+afterEach(cleanup);
+
+function fileAt(path: string): FileEntry {
+  return { path, status: "open", sessionId: 1, mtime: 1, presetApplied: true } as FileEntry;
+}
+
+function renderPanel(files: FileEntry[], entryCounts: Record<string, number>) {
+  return render(
+    <FilePanel
+      files={files}
+      activePath={null}
+      loadProgress={null}
+      prefetchProgress={null}
+      stopped={null}
+      entryCounts={entryCounts}
+      onResizeStart={vi.fn()}
+      onResizeMove={vi.fn()}
+      onResizeEnd={vi.fn()}
+      onResizeReset={vi.fn()}
+      onAddFiles={vi.fn()}
+      onSelectFile={vi.fn()}
+      onRemoveFile={vi.fn()}
+      onClearFiles={vi.fn()}
+      onCancelLoad={vi.fn()}
+      onResume={vi.fn()}
+      onError={vi.fn()}
+    />
+  );
+}
+
+function rowOf(name: string) {
+  const row = screen
+    .getAllByRole("button")
+    .find((b) => b.classList.contains("file-list-item") && b.textContent?.includes(name));
+  if (!row) throw new Error(`파일 행을 찾지 못했다: ${name}`);
+  return row;
+}
+
+test("a file the rules found no line in is badged and highlighted", () => {
+  renderPanel(
+    [fileAt("/cuts/none.psd"), fileAt("/cuts/some.psd")],
+    { "/cuts/none.psd": 0, "/cuts/some.psd": 12 }
+  );
+
+  expect(screen.getByText("라인필요")).toBeTruthy();
+  expect(rowOf("none.psd").classList.contains("needs-line")).toBe(true);
+  expect(rowOf("some.psd").classList.contains("needs-line")).toBe(false);
+});
+
+test("the badge replaces the sheet count rather than sitting beside it", () => {
+  renderPanel([fileAt("/cuts/none.psd")], { "/cuts/none.psd": 0 });
+
+  expect(screen.getByText("라인필요")).toBeTruthy();
+  // "0장"까지 같이 뜨면 같은 말을 두 번 하는 셈이다.
+  expect(screen.queryByText("0장")).toBeNull();
+});
+
+test("a file with no preset applied yet is not called out", () => {
+  // entryCounts에 아예 없는 파일. 여는 동안 전부 "라인필요"로 깜빡이면 안 된다.
+  renderPanel([fileAt("/cuts/pending.psd")], {});
+
+  expect(screen.queryByText("라인필요")).toBeNull();
+  expect(rowOf("pending.psd").classList.contains("needs-line")).toBe(false);
+});

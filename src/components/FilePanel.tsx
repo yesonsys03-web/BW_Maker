@@ -313,21 +313,42 @@ export function FilePanel({
           </p>
         ) : (
           <ul className="file-list">
-            {files.map((file) => (
+            {files.map((file) => {
+              // 프리셋 규칙이 라인을 하나도 못 잡은 파일. 아티스트가 손으로
+              // 지정해야 하는 자리이고, 그 자리를 찾느라 한 장씩 열어보는 것이
+              // 오래 걸린다고 지목된 작업이다 — 목록에서 바로 보이게 한다.
+              //
+              // 조건을 "미리보기가 비었나"가 아니라 **내보낼 장수가 0인가**로
+              // 잡는다. 미리보기가 비는 데는 눈을 다 꺼둔 경우도 있는데, 그건
+              // 아티스트가 일부러 한 것이라 "라인필요"라고 말하면 거짓말이 된다.
+              // entryCounts는 프리셋이 걸린 파일만 담으므로(App.tsx의 같은 이름
+              // 주석) 아직 안 걸린 파일에는 이 표시가 붙지 않는다.
+              const needsLine = entryCounts[file.path] === 0;
+              return (
               <li key={file.path} className="file-list-row">
                 <button
                   type="button"
-                  className={`file-list-item${file.path === activePath ? " active" : ""}`}
+                  className={`file-list-item${file.path === activePath ? " active" : ""}${needsLine ? " needs-line" : ""}`}
                   onClick={() => onSelectFile(file.path)}
                 >
                   <span className="file-name" title={file.path}>
                     {fileName(file.path)}
                   </span>
                   <span className={`status-badge status-${file.status}`}>{STATUS_LABEL[file.status]}</span>
-                  {entryCounts[file.path] !== undefined && (
-                    <span className="file-entry-count" title="내보내기에 나갈 장수">
-                      {entryCounts[file.path]}장
+                  {needsLine ? (
+                    // "0장"을 대신한다. 둘 다 두면 같은 말을 두 번 하는 셈이다.
+                    <span
+                      className="status-badge status-needs-line"
+                      title="프리셋 규칙이 이 파일에서 라인을 하나도 찾지 못했습니다. 레이어를 우클릭해 '라인으로 지정'하세요."
+                    >
+                      라인필요
                     </span>
+                  ) : (
+                    entryCounts[file.path] !== undefined && (
+                      <span className="file-entry-count" title="내보내기에 나갈 장수">
+                        {entryCounts[file.path]}장
+                      </span>
+                    )
                   )}
                 </button>
                 <button
@@ -344,7 +365,8 @@ export function FilePanel({
                   ×
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </div>
