@@ -606,9 +606,16 @@ export function LayerTree({
             <button
               type="button"
               className={`eye-toggle${allHidden ? " eye-hidden" : ""}`}
+              // 그룹 solo와 같은 조건. 그릴 수 있는 leaf가 하나도 없는 그룹
+              // (작업 메모만 든 LABELS 같은 그룹)에서는 눌러도 그림이 그대로다.
+              disabled={soloIds.length === 0}
               onClick={() => handleGroupEye(node)}
               aria-label="그룹 미리보기 토글"
-              title="하위 레이어 미리보기 전체 토글"
+              title={
+                soloIds.length === 0
+                  ? "이 그룹에는 미리보기에 그릴 레이어가 없습니다"
+                  : "하위 레이어 미리보기 전체 토글"
+              }
             >
               👁
             </button>
@@ -676,11 +683,18 @@ export function LayerTree({
         <button
           type="button"
           className={`eye-toggle${hidden ? " eye-hidden" : ""}`}
+          // 바로 위 solo와 같은 조건으로 막는다. 그릴 수 없는 종류(텍스트 등)는
+          // includedIds에 못 들어가므로 visibleIdsForPreview가 애초에 집지 않고,
+          // 그래서 눈을 눌러도 그림이 달라지지 않는다. 막지 않으면 체크박스와
+          // solo는 왜 막혔는지 툴팁으로 말해주는데 눈만 조용히 아무 일도 안 하는
+          // 버튼이 되어, 아티스트는 "토글이 안 된다"고 읽는다.
+          disabled={disabledCheckbox}
           onClick={(e) => {
             e.stopPropagation();
             onTogglePreview(node.id);
           }}
           aria-label="미리보기 토글"
+          title={disabledCheckbox ? "pixel 레이어만 미리보기에 그릴 수 있습니다" : "미리보기에서 감추기"}
         >
           👁
         </button>
@@ -811,11 +825,15 @@ export function LayerTree({
         <button
           type="button"
           className={`eye-toggle${hidden ? " eye-hidden" : ""}`}
+          // 바로 위 solo와 같은 조건 — 소스가 전부 non-pixel이면 눌러도 그림이
+          // 그대로다.
+          disabled={soloSourceIds.length === 0}
           onClick={(e) => {
             e.stopPropagation();
             onSetPreviewHidden(sourceIds, !hidden);
           }}
           aria-label="미리보기 토글"
+          title={soloSourceIds.length === 0 ? "미리보기에 그릴 소스가 없습니다" : "미리보기에서 감추기"}
         >
           👁
         </button>
