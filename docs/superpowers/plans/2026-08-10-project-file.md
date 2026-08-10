@@ -1032,6 +1032,10 @@ export async function psdMtimes(paths: string[]): Promise<Record<string, number>
 
 ```python
     def psd_mtimes(self, paths):
+        # 초 단위로 자른다. 저장된 mtime은 open_psd가 준 float(소수점 이하가 있다)
+        # 이므로 여기서만 자르면 양쪽이 절대 안 맞는다 — reconcileProject가 양쪽을
+        # 다 자르므로(Task 3) 여기서 자르든 말든 결과는 같지만, 두 곳이 같은
+        # 단위를 말하도록 맞춰 둔다.
         out = {}
         for p in paths:
             try:
@@ -1040,6 +1044,12 @@ export async function psdMtimes(paths: string[]): Promise<Record<string, number>
                 pass
         return out
 ```
+
+**주의 — 정밀도가 갈리는 자리다.** `session.py:57`이 `os.path.getmtime`을 그대로
+쓰고 `rpc.py:168`이 손대지 않고 넘기므로, 저장되는 `mtime`은
+`1786347931.7873118` 같은 float다. 여기서 `int()`로 자른 값과 그대로 비교하면
+**안 바뀐 파일이 전부 "바뀜"으로 판정된다.** 비교는 `reconcileProject` 한 곳에서
+양쪽을 다 초 단위로 자르는 것으로 통일한다(Task 3).
 
 `⌘S`는 `App.tsx`의 기존 키 핸들러 옆에 붙인다:
 
