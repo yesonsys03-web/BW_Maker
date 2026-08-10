@@ -127,10 +127,19 @@ export function parseProject(raw: string): ProjectFile {
   if (p.preset !== undefined && p.preset !== null) {
     preset = validatePreset(p.preset, 0, "project.json preset");
   }
+  const files = p.files.map(validateEntry);
+  // 중복 경로를 찾는다.
+  const seen = new Set<string>();
+  for (const file of files) {
+    if (seen.has(file.path)) {
+      throw new Error(`project.json files: 경로가 중복됩니다(${file.path}).`);
+    }
+    seen.add(file.path);
+  }
   return {
     version: 1,
     preset,
-    files: p.files.map(validateEntry),
+    files,
   };
 }
 
@@ -144,6 +153,9 @@ export function serializeProject(p: ProjectFile): string {
  * 판정은 경로 + 수정시각이고 이 앱이 이미 쓰는 규약이다(previewCacheKey).
  * 버린 파일의 경로를 돌려주는 것이 요점이다 — 조용히 지우면 아티스트는 자기가
  * 한 지정이 왜 없는지 알 수 없다.
+ *
+ * 저장된 mtime은 engine이 os.path.getmtime()을 통째로 넘기고(float),
+ * 디스크 조회는 int로 돌아온다(Task 6). 초 단위로 비교한다.
  */
 export function reconcileProject(
   project: ProjectFile,
@@ -152,8 +164,12 @@ export function reconcileProject(
   const fresh: ProjectEntry[] = [];
   const stale: string[] = [];
   for (const entry of project.files) {
-    if (mtimes[entry.path] === entry.mtime) fresh.push(entry);
-    else stale.push(entry.path);
+    const diskMtime = mtimes[entry.path];
+    if (diskMtime !== undefined && Math.floor(diskMtime) === Math.floor(entry.mtime)) {
+      fresh.push(entry);
+    } else {
+      stale.push(entry.path);
+    }
   }
   return { fresh, stale };
 }

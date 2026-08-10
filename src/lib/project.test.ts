@@ -219,3 +219,24 @@ test("a file that is gone from disk is stale too", () => {
   const { stale } = reconcileProject(p, {});
   expect(stale).toEqual(["/a.psd"]);
 });
+
+// engine이 float을 저장하지만 디스크 조회는 int로 돌아온다.
+// 초 단위로 비교해야 한다.
+test("a stored float mtime against a truncated int from disk keeps its work", () => {
+  const p = { version: 1 as const, preset: null, files: [entryAt("/a.psd", 1700.7873118)] };
+  const { fresh, stale } = reconcileProject(p, { "/a.psd": 1700 });
+  expect(fresh.map((e) => e.path)).toEqual(["/a.psd"]);
+  expect(stale).toEqual([]);
+});
+
+test("a stored float mtime against a genuinely different second loses its work", () => {
+  const p = { version: 1 as const, preset: null, files: [entryAt("/a.psd", 1700.7873118)] };
+  const { fresh, stale } = reconcileProject(p, { "/a.psd": 1701 });
+  expect(fresh).toEqual([]);
+  expect(stale).toEqual(["/a.psd"]);
+});
+
+test("a duplicate path in project.files is rejected at parse time", () => {
+  const p = { version: 1 as const, preset: null, files: [entryAt("/a.psd", 1700), entryAt("/a.psd", 1800)] };
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/경로가 중복됩니다/);
+});
