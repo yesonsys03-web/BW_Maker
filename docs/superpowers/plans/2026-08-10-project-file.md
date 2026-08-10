@@ -836,6 +836,40 @@ git commit -m "feat: restore previews only when the key still comes out the same
 
 ---
 
+## Task 5.5: 로드 큐가 복원한 파일에 프리셋을 다시 걸지 않게
+
+**Files:**
+- Modify: `src/state/appStore.tsx`, `src/App.tsx`
+- Test: `src/state/appStore.test.ts`, `src/App.test.tsx`
+
+Task 4의 리뷰가 찾은 자리다. Task 4는 `openSuccess`가 복원본을 덮는 문을 막았는데,
+**그 옆에 문이 하나 더 있다.**
+
+`App.tsx:358-361`의 로드 큐는 파일을 연 직후 **`presetApplied`를 보지 않고 무조건**
+`applyPresetEffect`를 부른다(바로 아래 그물 효과 `:680`은 본다). 복원한 파일은
+`status: "idle"`로 들어가므로 큐가 전부 집어 가고, `applyPresetResult`가
+`includedIds`·`ops`·`entries`·`matchedIdsByPath`를 새 매칭 결과로 덮어쓴다 —
+**아티스트의 체크 편집과 병합이 바로 그렇게 사라진다.** (`manualLineIds`·
+`edgeColourIds`·`soloIds`·`previewHiddenIds`는 `applyPresetResult`가 그대로 넘겨서
+살아남는다. 그래서 증상이 "일부만 사라짐"이라 더 알아채기 어렵다.)
+
+고치는 방향은 `presetApplied`의 뜻을 지키는 것이다 — "이 파일의 ops는 이미 프리셋
+적용에서 나왔다".
+
+- `openSuccess`가 복원본을 지킨 경우(Task 4의 조건이 참일 때) `presetApplied`를
+  **`true`** 로 둔다. 복원한 ops는 지난 세션의 프리셋 적용에서 나온 것이고, 그 위에
+  아티스트가 편집을 얹었다. 다시 걸면 그 편집이 사라진다.
+- 로드 큐가 적용 전에 `presetApplied !== true`를 확인한다. 지금 큐와 그물 효과가
+  이 값을 두고 서로 다르게 굴고 있는데, 그 어긋남 자체가 이 결함의 원인이다.
+
+테스트 둘:
+- 리듀서: 복원한 파일의 `openSuccess` 뒤 `presetApplied`가 `true`, 복원하지 않은
+  파일은 `false`.
+- App: 복원한 파일이 목록에 있을 때 로드 큐가 그 파일에 `applyPreset`을 부르지
+  않는다. 복원하지 않은 파일에는 지금처럼 부른다.
+
+변이 확인: 큐의 `presetApplied` 조건을 지우면 App 쪽 테스트만 빨간불이어야 한다.
+
 ## Task 6: 열기·저장 UI와 "파일이 바뀌었습니다" 표시
 
 **Files:**
@@ -1000,6 +1034,29 @@ const [projectPreset, setProjectPreset] = useState<Preset | null>(null);
       pushError("프로젝트 저장 실패", toEngineError(e));
     }
   }, [projectDir, buildProject, handleProjectSaveAs, pushError]);
+
+**프로젝트의 프리셋을 앱 선택으로 올린다 — 안 하면 이 기능이 헛돈다.**
+
+`primeRestoredPreviews`가 `presetRef.current`에서 색과 경계선 설정을 읽는데, 앱을
+껐다 켜면 `selectedPreset`은 `undefined`다. 그 상태로 키를 다시 계산하면
+`lineColor=null, edgeLines=null`이 되어 저장된 키와 안 맞고 **복원한 미리보기가
+전부 버려진다.** 틀린 그림이 뜨지는 않지만(설계대로 안전하게 실패한다), "껐다 켜고
+다시 연다"는 이 기능의 주 경로에서 이득이 0이 된다. Task 5의 리뷰가 잡았다.
+
+그래서 둘을 같이 한다:
+
+1. `primeRestoredPreviews`가 `lineColor`와 `edgeLines`를 **인자로 받는다**
+   (`presetRef.current`를 안에서 읽지 않는다). `restorablePreviews`는 이미 그렇게
+   되어 있는데 App 쪽 콜백만 출처를 박아둔 상태다. 그 줄과 함께 Task 5가 남긴
+   `void primeRestoredPreviews;`(App.tsx:496)도 지운다 — 이제 진짜로 불린다.
+2. 프로젝트를 열면 **그 프로젝트의 프리셋을 앱의 선택으로 만든다.** 안 하면
+   복원 직후의 그림은 맞지만 화면이 다시 그리는 순간 다른 프리셋으로 키가 달라져
+   결국 전부 다시 그린다. "전부 그대로 뜬다"는 요구와도 그게 맞는다.
+
+   `selectedPreset`은 `PresetBar`가 목록을 읽어 위로 알려주는 값이다. 프로젝트가
+   고른 이름을 `PresetBar`에 초기 선택으로 내려보내는 prop 하나를 더한다 — 목록에
+   그 이름이 없으면(프리셋을 지웠거나 이름을 바꾼 경우) 지금처럼 첫 번째를 고르고,
+   그때는 미리보기가 버려지는 것이 맞다.
 
   const handleProjectOpen = useCallback(async () => {
     const dir = await openDialog({ directory: true });
