@@ -334,6 +334,79 @@ test("the load queue skips auto-apply for a restored file but still applies it t
   expect(engine.applyPreset).toHaveBeenCalledWith(2, PRESET);
 });
 
+// 세 번째 경로: 엔진이 죽었다 재시작하면(EngineStatus) 그 파일의 FileEntry가
+// { path, status: "idle" }로 통째로 갈아 끼워진다 — mtime도 함께 사라진다.
+// restoredMtimeByPath는 지워지지 않는다(엔진이 죽어도 디스크의 PSD는 그대로다).
+// 큐가 "복원본이라 이미 적용됐다"는 판정을 FileEntry.mtime에서 다시 계산한다면
+// 이 순간 그 대리 지표가 사라져 판정이 뒤집히고, 큐가 파일을 재오픈할 때
+// applyPresetEffect를 또 걸어 복원해 지킨 편집을 덮는다.
+test("re-processing a restored file after an engine restart still skips auto-apply", async () => {
+  let deadCallback: ((payload: { stderrTail?: string[] }) => void) | undefined;
+  engine.onEngineDead.mockImplementation((cb: (payload: { stderrTail?: string[] }) => void) => {
+    deadCallback = cb;
+    return Promise.resolve(() => {});
+  });
+  vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
+  engine.applyPreset.mockResolvedValue({ matchedLayerIds: [], operations: [] });
+
+  const seeded = appReducer(initialAppState, {
+    type: "restoreProject",
+    entries: [
+      {
+        path: "/cuts/restored.psd",
+        mtime: 1700,
+        tree: treeOf([1, 2]) as never,
+        matchedIds: [1, 2],
+        ops: {
+          includedIds: [1, 2], previewHiddenIds: [], soloIds: [], edgeColourIds: [],
+          manualLineIds: [], ops: [],
+          // 손으로 병합한 결과. 프리셋을 다시 걸면(matchedLayerIds가 빈 목록이므로
+          // 0장) entries가 비고, 그냥 새로 연 것으로 되돌아가도(2장, 병합 전 개별
+          // 항목) 이 모양이 될 수 없다 — "1장(병합)"이 끝까지 남아 있다는 것이
+          // 복원한 편집이 살아남았다는 증거다.
+          entries: [{ entryId: -1, sourceIds: [1, 2], name: "MERGED" }],
+        } as never,
+        previewKey: null,
+        previewFile: null,
+      },
+    ],
+  } as never);
+
+  render(<App initialState={seeded} />);
+
+  await waitFor(() => expect(opens).toHaveLength(1));
+  // 프리셋이 선택될 때까지 기다린다(위 테스트와 같은 이유의 레이스 방지).
+  await waitFor(() => expect(screen.getByText(PRESET.name)).toBeTruthy());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  opens[0].d.resolve({
+    sessionId: 1, width: 10, height: 10, colorMode: "RGB", depth: 8,
+    tree: treeOf([1, 2]), mtime: 1700,
+  });
+  await waitFor(() => expect(screen.getByText("1장")).toBeTruthy());
+  expect(engine.applyPreset).not.toHaveBeenCalled();
+
+  // 엔진이 죽고, 사람이 재시작을 누른다.
+  deadCallback?.({ stderrTail: [] });
+  await waitFor(() => expect(screen.getByRole("button", { name: "재시작" })).toBeTruthy());
+  click(screen.getByRole("button", { name: "재시작" }));
+
+  // 큐가 idle로 돌아간 그 파일을 다시 연다.
+  await waitFor(() => expect(opens).toHaveLength(2));
+  expect(opens[1].path).toBe("/cuts/restored.psd");
+
+  // 디스크의 PSD는 바뀌지 않았으므로 엔진이 돌려주는 mtime도 그대로다.
+  opens[1].d.resolve({
+    sessionId: 2, width: 10, height: 10, colorMode: "RGB", depth: 8,
+    tree: treeOf([1, 2]), mtime: 1700,
+  });
+
+  await waitFor(() => expect(screen.getByText("1장")).toBeTruthy());
+  // 재적용을 걸었다면 매칭 결과([])로 덮여 entries가 비어 "0장"이 됐을 것이다.
+  expect(screen.queryByText("0장")).toBeNull();
+  expect(engine.applyPreset).not.toHaveBeenCalled();
+});
+
 test("no thumbnail is rendered while the load queue is running", async () => {
   render(<App />);
   await addFiles({ click });

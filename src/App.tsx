@@ -248,12 +248,21 @@ function AppShell() {
   const filesRef = useRef(state.files);
   const activePathRef = useRef(state.activePath);
   const presetRef = useRef(selectedPreset);
+  /**
+   * 리듀서가 openSuccess에서 읽는 것과 같은 원본(state.restoredMtimeByPath)의
+   * 거울. 로드 큐가 "이 파일이 복원본이고 방금 연 mtime이 그대로인지"를 리듀서와
+   * 같은 조건으로 판정하려면 이걸 읽어야 한다 — FileEntry.mtime을 대신 쓰면
+   * engineRestarted가 그 필드만 지우고 restoredMtimeByPath는 그대로 두는 순간
+   * 둘이 어긋난다(아래 processPath 주석 참고).
+   */
+  const restoredMtimeByPathRef = useRef(state.restoredMtimeByPath);
   const loadingRef = useRef(false);
   useEffect(() => {
     filesRef.current = state.files;
     activePathRef.current = state.activePath;
     presetRef.current = selectedPreset;
-  }, [state.files, state.activePath, selectedPreset]);
+    restoredMtimeByPathRef.current = state.restoredMtimeByPath;
+  }, [state.files, state.activePath, selectedPreset, state.restoredMtimeByPath]);
 
   /**
    * 이 인스턴스가 버려졌는지. 세 배경 큐가 회차 사이에 확인한다.
@@ -346,15 +355,20 @@ function AppShell() {
     void drainLoadQueue({
       pendingPaths: () => filesRef.current.filter((f) => f.status === "idle").map((f) => f.path),
       processPath: async (path) => {
-        // 열기 전 mtime을 미리 적어둔다 — 복원한 파일인지, 그리고 그 mtime이
-        // 지금 이 파일의 것인지를 열기 *뒤에* 판정하기 위해서다. openSuccess가
+        // 복원된 mtime을 미리 적어둔다 — 복원한 파일인지, 그리고 그 mtime이 지금
+        // 이 파일의 것인지를 열기 *뒤에* 판정하기 위해서다. openSuccess가
         // dispatch한 presetApplied는 리듀서 안에서 곧바로 계산되지만, 이 컴포넌트가
         // 그것을 다시 읽으려면 재렌더와 filesRef 갱신 effect를 거쳐야 하고, 그
         // 시점은 여기서 보장할 수 없다 — 그래서 리듀서와 같은 조건(복원된
-        // mtime === 방금 연 mtime)을 여기서도 독립적으로 계산한다. restoreProject가
-        // 세운 FileEntry.mtime이 그 값이고, 평범하게 addFiles로 들어온 파일은 열기
-        // 전 mtime이 없으므로 이 판정은 항상 false다.
-        const priorMtime = filesRef.current.find((f) => f.path === path)?.mtime;
+        // mtime === 방금 연 mtime)을 여기서도 독립적으로 계산한다.
+        //
+        // FileEntry.mtime이 아니라 restoredMtimeByPathRef를 읽는다. mtime은
+        // engineRestarted가 파일 항목을 통째로 { path, status: "idle" }로 갈아
+        // 끼우며 함께 지운다(appStore.tsx 참고) — 그때 restoredMtimeByPath는
+        // 그대로 남는데, mtime을 대리 지표로 쓰면 그 순간부터 이 판정이 리듀서의
+        // 판정과 어긋난다. 엔진이 재시작해도 디스크의 PSD는 그대로이므로 복원한
+        // 작업은 여전히 유효하고, 큐가 그 파일을 다시 여는 순간에도 지켜야 한다.
+        const priorRestoredMtime = restoredMtimeByPathRef.current[path];
         // 아직 아무것도 안 보고 있으면 첫 파일을 띄워준다. 그 뒤로는 사람이
         // 보고 있는 화면을 뺏지 않는다.
         const result = await openFileEffect(dispatch, path, {
@@ -367,7 +381,7 @@ function AppShell() {
         // true로 세워 이전 세션의 편집을 지켰다(appStore.tsx의 openSuccess 주석
         // 참고) — 그 위에 자동 적용을 또 걸면 방금 지킨 체크박스·병합 편집이
         // 프리셋 매칭 결과로 조용히 덮인다.
-        const alreadyApplied = priorMtime !== undefined && priorMtime === result?.mtime;
+        const alreadyApplied = priorRestoredMtime !== undefined && priorRestoredMtime === result?.mtime;
         // 프리셋은 파일을 연 직후에 붙인다 — 그래야 세션이 아직 엔진의 LRU 안에
         // 있어서 다시 파싱하지 않는다.
         if (result && preset && !alreadyApplied) {
