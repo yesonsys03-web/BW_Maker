@@ -1,4 +1,4 @@
-import { tokenMatch } from "./layerNames";
+import { tokenMatchAny } from "./layerNames";
 import type { Entry } from "./opsReducer";
 import type { TreeNode } from "./types";
 
@@ -26,7 +26,7 @@ export const LAYER_FILTER_LABELS: Record<LayerFilterMode, string> = {
  * 부분 문자열이 아니라 토큰으로 본다 — 엔진과 같은 규칙이라야 프리셋을 누르는
  * 순간 목록이 바뀌지 않는다(engine/psd_engine/names.py).
  */
-export const LINE_NAME_FALLBACK = "line";
+export const LINE_NAME_FALLBACK = "line, lineart";
 
 export interface FlatLeaf {
   node: TreeNode;
@@ -63,15 +63,25 @@ export function flattenLeaves(nodes: TreeNode[], out: FlatLeaf[] = []): FlatLeaf
  * 아직 적용 전이라 비어 있으면 이름에 "line"이 들어간 leaf로 대체해, 프리셋
  * 없이도 패널을 바로 쓸 수 있게 한다.
  */
-export function lineLeafIds(leaves: FlatLeaf[], matchedIds: number[]): number[] {
+export function lineLeafIds(
+  leaves: FlatLeaf[],
+  matchedIds: number[],
+  manualLineIds: number[] = [],
+): number[] {
+  const manual = new Set(manualLineIds);
+  // 손으로 지정한 것은 **언제나** 더한다. 규칙이 못 잡는 판이 있어서 만든 길인데
+  // 규칙이 하나라도 잡으면 가려진다면, 정작 필요한 판(1장만 잡히는 판)에서
+  // 아무 소용이 없다 — 그런 판이 실제로 있었다.
   if (matchedIds.length > 0) {
     const matched = new Set(matchedIds);
     // matchedIds에는 (matchGroups 프리셋에서) 그룹 id가 섞일 수 있다. 평면
     // 목록은 leaf만 그리므로 leaf로 교집합을 낸다.
-    return leaves.filter((l) => matched.has(l.node.id)).map((l) => l.node.id);
+    return leaves
+      .filter((l) => matched.has(l.node.id) || manual.has(l.node.id))
+      .map((l) => l.node.id);
   }
   return leaves
-    .filter((l) => tokenMatch(l.node.name, LINE_NAME_FALLBACK))
+    .filter((l) => manual.has(l.node.id) || tokenMatchAny(l.node.name, LINE_NAME_FALLBACK))
     .map((l) => l.node.id);
 }
 
@@ -84,6 +94,8 @@ export interface LayerFilterInput {
   mode: LayerFilterMode;
   query: string;
   matchedIds: number[];
+  /** 손으로 "라인이다"라고 지정한 leaf. 없으면 빈 배열. */
+  manualLineIds?: number[];
 }
 
 /**
@@ -99,7 +111,7 @@ export function filterLeaves(leaves: FlatLeaf[], input: LayerFilterInput): FlatL
   let out = leaves;
 
   if (input.mode === "line") {
-    const ids = new Set(lineLeafIds(leaves, input.matchedIds));
+    const ids = new Set(lineLeafIds(leaves, input.matchedIds, input.manualLineIds ?? []));
     out = out.filter((l) => ids.has(l.node.id));
   }
 

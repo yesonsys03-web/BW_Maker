@@ -217,7 +217,7 @@ const fresh = (includedIds: number[]): OpsState => ({
   includedIds,
   previewHiddenIds: [],
   soloIds: [],
-  edgeColourIds: [],
+  edgeColourIds: [], manualLineIds: [],
   ops: [],
   entries: buildEntries(includedIds, []),
 });
@@ -225,7 +225,7 @@ const withOps = (includedIds: number[], ops: Operation[]): OpsState => ({
   includedIds,
   previewHiddenIds: [],
   soloIds: [],
-  edgeColourIds: [],
+  edgeColourIds: [], manualLineIds: [],
   ops,
   entries: buildEntries(includedIds, ops),
 });
@@ -361,7 +361,7 @@ const soloBase: OpsState = {
   includedIds: [1, 2, 3],
   previewHiddenIds: [2],
   soloIds: [],
-  edgeColourIds: [],
+  edgeColourIds: [], manualLineIds: [],
   ops: [],
   entries: [],
 };
@@ -420,7 +420,7 @@ const edgeColourBase: OpsState = {
   includedIds: [1, 2, 3],
   previewHiddenIds: [],
   soloIds: [],
-  edgeColourIds: [],
+  edgeColourIds: [], manualLineIds: [],
   ops: [],
   entries: [],
 };
@@ -477,4 +477,49 @@ test("reset clears edgeColourIds along with the rest of the file-scoped state", 
   const designated = opsReducer(edgeColourBase, { type: "setEdgeColour", layerIds: [1, 2], on: true });
   const reset = opsReducer(designated, { type: "reset", includedIds: [1, 2, 3] });
   expect(reset.edgeColourIds).toEqual([]);
+});
+
+const manualLineBase: OpsState = {
+  includedIds: [1, 2],
+  previewHiddenIds: [],
+  soloIds: [],
+  edgeColourIds: [], manualLineIds: [],
+  ops: [],
+  entries: buildEntries([1, 2], []),
+};
+
+// edgeColourIds와 **반대**의 결정이다. 색 원본 지정은 체크박스를 절대 안 건드리는데
+// (그건 내보내기에 색 레이어가 끼어드는 걸 막으려는 것), 라인 지정은 목적이 정확히
+// "이걸 라인으로 내보내라"이므로 체크까지 같이 켜야 한다. 두 지정의 의도가 반대라
+// 동작도 반대인 것이고, 그래서 이 테스트가 따로 필요하다.
+test("setManualLine은 지정과 동시에 내보내기에도 넣는다", () => {
+  const on = opsReducer(manualLineBase, { type: "setManualLine", layerIds: [7, 9], on: true });
+  expect(on.manualLineIds).toEqual([7, 9]);
+  expect(on.includedIds).toEqual([1, 2, 7, 9]);
+  expect(on.entries.map((e) => e.entryId)).toContain(7);
+});
+
+test("setManualLine 해제는 지정만 거두고 체크는 그대로 둔다", () => {
+  // 체크는 아티스트가 직접 만질 수 있는 것이라, 지정을 무를 때 같이 끄면 그
+  // 조작을 덮어쓴다. 되돌리고 싶으면 체크박스를 끄면 된다.
+  const on = opsReducer(manualLineBase, { type: "setManualLine", layerIds: [7], on: true });
+  const off = opsReducer(on, { type: "setManualLine", layerIds: [7], on: false });
+  expect(off.manualLineIds).toEqual([]);
+  expect(off.includedIds).toEqual([1, 2, 7]);
+});
+
+test("선택 병합을 하면 그 소스가 라인 지정에 들어간다", () => {
+  // 병합했다는 것 자체가 "이것들이 내 라인이다"라는 선언이다. 안 넣으면 방금
+  // 만든 병합이 라인만 목록에서 안 보여 아티스트가 자기가 한 일을 확인 못 한다.
+  const merged = opsReducer(manualLineBase, {
+    type: "pushOp", op: { op: "merge", layerIds: [1, 2], name: "LINE" },
+  });
+  expect(merged.manualLineIds).toEqual([1, 2]);
+});
+
+test("병합이 아닌 op는 라인 지정을 건드리지 않는다", () => {
+  const renamed = opsReducer(manualLineBase, {
+    type: "pushOp", op: { op: "rename", layerId: 1, name: "새 이름" },
+  });
+  expect(renamed.manualLineIds).toEqual([]);
 });

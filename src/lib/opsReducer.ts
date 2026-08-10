@@ -30,6 +30,18 @@ export interface OpsState {
    * 레이어가 색 원본인지는 파일마다 다른 사실이고 프리셋은 파일과 무관하다.
    */
   edgeColourIds: number[];
+  /**
+   * 아티스트가 손으로 "이건 라인이다"라고 지정한 leaf.
+   *
+   * 이름 규칙으로 못 잡는 판이 실제로 있다 — 잎이 7장뿐이고 그중 선화가
+   * `BORDER`라 include 규칙에 하나도 안 걸리는 판을 아티스트가 짚었다. 규칙을
+   * 넓혀 잡으려 하면 다른 판에서 엉뚱한 것이 걸린다.
+   *
+   * 두 곳에서 채워진다: 컨텍스트 메뉴의 "라인으로 지정", 그리고 선택 병합
+   * (병합했다는 것 자체가 "이것들이 내 라인이다"라는 선언이다). 프리셋에는
+   * 저장하지 않는다 — edgeColourIds와 같은 이유로 파일마다 다른 사실이다.
+   */
+  manualLineIds: number[];
   ops: Operation[]; // exclude 제외: merge/rename/reorder/flatten
   entries: Entry[]; // includedIds+ops로부터 계산된 현재 내보내기 목록 (아래→위)
 }
@@ -42,6 +54,7 @@ export type OpsAction =
   | { type: "setSolo"; layerIds: number[]; solo: boolean }
   | { type: "toggleEdgeColour"; layerId: number }
   | { type: "setEdgeColour"; layerIds: number[]; on: boolean }
+  | { type: "setManualLine"; layerIds: number[]; on: boolean }
   | { type: "pushOp"; op: Operation }
   | { type: "undo" };
 
@@ -308,6 +321,7 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
       const includedIds = action.includedIds;
       return {
         includedIds, previewHiddenIds: [], soloIds: [], edgeColourIds: [],
+        manualLineIds: [],
         ops: [], entries: buildEntries(includedIds, []),
       };
     }
@@ -350,11 +364,36 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
         : state.edgeColourIds.filter((id) => !target.has(id));
       return { ...state, edgeColourIds };
     }
+    case "setManualLine": {
+      // 지정과 동시에 내보내기에도 넣는다. 라인만 목록에는 보이는데 체크가 안 된
+      // 상태는 "지정했는데 안 나갔다"로 이어지고, 그 둘을 따로 눌러야 한다는 걸
+      // 아무도 모른다. 해제는 지정만 거두고 체크는 건드리지 않는다 — 체크는
+      // 아티스트가 직접 만질 수 있는 것이라 되돌리면 그 조작을 덮어쓴다.
+      const target = new Set(action.layerIds);
+      const manualLineIds = action.on
+        ? Array.from(new Set([...state.manualLineIds, ...action.layerIds])).sort((a, b) => a - b)
+        : state.manualLineIds.filter((id) => !target.has(id));
+      if (!action.on) return { ...state, manualLineIds };
+      const includedIds = Array.from(
+        new Set([...state.includedIds, ...action.layerIds]),
+      ).sort((a, b) => a - b);
+      return {
+        ...state, manualLineIds, includedIds,
+        entries: buildEntries(includedIds, state.ops),
+      };
+    }
     case "pushOp": {
       // Throws on invalid refs (unchanged) — caller/UI catches and displays.
       const ops = [...state.ops, action.op];
       const entries = buildEntries(state.includedIds, ops);
-      return { ...state, ops, entries };
+      // 선택 병합은 그 자체가 "이것들이 라인이다"라는 선언이라, 병합 소스를
+      // 라인만 목록에 넣는다. 안 그러면 방금 만든 병합이 라인만에서 안 보여
+      // 아티스트가 자기가 한 일을 확인할 수 없다.
+      const merged = action.op.op === "merge" ? action.op.layerIds : [];
+      const manualLineIds = merged.length
+        ? Array.from(new Set([...state.manualLineIds, ...merged])).sort((a, b) => a - b)
+        : state.manualLineIds;
+      return { ...state, ops, entries, manualLineIds };
     }
     case "undo": {
       const ops = state.ops.slice(0, -1);

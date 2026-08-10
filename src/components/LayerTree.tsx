@@ -48,6 +48,13 @@ interface LayerTreeProps {
    * 대상 집합이고, 여기서는 컨텍스트 메뉴의 다중 선택을 그대로 받는다.
    */
   onSetEdgeColour: (layerIds: number[], on: boolean) => void;
+  /**
+   * "라인으로 지정"을 켜고 끈다. 이름 규칙으로 못 잡는 판이 있다 — 잎이 7장이고
+   * 선화가 `BORDER`라 include에 하나도 안 걸리는 판을 아티스트가 짚었다.
+   * onSetEdgeColour와 달리 **체크박스도 같이 켠다**: 이 지정의 목적이 "이걸
+   * 라인으로 내보내라"이기 때문이다(opsReducer의 setManualLine 주석).
+   */
+  onSetManualLine: (layerIds: number[], on: boolean) => void;
   onPushOp: (op: Operation) => void;
   /**
    * 지금 화면에 보이는 pixel leaf id 전부. 스크롤할 때마다 새 목록으로 불린다.
@@ -134,6 +141,7 @@ export function LayerTree({
   onToggleSolo,
   onSetSolo,
   onSetEdgeColour,
+  onSetManualLine,
   onPushOp,
   onThumbnailsNeeded,
   onError,
@@ -166,6 +174,7 @@ export function LayerTree({
   const previewHiddenSet = useMemo(() => new Set(ops.previewHiddenIds), [ops.previewHiddenIds]);
   const soloSet = useMemo(() => new Set(ops.soloIds), [ops.soloIds]);
   const edgeColourSet = useMemo(() => new Set(ops.edgeColourIds), [ops.edgeColourIds]);
+  const manualLineSet = useMemo(() => new Set(ops.manualLineIds), [ops.manualLineIds]);
   const matchedSet = useMemo(() => new Set(matchedIds), [matchedIds]);
 
   const allLeaves = useMemo(() => (tree ? flattenLeaves(tree) : []), [tree]);
@@ -186,8 +195,10 @@ export function LayerTree({
   const mergedSourceIds = useMemo(() => mergedSourceIdsOf(planEntries), [planEntries]);
   const filtering = isFiltering(filterMode, query);
   const filteredLeaves = useMemo(
-    () => filterLeaves(allLeaves, { mode: filterMode, query, matchedIds }),
-    [allLeaves, filterMode, query, matchedIds]
+    () => filterLeaves(allLeaves, {
+      mode: filterMode, query, matchedIds, manualLineIds: ops.manualLineIds,
+    }),
+    [allLeaves, filterMode, query, matchedIds, ops.manualLineIds]
   );
 
   // 평면 목록에서는 병합된 소스들을 한 행으로 접는다. 트리 보기는 원본 PSD
@@ -441,6 +452,23 @@ export function LayerTree({
     if (targets.length === 0) return;
     const allDesignated = targets.every((id) => edgeColourSet.has(id));
     onSetEdgeColour(targets, !allDesignated);
+  }
+
+  /** "라인으로 지정". 대상 고르기와 섞임 처리는 색 원본 지정과 같은 규약이다. */
+  function handleToggleManualLine(ids: number[]) {
+    setContextMenu(null);
+    const targets = edgeColourTargets(ids);
+    if (targets.length === 0) return;
+    const allDesignated = targets.every((id) => manualLineSet.has(id));
+    onSetManualLine(targets, !allDesignated);
+  }
+
+  function manualLineButtonLabel(ids: number[]): string {
+    const targets = edgeColourTargets(ids);
+    if (targets.length > 0 && targets.every((id) => manualLineSet.has(id))) {
+      return "라인 지정 해제";
+    }
+    return "라인으로 지정";
   }
 
   function edgeColourButtonLabel(ids: number[]): string {
@@ -996,6 +1024,14 @@ export function LayerTree({
             onClick={() => handleToggleEdgeColour(contextMenu.ids)}
           >
             {edgeColourButtonLabel(contextMenu.ids)}
+          </button>
+          <button
+            type="button"
+            disabled={edgeColourTargets(contextMenu.ids).length === 0}
+            title="이름 규칙이 못 찾은 선화를 직접 라인으로 표시합니다. '라인만' 목록에 들어오고 내보내기에도 포함됩니다. 프리셋에는 저장되지 않습니다."
+            onClick={() => handleToggleManualLine(contextMenu.ids)}
+          >
+            {manualLineButtonLabel(contextMenu.ids)}
           </button>
           <button type="button" onClick={() => handleExclude(contextMenu.ids)}>
             내보내기에서 제외

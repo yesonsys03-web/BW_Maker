@@ -78,6 +78,7 @@ function AppShell() {
     toggleSolo,
     setSolo,
     setEdgeColour,
+    setManualLine,
     pushOp,
     setIncluded,
     applyPresetResult,
@@ -843,6 +844,7 @@ function AppShell() {
           onToggleSolo={toggleSolo}
           onSetSolo={setSolo}
           onSetEdgeColour={setEdgeColour}
+          onSetManualLine={setManualLine}
           onPushOp={pushOp}
           onThumbnailsNeeded={requestThumbnails}
           onError={pushError}

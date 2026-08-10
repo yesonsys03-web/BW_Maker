@@ -90,6 +90,7 @@ export type AppAction =
   | { type: "toggleSolo"; path: string; layerId: number }
   | { type: "setSolo"; path: string; layerIds: number[]; solo: boolean }
   | { type: "setEdgeColour"; path: string; layerIds: number[]; on: boolean }
+  | { type: "setManualLine"; path: string; layerIds: number[]; on: boolean }
   | { type: "pushOp"; path: string; op: Operation }
   | { type: "setIncluded"; path: string; includedIds: number[] }
   | { type: "applyPresetResult"; path: string; matchedLayerIds: number[]; operations: Operation[] }
@@ -107,6 +108,7 @@ export const EMPTY_OPS: OpsState = {
   previewHiddenIds: [],
   soloIds: [],
   edgeColourIds: [],
+  manualLineIds: [],
   ops: [],
   entries: [],
 };
@@ -151,7 +153,7 @@ export function buildInitialOpsState(tree: TreeNode[]): OpsState {
   const previewHiddenIds = leaves.filter((n) => !n.visible).map((n) => n.id);
   return {
     includedIds, previewHiddenIds, soloIds: [], edgeColourIds: [],
-    ops: [], entries: buildEntries(includedIds, []),
+    manualLineIds: [], ops: [], entries: buildEntries(includedIds, []),
   };
 }
 
@@ -276,6 +278,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
     }
 
+    // 손으로 "라인이다"라고 지정. setEdgeColour와 같은 모양이되, 리듀서 쪽에서
+    // includedIds까지 같이 켜는 것이 다르다(opsReducer의 setManualLine 주석).
+    case "setManualLine": {
+      const current = state.opsByPath[action.path];
+      if (!current) return state;
+      const next = opsReducer(current, {
+        type: "setManualLine", layerIds: action.layerIds, on: action.on,
+      });
+      return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
+    }
+
     case "pushOp": {
       const current = state.opsByPath[action.path];
       if (!current) return state;
@@ -330,6 +343,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           // 원본인지는 어느 프리셋을 걸든 바뀌지 않는다) — previewHiddenIds/
           // soloIds와 같은 이유로 그대로 넘긴다.
           edgeColourIds: current.edgeColourIds,
+          // 손으로 "라인이다"라고 지정한 것도 같은 성격이다 — 프리셋을 바꿔도
+          // 그 판에서 그 레이어가 선화라는 사실은 변하지 않는다.
+          manualLineIds: current.manualLineIds,
           ops: action.operations,
           entries,
         };
@@ -591,6 +607,7 @@ export interface AppContextValue {
   setSolo: (layerIds: number[], solo: boolean) => void;
   /** 색 경계선 생성의 수동 지정을 켜고 끈다(task-8b). LayerTree의 컨텍스트 메뉴가 쓴다. */
   setEdgeColour: (layerIds: number[], on: boolean) => void;
+  setManualLine: (layerIds: number[], on: boolean) => void;
   pushOp: (op: Operation) => void;
   setIncluded: (includedIds: number[]) => void;
   applyPresetResult: (matchedLayerIds: number[], operations: Operation[]) => void;
@@ -659,6 +676,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (layerIds: number[], on: boolean) => {
       if (!state.activePath) return;
       dispatch({ type: "setEdgeColour", path: state.activePath, layerIds, on });
+    },
+    [state.activePath]
+  );
+
+  const setManualLine = useCallback(
+    (layerIds: number[], on: boolean) => {
+      if (!state.activePath) return;
+      dispatch({ type: "setManualLine", path: state.activePath, layerIds, on });
     },
     [state.activePath]
   );
@@ -737,6 +762,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       toggleSolo,
       setSolo,
       setEdgeColour,
+      setManualLine,
       pushOp,
       setIncluded,
       applyPresetResult,
@@ -759,6 +785,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       toggleSolo,
       setSolo,
       setEdgeColour,
+      setManualLine,
       pushOp,
       setIncluded,
       applyPresetResult,

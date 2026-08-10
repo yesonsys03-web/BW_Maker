@@ -243,3 +243,24 @@ test("suggestMergeName uses the nearest ancestor carrying a token", () => {
   const rows = [at(1, "LINE", ["SET_OL", "CHAIR_UL"])];
   expect(suggestMergeName(rows, TOKENS)).toBe("CHAIR");
 });
+
+test("손으로 지정한 라인은 규칙이 잡은 것과 함께 라인만 목록에 들어온다", () => {
+  // 규칙이 하나도 못 잡는 판(잎이 BG/BORDER/Layer 1 뿐)과, 규칙이 **엉뚱한 것
+  // 하나만** 잡는 판이 실제로 있었다. 뒤쪽이 더 위험하다 — matchedIds가 비어
+  // 있지 않으니, 지정을 "규칙이 실패했을 때만" 쓰게 만들면 가려진다.
+  const leaves = flattenLeaves([
+    { id: 1, name: "BORDER", kind: "pixel", path: ["BORDER"], visible: true },
+    { id: 2, name: "divide lines", kind: "pixel", path: ["divide lines"], visible: true },
+    { id: 3, name: "BG", kind: "pixel", path: ["BG"], visible: true },
+  ] as unknown as TreeNode[]);
+
+  // 프리셋 적용 전(matchedIds 없음)에는 이름 폴백이 그대로 돌고, 지정이 **더해진다**.
+  // 'divide lines'는 폴백에 걸리는 것이 맞다 — 지정이 폴백을 대체하지는 않는다.
+  expect(lineLeafIds(leaves, [], [1])).toEqual([1, 2]);
+  // 규칙이 엉뚱한 것 하나만 잡았을 때 — 여기가 핵심이다. matchedIds가 비어 있지
+  // 않으므로, 지정을 "규칙이 실패했을 때만" 쓰게 만들면 1이 가려진다.
+  expect(lineLeafIds(leaves, [2], [1])).toEqual([1, 2]);
+  // 지정이 없으면 예전 그대로 — 규칙 결과만 보여준다.
+  expect(lineLeafIds(leaves, [2])).toEqual([2]);
+  expect(lineLeafIds(leaves, [3], [])).toEqual([3]);
+});
