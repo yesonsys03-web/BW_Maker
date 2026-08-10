@@ -236,7 +236,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           // applyPresetResult로 덮어써, 체크박스·병합 편집이 조용히 사라진다
           // (App.tsx의 로드 큐 주석 참고).
           presetApplied: isRestoredMatch,
-          edited: false,
+          // edited도 같은 분기를 따라야 한다. 복원한 ops는 아티스트가 이전
+          // 세션에서 **손으로** 한 편집이다(병합·이름변경·순서변경, 그리고 포함
+          // 체크박스) — 그것을 "지킬 편집 없음"이라고 말하면 두 확인창이 함께
+          // 무력해진다: "적용"은 PresetBar의 "기존 편집 내용을 대체합니다"를
+          // 건너뛰고 그 ops를 applyPresetResult로 갈아치우고, "비우기"도
+          // FilePanel의 확인창 없이 지나간다. 어느 쪽이든 사라지는 것이 하필
+          // 품이 제일 많이 든 작업이다.
+          //
+          // 이 줄은 이 기능 이전에는 맞는 말이었다 — 그때 openSuccess의 ops는
+          // 아래에서 트리로 갓 만든 것이라 지킬 편집이 애초에 없었다.
+          edited: isRestoredMatch,
         }),
         // 복원한 작업은 지킨다. 이 자리가 이 기능에서 제일 조용히 망가지는
         // 곳이다 — 프로젝트를 열어 손으로 한 지정을 되살려 놓아도, 배경 큐가

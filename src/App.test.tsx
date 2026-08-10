@@ -1124,3 +1124,146 @@ test("a file that never had a preset applied is saved as null, not an empty list
   expect(entry).toBeTruthy();
   expect(entry!.matchedIds).toBeNull();
 });
+
+/** 큐가 그 복원 파일을 끝까지 열어 sessionId까지 붙은 상태로 만든다. */
+async function finishRestoredOpen() {
+  await waitFor(() => expect(opens).toHaveLength(1));
+  opens[0].d.resolve({
+    sessionId: 1, width: 10, height: 10, colorMode: "RGB", depth: 8,
+    tree: treeOf([1, 2]), mtime: 1700,
+  });
+  await waitFor(() => expect(screen.getAllByText("열림").length).toBe(1));
+}
+
+/**
+ * 아홉 번째 문. openSuccess가 복원 분기에서도 edited: false를 세우면 복원한
+ * 파일이 "지킬 편집 없음"이라고 말한다 — 그러면 "적용"이 확인창 없이 어제 손으로
+ * 한 병합·이름변경·순서변경과 체크박스 선택을 applyPresetResult로 갈아치운다.
+ * 사라지는 것이 하필 품이 제일 많이 든 작업이다.
+ */
+test("applying a preset to a restored file asks first — that work was done by hand", async () => {
+  vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
+  engine.applyPreset.mockResolvedValue({ matchedLayerIds: [], operations: [] });
+
+  render(<App />);
+  await openProject();
+  await finishRestoredOpen();
+
+  click(screen.getByRole("button", { name: "적용" }));
+
+  await waitFor(() => expect(screen.getByText("기존 편집 내용을 대체합니다")).toBeTruthy());
+  // 확인창이 뜬 동안에는 아직 아무것도 덮이지 않았다.
+  expect(engine.applyPreset).not.toHaveBeenCalled();
+});
+
+/** 반대쪽. 평범하게 연 파일의 ops는 프리셋의 산물이라 지킬 편집이 없다 — 지금 그대로여야 한다. */
+test("applying a preset to a plainly opened file still does not ask", async () => {
+  vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
+  engine.applyPreset.mockResolvedValue({ matchedLayerIds: [1], operations: [] });
+
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+  // 큐의 자동 적용이 한 번 돈다. 그건 사람의 편집이 아니다.
+  await waitFor(() => expect(engine.applyPreset).toHaveBeenCalledTimes(1));
+
+  click(screen.getByRole("button", { name: "적용" }));
+
+  await waitFor(() => expect(engine.applyPreset).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText("기존 편집 내용을 대체합니다")).toBeNull();
+});
+
+/**
+ * 직전 라운드가 만든 침묵. 열기가 도는 중의 ⌘S는 맨 return이라 저장 0회·카드
+ * 없음이었고, 버튼 라벨은 그러는 동안 "저장 중..."이라고 사실이 아닌 말을 했다.
+ */
+test("⌘S while a project is opening says so instead of doing nothing", async () => {
+  const fixture = projectWithOnePreview();
+  const gate = deferred<{ project: ProjectFile; previews: Map<string, string> }>();
+  vi.mocked(loadProjectFrom).mockReturnValue(gate.promise);
+  engine.psdMtimes.mockResolvedValue({ [RESTORED]: 1700 });
+  vi.mocked(openDialog).mockResolvedValue("/proj/작업.bwproj" as never);
+
+  render(<App />);
+  click(screen.getByRole("button", { name: "프로젝트 열기..." }));
+  await waitFor(() => expect(loadProjectFrom).toHaveBeenCalled());
+
+  pressSave();
+
+  await waitFor(() => expect(screen.getByText(/여는 중입니다/)).toBeTruthy());
+  expect(saveProjectTo).not.toHaveBeenCalled();
+  // 그리고 라벨은 저장을 하고 있다고 말하지 않는다.
+  expect(screen.getByRole("button", { name: "프로젝트 저장" })).toBeTruthy();
+
+  gate.resolve({ project: fixture.project, previews: fixture.previews });
+  await waitFor(() => expect(screen.getByText("작업.bwproj")).toBeTruthy());
+});
+
+/** 같은 침묵의 더 나쁜 쪽 — 창을 띄워 폴더까지 고르게 해놓고 버렸다. */
+test("⌘⇧S while a project is opening does not open a save dialog it will throw away", async () => {
+  const fixture = projectWithOnePreview();
+  const gate = deferred<{ project: ProjectFile; previews: Map<string, string> }>();
+  vi.mocked(loadProjectFrom).mockReturnValue(gate.promise);
+  engine.psdMtimes.mockResolvedValue({ [RESTORED]: 1700 });
+  vi.mocked(openDialog).mockResolvedValue("/proj/작업.bwproj" as never);
+  vi.mocked(saveDialog).mockResolvedValue("/proj/다른이름.bwproj");
+
+  render(<App />);
+  click(screen.getByRole("button", { name: "프로젝트 열기..." }));
+  await waitFor(() => expect(loadProjectFrom).toHaveBeenCalled());
+
+  pressSave({ shift: true });
+
+  await waitFor(() => expect(screen.getByText(/여는 중입니다/)).toBeTruthy());
+  expect(saveDialog).not.toHaveBeenCalled();
+  expect(saveProjectTo).not.toHaveBeenCalled();
+
+  gate.resolve({ project: fixture.project, previews: fixture.previews });
+  await waitFor(() => expect(screen.getByText("작업.bwproj")).toBeTruthy());
+});
+
+/**
+ * blocked는 "담을 작업이 있는데 못 담는다"만 센다 — ops는 한 번이라도 연 뒤에만
+ * 생기므로 **아직 안 열린 파일은 세지도 않고 조용히 빠졌다.** 막지는 않는다(깨진
+ * PSD 한 장이 저장을 영영 막으면 그게 더 나쁘다). 대신 개수를 말한다.
+ */
+test("saving while some files are still unopened says how many were left out", async () => {
+  vi.mocked(saveDialog).mockResolvedValue("/proj/새작업.bwproj");
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+
+  click(screen.getByRole("button", { name: "프로젝트 다른 이름으로 저장..." }));
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  const [, saved] = vi.mocked(saveProjectTo).mock.calls[0];
+  expect(saved.files).toHaveLength(1);
+  await waitFor(() => expect(screen.getByText(/파일 2개가 아직 열리지 않아/)).toBeTruthy());
+  // 개수만 말한다 — 납품 경로·파일명은 기밀이다.
+  expect(screen.queryByText(new RegExp(PATHS[1]))).toBeNull();
+});
+
+/**
+ * C1의 불변식("비우기 = 이 폴더는 끝났다")은 저장이 도는 중에도 서 있어야 한다.
+ * 착지한 저장이 setProjectDir(dir)로 프로젝트를 다시 열면 다음 ⌘S가 또 그 폴더를
+ * 겨눈다 — 비운 목록으로.
+ */
+test("clearing the list while a save is in flight does not re-open the project", async () => {
+  render(<App />);
+  await openProject();
+
+  const gate = deferred<void>();
+  vi.mocked(saveProjectTo).mockImplementationOnce(() => gate.promise);
+  pressSave();
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  click(screen.getByRole("button", { name: "비우기" }));
+  await waitFor(() => expect(screen.getByText("저장 안 된 작업")).toBeTruthy());
+
+  gate.resolve();
+  // 저장 회차가 끝나 버튼이 다시 켜질 때까지 기다린다.
+  await waitFor(() =>
+    expect((screen.getByRole("button", { name: "프로젝트 저장" }) as HTMLButtonElement).disabled).toBe(false)
+  );
+  expect(screen.getByText("저장 안 된 작업")).toBeTruthy();
+});
