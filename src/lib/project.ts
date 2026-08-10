@@ -1,0 +1,106 @@
+import type { OpsState } from "./opsReducer";
+import type { Preset, TreeNode } from "./types";
+
+export interface ProjectEntry {
+  path: string;
+  /** 저장 시점 디스크 수정시각. 다르면 이 항목의 작업과 미리보기를 버린다. */
+  mtime: number;
+  /** 엔진이 준 TreeNode[] 그대로. 이게 있어야 열자마자 레이어 패널이 그려진다. */
+  tree: TreeNode[];
+  matchedIds: number[];
+  ops: OpsState;
+  /** 저장 시점에 계산돼 있던 캐시 키. 믿지 않고 대조에만 쓴다. */
+  previewKey: string | null;
+  /** previews/ 안의 파일 이름. 없으면 그림 없이 복원된다. */
+  previewFile: string | null;
+}
+
+export interface ProjectFile {
+  version: 1;
+  preset: Preset | null;
+  files: ProjectEntry[];
+}
+
+/**
+ * 캐시 키를 previews/ 안의 파일 이름으로 바꾼다.
+ *
+ * 키에는 납품 파일 경로가 들어 있고 그 이름은 기밀이라 디스크에 남으면 안 된다.
+ * FNV-1a 64비트를 32비트 둘로 나눠 돌린다 — 충돌 저항이 목적이 아니라 이름을
+ * 짓는 것이 목적이고, 어긋나면 아래 대조(Task 5)에서 걸린다.
+ */
+export function previewFileName(key: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < key.length; i += 1) {
+    const c = key.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
+  }
+  return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0")}.png`;
+}
+
+function numberArray(v: unknown, where: string): number[] {
+  if (!Array.isArray(v) || !v.every((n) => typeof n === "number")) {
+    throw new Error(`${where}: 숫자 배열이 아닙니다.`);
+  }
+  return v as number[];
+}
+
+function validateOps(v: unknown, where: string): OpsState {
+  if (typeof v !== "object" || v === null) throw new Error(`${where}: 객체가 아닙니다.`);
+  const o = v as Record<string, unknown>;
+  for (const key of ["includedIds", "previewHiddenIds", "soloIds", "edgeColourIds", "manualLineIds"]) {
+    numberArray(o[key], `${where}.${key}`);
+  }
+  if (!Array.isArray(o.ops)) throw new Error(`${where}.ops: 배열이 아닙니다.`);
+  if (!Array.isArray(o.entries)) throw new Error(`${where}.entries: 배열이 아닙니다.`);
+  return v as OpsState;
+}
+
+function validateEntry(v: unknown, i: number): ProjectEntry {
+  const where = `project.json files[${i}]`;
+  if (typeof v !== "object" || v === null) throw new Error(`${where}: 객체가 아닙니다.`);
+  const e = v as Record<string, unknown>;
+  if (typeof e.path !== "string") throw new Error(`${where}.path: 문자열이 아닙니다.`);
+  // 수정시각이 없으면 이 항목이 아직 맞는지 확인할 방법이 없다. 확인할 수 없는
+  // 것을 복원하느니 거절한다 — previewCache.ts의 mtime 주석과 같은 판단이다.
+  if (typeof e.mtime !== "number" || !Number.isFinite(e.mtime)) {
+    throw new Error(`${where}.mtime: 숫자가 아닙니다.`);
+  }
+  if (!Array.isArray(e.tree)) throw new Error(`${where}.tree: 배열이 아닙니다.`);
+  numberArray(e.matchedIds, `${where}.matchedIds`);
+  validateOps(e.ops, `${where}.ops`);
+  if (e.previewKey !== null && typeof e.previewKey !== "string") {
+    throw new Error(`${where}.previewKey: null 또는 문자열이 아닙니다.`);
+  }
+  if (e.previewFile !== null && typeof e.previewFile !== "string") {
+    throw new Error(`${where}.previewFile: null 또는 문자열이 아닙니다.`);
+  }
+  return {
+    path: e.path,
+    mtime: e.mtime,
+    tree: e.tree as TreeNode[],
+    matchedIds: e.matchedIds as number[],
+    ops: e.ops as OpsState,
+    previewKey: e.previewKey as string | null,
+    previewFile: e.previewFile as string | null,
+  };
+}
+
+/** 파싱과 검증만. 디스크 접근은 projectFs.ts가 한다(presets.ts와 같은 나눔). */
+export function parseProject(raw: string): ProjectFile {
+  const v: unknown = JSON.parse(raw);
+  if (typeof v !== "object" || v === null) throw new Error("project.json: 객체가 아닙니다.");
+  const p = v as Record<string, unknown>;
+  if (p.version !== 1) throw new Error(`project.json version: 1이 아닙니다(${String(p.version)}).`);
+  if (!Array.isArray(p.files)) throw new Error("project.json files: 배열이 아닙니다.");
+  return {
+    version: 1,
+    preset: (p.preset as Preset | null) ?? null,
+    files: p.files.map(validateEntry),
+  };
+}
+
+export function serializeProject(p: ProjectFile): string {
+  return JSON.stringify(p, null, 2);
+}
