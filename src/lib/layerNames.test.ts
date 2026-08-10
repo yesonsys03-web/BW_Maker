@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { hasAnyToken, tokenMatch, tokenize } from "./layerNames";
+import { hasAnyToken, includeTerms, tokenMatch, tokenMatchAny, tokenize } from "./layerNames";
 
 /**
  * engine/tests/test_names.py와 글자 그대로 짝을 이루는 거울이다.
@@ -57,4 +57,16 @@ test("hasAnyToken finds the colour vocabulary", () => {
   for (const name of ["COUCH LINE", "line", "Bookcase_Line"]) {
     expect(hasAnyToken(name, colour), name).toBe(false);
   }
+});
+
+test("쉼표 목록 중 하나라도 걸리면 통과한다 — 엔진 include_terms와 같은 규칙", () => {
+  // 'lineart'는 토큰 하나라 'line'으로는 안 걸린다. 어휘를 늘려 잡되,
+  // 'LINEAR DODGE'는 계속 빠져야 한다 — 토큰 규칙이 원래 막던 것이다.
+  expect(tokenMatchAny("lineart - ", "line, lineart")).toBe(true);
+  expect(tokenMatchAny("LINES", "line, lineart")).toBe(true);
+  expect(tokenMatchAny("LINEAR DODGE", "line, lineart")).toBe(false);
+  expect(tokenMatchAny("lineless note", "line, lineart")).toBe(false);
+  // 쉼표가 없으면 단일 어휘와 같다
+  expect(tokenMatchAny("lineart - ", "line")).toBe(false);
+  expect(includeTerms(" line ,, lineart , ")).toEqual(["line", "lineart"]);
 });

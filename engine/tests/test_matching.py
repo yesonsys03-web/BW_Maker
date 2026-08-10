@@ -654,3 +654,33 @@ def test_height_reference_lines_are_excluded_but_real_lines_are_kept():
 
     assert matched == [4, 5], "진짜 선화가 함께 걸러졌다"
     assert {s["id"] for s in skipped} == {1, 2}, "키 기준선이 안 걸러졌다"
+
+
+def test_include_takes_a_comma_list_so_lineart_can_be_caught():
+    """
+    `lineart`는 토크나이저가 소문자 덩어리를 토큰 하나로 보기 때문에 `line`으로는
+    영영 안 걸린다. 그 규칙은 옳다 — 부분 문자열로 보면 `LINEAR DODGE`가 걸린다.
+    그래서 규칙을 무르지 않고 어휘를 늘렸다.
+
+    실제로 이것 때문에 납품 캐릭터 100장에서 `lineart -` 83개가 빠져 있었고,
+    **판이 실패하지도 않아 눈에 안 띄었다** — 같은 판의 `divide lines`(823x8px
+    주석 구분선)가 대신 걸려 "1장"으로 나가고 있었다.
+
+    `LINEAR`가 계속 빠지는 것까지 같이 본다. 늘린 어휘가 그 방어를 무너뜨리면
+    고친 것보다 잃는 것이 크다.
+    """
+    tree = [
+        _node(1, "lineart - ", "pixel", True),
+        _node(2, "LINES", "pixel", True),
+        _node(3, "LINEAR DODGE", "pixel", True),
+        _node(4, "lineless note", "pixel", True),
+    ]
+    inc = {"type": "contains", "value": "line, lineart", "caseSensitive": False}
+
+    matched, _ = match_preset(tree, _preset(include=inc))
+    assert matched == [1, 2], "lineart를 못 잡았거나 LINEAR/lineless까지 잡았다"
+
+    # 쉼표가 없으면 예전과 똑같아야 한다 — 저장된 프리셋이 전부 그 모양이다.
+    one = {"type": "contains", "value": "line", "caseSensitive": False}
+    matched_one, _ = match_preset(tree, _preset(include=one))
+    assert matched_one == [2]

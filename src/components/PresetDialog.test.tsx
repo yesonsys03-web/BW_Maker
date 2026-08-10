@@ -10,7 +10,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { PresetDialog } from "./PresetDialog";
-import { DEFAULT_EDGE_LINES, DEFAULT_PRESET } from "../lib/presets";
+import { DEFAULT_EDGE_LINES, BG_PRESET } from "../lib/presets";
 
 afterEach(cleanup);
 
@@ -28,7 +28,7 @@ function renderDialog(enabled: boolean, onSave = vi.fn()) {
     <PresetDialog
       mode="edit"
       preset={{
-        ...DEFAULT_PRESET,
+        ...BG_PRESET,
         edgeLines: { ...DEFAULT_EDGE_LINES, enabled },
       }}
       existingNames={[]}

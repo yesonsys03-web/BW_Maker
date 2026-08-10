@@ -4,16 +4,31 @@ import re
 from .names import has_any_token, token_match, tokenize
 
 
+def include_terms(value):
+    """포함 규칙의 검색값을 쉼표로 나눈 목록. 빈 항목은 버린다.
+
+    쉼표가 없으면 항목 하나짜리 목록이라, 이미 저장된 프리셋은 그대로 동작한다.
+
+    **왜 여러 개가 필요한가.** 토크나이저는 소문자 덩어리를 토큰 하나로 보므로
+    `lineart`는 `line`과 다른 토큰이고 영영 안 걸린다. 그 규칙 자체는 옳다 —
+    부분 문자열로 보면 `LINEAR DODGE`가 걸린다(names.py). 그래서 규칙을 무르는
+    대신 어휘를 늘린다. 납품 캐릭터 100장에서 `lineart -`가 83개였고, 그 판들은
+    실패하지도 않아서 눈에 안 띄었다 — `divide lines`(823x8px 주석 구분선) 같은
+    것이 대신 걸려 "1장"으로 나가고 있었다. BG 26장에서는 0건이라 영향이 없다.
+    """
+    return [t.strip() for t in str(value).split(",") if t.strip()]
+
+
 def _name_matches(name, include):
     kind = include["type"]
     if kind == "contains":
-        value = include["value"]
         case_sensitive = bool(include.get("caseSensitive"))
         # 부분 문자열이 아니라 토큰으로 본다 — "LINEAR DODGE"의 앞 네 글자가
         # 걸리면 안 된다(psd_engine/names.py). 검색값이 토큰을 만들지 못하면
         # (예: "-") 예전 규칙으로 되돌아간다.
-        if tokenize(value):
-            return token_match(name, value, case_sensitive)
+        terms = [t for t in include_terms(include["value"]) if tokenize(t)]
+        if terms:
+            return any(token_match(name, t, case_sensitive) for t in terms)
         return _legacy_contains(name, include)
     if kind == "regex":
         flags = 0 if include.get("caseSensitive") else re.IGNORECASE
@@ -30,9 +45,13 @@ def _legacy_contains(name, include):
     """
     if include["type"] != "contains":
         return False
+    # 여기서도 쉼표 목록을 본다. 안 그러면 `-, line` 같은 값에서 "예전에는
+    # 걸렸는데 이제는 안 걸린다" 보고가 통째로 틀린다.
+    terms = include_terms(include["value"]) or [include["value"]]
     if include.get("caseSensitive"):
-        return include["value"] in name
-    return include["value"].lower() in name.lower()
+        return any(t in name for t in terms)
+    lowered = name.lower()
+    return any(t.lower() in lowered for t in terms)
 
 
 #: 픽셀을 들고 있어도 결과물에 넣지 않는 종류. 라인 PSD 안의 텍스트는 사실상

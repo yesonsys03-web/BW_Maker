@@ -28,24 +28,58 @@ export const DEFAULT_EDGE_LINES: EdgeLines = {
   colourMode: "composite", edgeMode: "region",
 };
 
-export const DEFAULT_PRESET: Preset = {
-  name: "line 추출",
-  include: { type: "contains", value: "line", caseSensitive: false },
-  excludeGroupPrefixes: ["-"],
+/**
+ * 두 기본 프리셋이 공유하는 부분. 값은 납품 데이터에서 검증된 것이지 임의의
+ * 초기값이 아니다 — merge/mergeRule/naming/lineColor는 픽셀 기준선(납품 BG 26장,
+ * `baseline/hh0306.jsonl`)을 뜬 그 설정이고, 아티스트가 실제로 쓰던 값과도 같다.
+ * (그전 기본값은 merge "none" / naming "pathPrefix" / lineColor null이었는데,
+ * 아무도 그대로 쓰지 않아서 프리셋을 골라도 바로 작업이 안 됐다.)
+ */
+const SHARED: Omit<Preset, "name" | "excludeGroupPrefixes" | "edgeLines"> = {
+  include: { type: "contains", value: "line, lineart", caseSensitive: false },
   matchGroups: true,
   includeHidden: true,
-  merge: "none",
+  merge: "byElement",
   roleTokens: ["UL", "OL_UL", "OL"],
-  mergeRule: "role",
-  naming: "pathPrefix",
+  mergeRule: "group",
+  naming: "original",
   outputSuffix: "_LINE",
   embedPreview: true,
-  lineColor: null,
+  lineColor: "#000000",
   splitLayers: false,
   outputFormat: "psd",
   excludeTokens: [...DEFAULT_EXCLUDE_TOKENS],
+};
+
+/** 배경 판용. 경계선 생성은 끈다 — 그 기능은 캐릭터 모델 전용이다. */
+export const BG_PRESET: Preset = {
+  ...SHARED,
+  name: "BG",
+  excludeGroupPrefixes: ["-"],
   edgeLines: { ...DEFAULT_EDGE_LINES },
 };
+
+/**
+ * 캐릭터 모델 판용. BG와 **두 가지만** 다르다.
+ *
+ * - 그룹 접두사에 `HEIGHTS`, `TEMPLATE`, `COLOR PALETTE`를 더한다. 캐릭터 판에만
+ *   있는 참고용 그룹이다(BG 26장 전수에서 이 이름 0건이라 BG에 넣어도 무해하지만,
+ *   넣지 않는 편이 각 프리셋이 무엇을 위한 것인지 분명하다).
+ * - 색 경계선 생성을 켠다. 나머지 수치는 엔진 기본값 그대로다 — 굵기는 자동
+ *   (`width: 0`), 색 그림은 정확(composite), 경계는 영역(region).
+ *
+ * `height` 토큰은 SHARED에 있어 양쪽 다 걸린다. 키 기준선(`CHARACTER HEIGHT LINE`)
+ * 은 캐릭터에만 있고 BG에는 0건이라, 공유해도 BG 결과가 바뀌지 않는다.
+ */
+export const CHAR_PRESET: Preset = {
+  ...SHARED,
+  name: "CHAR",
+  excludeGroupPrefixes: ["-", "HEIGHTS", "TEMPLATE", "COLOR PALETTE"],
+  edgeLines: { ...DEFAULT_EDGE_LINES, enabled: true },
+};
+
+/** 처음 실행할 때 깔리는 프리셋. 고르면 바로 작업할 수 있어야 한다. */
+export const DEFAULT_PRESETS: Preset[] = [BG_PRESET, CHAR_PRESET];
 
 /** 색 통일을 켤 때 처음 제안하는 색. 라인 아트의 기본값. */
 export const DEFAULT_LINE_COLOR = "#000000";
@@ -253,15 +287,15 @@ export function parsePresets(raw: string): Preset[] {
 }
 
 /**
- * Loads presets from `appDataDir()/presets.json`. Returns [DEFAULT_PRESET]
- * when the file doesn't exist yet (first run). Malformed JSON and
+ * Loads presets from `appDataDir()/presets.json`. Returns DEFAULT_PRESETS
+ * (BG, CHAR) when the file doesn't exist yet (first run). Malformed JSON and
  * well-formed-but-wrong-shaped JSON are NOT absorbed here — both throw and
  * that rejection propagates to the caller, which must surface it (e.g. via
  * ErrorPanel).
  */
 export async function loadPresets(): Promise<Preset[]> {
   const filePath = await presetsFilePath();
-  if (!(await exists(filePath))) return [DEFAULT_PRESET];
+  if (!(await exists(filePath))) return DEFAULT_PRESETS.map((p) => ({ ...p }));
   const raw = await readTextFile(filePath);
   return parsePresets(raw);
 }

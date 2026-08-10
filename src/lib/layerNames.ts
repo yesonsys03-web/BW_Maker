@@ -42,6 +42,22 @@ export function tokenMatch(name: string, value: string, caseSensitive = false): 
   return false;
 }
 
+/**
+ * 포함 규칙의 검색값을 쉼표로 나눈 목록. 엔진 matching.include_terms와 같다.
+ *
+ * 토크나이저가 소문자 덩어리를 토큰 하나로 보므로 `lineart`는 `line`과 다른
+ * 토큰이고 영영 안 걸린다. 그 규칙을 무르면 `LINEAR DODGE`가 걸리므로, 규칙 대신
+ * 어휘를 늘린다. 쉼표가 없으면 항목 하나짜리 목록이라 기존 값은 그대로 동작한다.
+ */
+export function includeTerms(value: string): string[] {
+  return value.split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+}
+
+/** 쉼표 목록 중 하나라도 토큰으로 걸리는가. 엔진 _name_matches의 contains와 같다. */
+export function tokenMatchAny(name: string, value: string, caseSensitive = false): boolean {
+  return includeTerms(value).some((t) => tokenMatch(name, t, caseSensitive));
+}
+
 /** 이름의 토큰 중 하나라도 wanted에 있는가. */
 export function hasAnyToken(name: string, wanted: string[], caseSensitive = false): boolean {
   const have = tokenize(name);
