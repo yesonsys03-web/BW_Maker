@@ -539,7 +539,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       const restoredMtimeByPath: Record<string, number> = {};
       for (const e of action.entries) {
         opsByPath[e.path] = e.ops;
-        matchedIdsByPath[e.path] = e.matchedIds;
+        // null은 "저장할 때 이 파일에는 프리셋이 걸린 적이 없었다"이므로 키를
+        // 아예 넣지 않는다 — 그래야 여기서도 undefined로 남는다. []를 넣으면
+        // 그 파일의 색 통일 대상이 "전부"에서 "아무 데도 안"으로 뒤집히고
+        // (ProjectEntry.matchedIds 주석 참고), 되돌릴 길이 없다: 복원본에는
+        // 자동 적용이 걸리지 않으므로 matchedIds를 다시 채울 applyPresetResult가
+        // 영영 오지 않는다.
+        if (e.matchedIds !== null) matchedIdsByPath[e.path] = e.matchedIds;
         restoredMtimeByPath[e.path] = e.mtime;
       }
       return {

@@ -95,6 +95,21 @@ test("rejecting non-hash preview names prevents confidential leaks", async () =>
   expect(cmd.project_write_b64).not.toHaveBeenCalled();
 });
 
+/**
+ * 거절은 **첫 쓰기보다 먼저** 나야 한다. 검사가 뒤에 있으면 거절된 저장이
+ * project.json만 갈아치운 반쪽짜리 .bwproj를 남기는데, 그 JSON은 이 폴더의
+ * 유일본이라 다음에 그 폴더를 아예 못 연다.
+ */
+test("a rejected save leaves the folder untouched", async () => {
+  await expect(
+    saveProjectTo("/p/x.bwproj", PROJECT, new Map([["actual-psd-path.png", "data:image/png;base64,AAA="]]))
+  ).rejects.toThrow(/16자 16진소문자/);
+
+  expect(cmd.project_write_text).not.toHaveBeenCalled();
+  expect(cmd.project_write_b64).not.toHaveBeenCalled();
+  expect(cmd.project_make_dir).not.toHaveBeenCalled();
+});
+
 test("accepting valid hash preview names", async () => {
   // 여러 유효한 해시
   const validHashes = new Map([

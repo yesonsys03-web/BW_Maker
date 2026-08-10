@@ -213,7 +213,16 @@ function AppShell() {
    * 조용히 버리면 아티스트는 자기가 한 지정이 왜 없는지 알 수 없다(설계 4절).
    */
   const [staleProjectPaths, setStaleProjectPaths] = useState<string[]>([]);
-  const [projectSaving, setProjectSaving] = useState(false);
+  /** 프로젝트 열기나 저장이 도는 중. ProjectBar의 버튼 셋을 함께 잠근다. */
+  const [projectBusy, setProjectBusy] = useState(false);
+  /**
+   * 같은 판단의 ref 판. 상태로는 못 막는 것이 있다: setState는 다음 렌더에나
+   * 보이므로 **같은 틱**에 들어온 두 번째 호출은 옛 false를 본다. ⌘S는 키
+   * 리피트로 정확히 그렇게 들어오고(버튼과 달리 disabled를 지나지 않는다),
+   * project_write_text는 truncate+write라 회차가 겹치면 잘린 project.json이
+   * 남는다 — 그 JSON은 그 폴더의 유일본이라 다음에 아예 못 연다.
+   */
+  const projectBusyRef = useRef(false);
   /** PresetBar에 보내는 "이 프리셋을 고르라" 요청. PresetBar의 같은 이름 prop 주석 참고. */
   const [selectPresetRequest, setSelectPresetRequest] = useState<{ name: string } | null>(null);
   /**
@@ -358,6 +367,12 @@ function AppShell() {
     // 이유로 함께 내린다 — 목록에서 치운 파일의 옛 트리를 되살릴 이유가 없다.
     setStaleProjectPaths([]);
     restoredEntriesRef.current = {};
+    // 열려 있는 프로젝트도 함께 닫는다. 안 닫으면 ProjectBar는 그 폴더가 열려
+    // 있다고 말하고 ⌘S가 그 폴더를 겨눈다 — buildProject는 파일이 없어 루프를
+    // 안 도니 blocked도 0이고, 거절 가드가 한 번도 안 걸린 채 어제까지의 작업이
+    // files: []로 덮인다. 비우기는 "이 폴더는 끝났다"는 뜻이므로 닫는 것이 맞고,
+    // 그러면 다음 ⌘S는 위치를 다시 묻는다.
+    setProjectDir(null);
     clearFiles();
   }, [clearFiles, setLoadCancel, setPrefetchCancel]);
 
@@ -654,7 +669,11 @@ function AppShell() {
         path: file.path,
         mtime,
         tree,
-        matchedIds: matchedIds ?? [],
+        // 키를 만든 값을 그대로 적는다. `?? []`로 적으면 저장할 때 쓴 키
+        // (matchedIds가 undefined → "all")와 복원할 때 만드는 키([] → "")가
+        // 갈려 방금 쓴 PNG를 한 장도 못 읽고, 색 통일 대상이 "전부"에서
+        // "아무 데도 안"으로 뒤집힌다(ProjectEntry.matchedIds 주석 참고).
+        matchedIds: matchedIds ?? null,
         ops,
         previewKey: plan.key,
         previewFile,
@@ -665,28 +684,49 @@ function AppShell() {
 
   const writeProjectTo = useCallback(
     async (dir: string) => {
-      const { project, previews, blocked } = buildProject();
-      // 잃을 것이 있으면 쓰지 않는다. 덮어쓰기는 되돌릴 수 없고, 이 폴더에는
-      // 지난 저장이 들어 있다 — 반쯤 만들어진 프로젝트로 덮느니 아무것도 안 하는
-      // 편이 낫다. 개수만 말한다: 납품 파일 경로·이름은 기밀이라 메시지에 넣지 않는다.
-      if (blocked > 0) {
-        pushError("프로젝트를 저장하지 않았습니다", {
-          message:
-            `파일 ${blocked}개의 레이어 정보가 지금 없습니다(엔진이 방금 재시작했을 수 있습니다). ` +
-            `지금 저장하면 그 파일들의 작업이 프로젝트에서 사라집니다. ` +
-            `그 파일들이 다시 열린 뒤에 저장하세요.`,
-          traceback: "",
-        });
-        return;
-      }
-      setProjectSaving(true);
+      // 회차가 겹치는 것부터 막는다(projectBusyRef 주석 참고). 상태가 아니라
+      // ref이고, 첫 await 앞에서 서므로 같은 틱의 두 번째 호출이 여기서 멈춘다.
+      // finally에서 내리는 것도 ref라 "가장 먼저 끝난 회차가 버튼을 다시 켠다"는
+      // 문제가 없다 — 애초에 회차가 하나뿐이다.
+      if (projectBusyRef.current) return;
+      projectBusyRef.current = true;
+      setProjectBusy(true);
       try {
+        const { project, previews, blocked } = buildProject();
+        // 잃을 것이 있으면 쓰지 않는다. 덮어쓰기는 되돌릴 수 없고, 이 폴더에는
+        // 지난 저장이 들어 있다 — 반쯤 만들어진 프로젝트로 덮느니 아무것도 안 하는
+        // 편이 낫다. 개수만 말한다: 납품 파일 경로·이름은 기밀이라 메시지에 넣지 않는다.
+        if (blocked > 0) {
+          pushError("프로젝트를 저장하지 않았습니다", {
+            message:
+              `파일 ${blocked}개의 레이어 정보가 지금 없습니다(엔진이 방금 재시작했을 수 있습니다). ` +
+              `지금 저장하면 그 파일들의 작업이 프로젝트에서 사라집니다. ` +
+              `그 파일들이 다시 열린 뒤에 저장하세요.`,
+            traceback: "",
+          });
+          return;
+        }
+        // 담을 항목이 하나도 없으면 쓰지 않는다. blocked와 같은 축의 다른
+        // 판단이다 — blocked는 "담을 작업이 있는데 못 담는다"이고 여기는
+        // "루프를 한 번도 안 돌았다"라 blocked가 0으로 남는다. 목록을 비운 뒤의
+        // ⌘S가 정확히 이 경우고, 그대로 두면 files: []가 지난 저장을 덮는다.
+        // (X로 파일을 하나씩 뺀 것은 의도한 조작이므로 막지 않는다 — 0장일 때만.)
+        if (project.files.length === 0) {
+          pushError("프로젝트를 저장하지 않았습니다", {
+            message:
+              `담을 파일이 0개입니다. 지금 저장하면 이 폴더에 들어 있던 작업이 빈 프로젝트로 덮입니다. ` +
+              `파일을 목록에 올린 뒤에 저장하세요.`,
+            traceback: "",
+          });
+          return;
+        }
         await saveProjectTo(dir, project, previews);
         setProjectDir(dir);
       } catch (e) {
         pushError("프로젝트 저장 실패", toEngineError(e));
       } finally {
-        setProjectSaving(false);
+        projectBusyRef.current = false;
+        setProjectBusy(false);
       }
     },
     [buildProject, pushError]
@@ -710,6 +750,11 @@ function AppShell() {
   }, [projectDir, handleProjectSaveAs, writeProjectTo]);
 
   const handleProjectOpen = useCallback(async () => {
+    // 열기도 저장과 같은 축이다. 파일마다 IPC를 두 번 순차로 도는 동안(25장이면
+    // 50회) 아무 표시가 없어서, 두 번 누르면 restoreProject 둘이 경합한다.
+    if (projectBusyRef.current) return;
+    projectBusyRef.current = true;
+    setProjectBusy(true);
     try {
       // recursive 같은 옵션은 넣지 않는다. 디스크 접근은 전부 Rust 커맨드를
       // 거치므로(projectFs.ts) 다이얼로그가 열어주는 fs 스코프에 기댈 것이 없다.
@@ -754,6 +799,9 @@ function AppShell() {
       setProjectDir(dir);
     } catch (e) {
       pushError("프로젝트 열기 실패", toEngineError(e));
+    } finally {
+      projectBusyRef.current = false;
+      setProjectBusy(false);
     }
   }, [dispatch, primeRestoredPreviews, pushError, setLoadCancel, setPrefetchCancel]);
 
@@ -1094,7 +1142,7 @@ function AppShell() {
             고쳐야 행이 늘어나고, 어긋나면 화면이 통째로 깨진다. */}
         <ProjectBar
           projectDir={projectDir}
-          busy={projectSaving}
+          busy={projectBusy}
           onOpen={() => void handleProjectOpen()}
           onSave={handleProjectSave}
           onSaveAs={() => void handleProjectSaveAs()}

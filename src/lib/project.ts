@@ -9,7 +9,16 @@ export interface ProjectEntry {
   mtime: number;
   /** 엔진이 준 TreeNode[] 그대로. 이게 있어야 열자마자 레이어 패널이 그려진다. */
   tree: TreeNode[];
-  matchedIds: number[];
+  /**
+   * 프리셋 규칙에 걸린 레이어 id. **null은 "프리셋을 한 번도 안 걸었다"이고
+   * []는 "걸었는데 한 장도 안 걸렸다"이다** — 둘은 다른 사실이고, 그 차이가
+   * 그림과 내보내기를 양쪽에서 바꾼다. 미리보기 키에서 null(=undefined)은
+   * `"all"` 세그먼트가 되고 []는 빈 문자열이 되며(previewCache.ts), 내보내기에서
+   * null은 "전부 건다"·[]는 "아무 데도 안 건다"이다(ExportDialog.tsx).
+   * 저장할 때 []로 뭉개면 다음에 열 때 키가 갈려 방금 쓴 PNG를 한 장도 못 읽고,
+   * 색 통일 대상이 조용히 뒤집힌다.
+   */
+  matchedIds: number[] | null;
   ops: OpsState;
   /** 저장 시점에 계산돼 있던 캐시 키. 믿지 않고 대조에만 쓴다. */
   previewKey: string | null;
@@ -98,7 +107,8 @@ function validateEntry(v: unknown, i: number): ProjectEntry {
     throw new Error(`${where}.mtime: 숫자가 아닙니다.`);
   }
   const tree = validateTreeArray(e.tree, `${where}.tree`);
-  numberArray(e.matchedIds, `${where}.matchedIds`);
+  // null은 정상값이다(ProjectEntry.matchedIds 주석 참고). 그 밖에는 숫자 배열만.
+  const matchedIds = e.matchedIds === null ? null : numberArray(e.matchedIds, `${where}.matchedIds`);
   validateOps(e.ops, `${where}.ops`);
   if (e.previewKey !== null && typeof e.previewKey !== "string") {
     throw new Error(`${where}.previewKey: null 또는 문자열이 아닙니다.`);
@@ -110,7 +120,7 @@ function validateEntry(v: unknown, i: number): ProjectEntry {
     path: e.path,
     mtime: e.mtime,
     tree,
-    matchedIds: e.matchedIds as number[],
+    matchedIds,
     ops: e.ops as OpsState,
     previewKey: e.previewKey as string | null,
     previewFile: e.previewFile as string | null,
@@ -205,7 +215,11 @@ export function restorablePreviews(
       entry.ops.previewHiddenIds,
       entry.ops.soloIds,
       lineColor,
-      entry.matchedIds,
+      // null은 여기서 undefined로 되돌린다 — 저장할 때 키를 만든 값이 그것이다
+      // (buildProject는 matchedIdsByPath에 없는 파일을 null로 적는다).
+      // `?? []`로 뭉개면 키 세그먼트가 "all"에서 ""로 바뀌어 대조가 늘 어긋나고,
+      // 방금 쓴 PNG를 한 장도 못 붙인다.
+      entry.matchedIds ?? undefined,
       edgeLines,
       entry.ops.edgeColourIds
     );

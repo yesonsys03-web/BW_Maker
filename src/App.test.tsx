@@ -822,6 +822,17 @@ function projectWithOnePreview(): { project: ProjectFile; previews: Map<string, 
   };
 }
 
+/**
+ * ⌘S / ⌘⇧S. 이 기능의 주 조작인데 버튼과 달리 disabled를 지나지 않으므로,
+ * 키 경로는 따로 잠가야 한다 — 핸들러 본문을 통째로 지워도 나머지 테스트는
+ * 한 개도 안 깨진다.
+ */
+function pressSave(options: { shift?: boolean } = {}) {
+  window.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "s", metaKey: true, shiftKey: options.shift === true })
+  );
+}
+
 /** "프로젝트 열기..."를 눌러 위 프로젝트를 연 상태까지 간다. */
 async function openProject(fixture = projectWithOnePreview()) {
   vi.mocked(loadProjectFrom).mockResolvedValue({ project: fixture.project, previews: fixture.previews });
@@ -955,4 +966,161 @@ test("a project that lands while the queue is opening that same file does not ge
   // 덮여 entries가 비고 "라인필요"가 됐을 것이다.
   await waitFor(() => expect(screen.getByText("1장")).toBeTruthy());
   expect(engine.applyPreset).not.toHaveBeenCalled();
+});
+
+/**
+ * C1. 목록을 비워도 projectDir가 남으면 ProjectBar는 그 프로젝트가 열려 있다고
+ * 말하고 ⌘S가 그 폴더를 겨눈다. buildProject는 파일이 없어 루프를 안 도니
+ * blocked도 0이고, 거절 가드가 한 번도 안 걸린 채 어제까지의 작업이 files: []로
+ * 덮인다. 복원 항목에는 edited가 없어 확인창도 안 뜬다 — 평범한 조작이다.
+ */
+test("clearing the list closes the project so ⌘S cannot overwrite it", async () => {
+  render(<App />);
+  await openProject();
+
+  click(screen.getByRole("button", { name: "비우기" }));
+  await waitFor(() => expect(screen.getByText("저장 안 된 작업")).toBeTruthy());
+
+  // 그리고 ⌘S가 그 폴더를 겨누지 않는다 — 위치를 다시 묻는다.
+  vi.mocked(saveDialog).mockResolvedValue(null as never);
+  pressSave();
+  await waitFor(() => expect(saveDialog).toHaveBeenCalled());
+  expect(saveProjectTo).not.toHaveBeenCalled();
+});
+
+/**
+ * 같은 결함의 다른 쪽 문. blocked는 "담을 작업이 있는데 못 담는다"라 루프를 한
+ * 번이라도 돌아야 세어지므로, 0장짜리 저장은 그 가드를 그냥 지나간다.
+ */
+test("saving with nothing in the list is refused instead of writing files: []", async () => {
+  vi.mocked(saveDialog).mockResolvedValue("/proj/작업.bwproj");
+  render(<App />);
+
+  click(screen.getByRole("button", { name: "프로젝트 다른 이름으로 저장..." }));
+  await waitFor(() => expect(screen.getByText(/담을 파일이 0개/)).toBeTruthy());
+  expect(saveProjectTo).not.toHaveBeenCalled();
+});
+
+/** I2. 이 기능의 주 조작인데 지금까지 테스트가 한 줄도 안 걸려 있었다. */
+test("⌘S saves into the open project folder", async () => {
+  render(<App />);
+  await openProject();
+
+  pressSave();
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+  expect(vi.mocked(saveProjectTo).mock.calls[0][0]).toBe("/proj/작업.bwproj");
+  // 열려 있는 프로젝트가 있으므로 위치를 묻지 않는다.
+  expect(saveDialog).not.toHaveBeenCalled();
+});
+
+test("⌘⇧S asks where to save even with a project open", async () => {
+  render(<App />);
+  await openProject();
+
+  vi.mocked(saveDialog).mockResolvedValue("/proj/다른이름.bwproj");
+  pressSave({ shift: true });
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+  expect(saveDialog).toHaveBeenCalled();
+  expect(vi.mocked(saveProjectTo).mock.calls[0][0]).toBe("/proj/다른이름.bwproj");
+});
+
+/**
+ * C2. macOS에서 ⌘를 누른 채 S를 붙들면 키 리피트가 난다. 버튼은 disabled로
+ * 막히지만 키는 그 가드를 안 지나고, 상태(projectSaving)로는 같은 틱의 두 번째
+ * 호출을 못 막는다 — setState는 다음 렌더에나 보인다. project_write_text는
+ * truncate+write라 회차가 겹치면 잘린 project.json이 남고, 그러면 다음에 그
+ * 폴더를 아예 못 연다(그 JSON이 유일본이다).
+ */
+test("a ⌘S key repeat does not run two saves over the same folder", async () => {
+  render(<App />);
+  await openProject();
+
+  // 첫 회차를 붙잡아 둔다 — 겹칠 틈을 실제로 만든다.
+  const gate = deferred<void>();
+  vi.mocked(saveProjectTo).mockImplementationOnce(() => gate.promise);
+
+  pressSave();
+  pressSave();
+  pressSave();
+
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+  expect(saveProjectTo).toHaveBeenCalledTimes(1);
+  gate.resolve();
+  await waitFor(() => expect(screen.getByText("작업.bwproj")).toBeTruthy());
+  expect(saveProjectTo).toHaveBeenCalledTimes(1);
+});
+
+/**
+ * I4. loadProjectFrom은 파일마다 IPC를 두 번씩 순차로 돈다(25장이면 50회).
+ * 그동안 아무 표시가 없으면 끝난 줄 알고 다시 누르게 되고, restoreProject 둘이
+ * 경합한다.
+ */
+test("opening a project twice at once runs one restore", async () => {
+  const fixture = projectWithOnePreview();
+  const gate = deferred<{ project: ProjectFile; previews: Map<string, string> }>();
+  vi.mocked(loadProjectFrom).mockReturnValue(gate.promise);
+  engine.psdMtimes.mockResolvedValue({ [RESTORED]: 1700 });
+  vi.mocked(openDialog).mockResolvedValue("/proj/작업.bwproj" as never);
+
+  render(<App />);
+  const openButton = screen.getByRole("button", { name: "프로젝트 열기..." });
+  click(openButton);
+  click(openButton);
+
+  await waitFor(() => expect(loadProjectFrom).toHaveBeenCalled());
+  expect(loadProjectFrom).toHaveBeenCalledTimes(1);
+  // 도는 동안 버튼도 잠긴다 — 표시가 없으면 사람은 다시 누른다.
+  expect((screen.getByRole("button", { name: "프로젝트 열기..." }) as HTMLButtonElement).disabled).toBe(true);
+
+  gate.resolve({ project: fixture.project, previews: fixture.previews });
+  await waitFor(() => expect(screen.getByText("작업.bwproj")).toBeTruthy());
+});
+
+/**
+ * I3. 프로젝트의 프리셋을 앱의 선택으로 올리는 **App 쪽** 배선. PresetBar의
+ * 테스트는 컴포넌트만 잠그고 위 픽스처는 preset: null이라, 이 분기를 지우면
+ * 아무것도 안 깨졌다 — 그런데 이게 죽으면 화면이 계산하는 키가 방금 프라이밍한
+ * 것과 달라져 복원한 미리보기를 전부 다시 그린다.
+ */
+test("opening a project moves the app's preset selection to the project's preset", async () => {
+  const other = { ...PRESET, name: "다른 프리셋" };
+  // Once로 준다 — 이 파일의 다른 테스트는 프리셋이 없는 상태를 전제하고,
+  // 지속 구현으로 덮으면 뒤따르는 테스트에 프리셋이 새어 들어간다.
+  vi.mocked(loadPresets).mockResolvedValueOnce([other, PRESET]);
+
+  render(<App />);
+  // 마운트 때는 목록의 첫 번째가 선택된다.
+  await waitFor(() =>
+    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(other.name)
+  );
+
+  const fixture = projectWithOnePreview();
+  fixture.project.preset = PRESET as never;
+  await openProject(fixture);
+
+  await waitFor(() =>
+    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(PRESET.name)
+  );
+});
+
+/**
+ * I1. 프리셋을 고르기 전에 폴더를 연 파일은 matchedIds가 없다. 그것을 []로
+ * 적으면 저장할 때 쓴 키(undefined → "all")와 복원할 때 만드는 키([] → "")가
+ * 갈려 방금 쓴 PNG를 한 장도 못 읽고, 내보내기에서는 "전부 건다"가 "아무 데도
+ * 안 건다"로 뒤집힌다 — 그리고 복원 뒤에는 프리셋이 다시 걸리지 않으므로 그
+ * 뒤집힌 값이 영구히 굳는다.
+ */
+test("a file that never had a preset applied is saved as null, not an empty list", async () => {
+  vi.mocked(saveDialog).mockResolvedValue("/proj/새작업.bwproj");
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+
+  click(screen.getByRole("button", { name: "프로젝트 다른 이름으로 저장..." }));
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  const [, saved] = vi.mocked(saveProjectTo).mock.calls[0];
+  const entry = saved.files.find((f) => f.path === PATHS[0]);
+  expect(entry).toBeTruthy();
+  expect(entry!.matchedIds).toBeNull();
 });

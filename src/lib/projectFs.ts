@@ -41,17 +41,9 @@ export async function saveProjectTo(
   project: ProjectFile,
   previews: Map<string, string>
 ): Promise<void> {
-  await makeDir(dir);
-  const previewDir = await join(dir, PREVIEWS_DIR);
-  // 이 줄이 없으면 첫 저장이 "그런 디렉터리 없음"으로 죽는다. previews/를 미리
-  // 만드는 것을 확인하는 단언이 projectFs.test.ts에 있다.
-  await makeDir(previewDir);
-  await invoke("project_write_text", {
-    path: await join(dir, PROJECT_JSON),
-    contents: serializeProject(project),
-  });
-
-  // 미리보기 이름이 모두 해시 형식인지 검사
+  // 미리보기 이름이 모두 해시 형식인지 검사. **첫 쓰기보다 먼저** 돈다 —
+  // 뒤에 두면 거절된 저장이 project.json만 갈아치운 반쪽짜리 .bwproj를 남긴다.
+  // 그 JSON은 이 폴더의 유일본이라, 거절해놓고 폴더를 망가뜨리는 셈이 된다.
   const invalidNames: string[] = [];
   for (const name of previews.keys()) {
     if (!PREVIEW_HASH_REGEX.test(name)) {
@@ -61,6 +53,16 @@ export async function saveProjectTo(
   if (invalidNames.length > 0) {
     throw new Error(`previews: ${invalidNames.length}개 파일의 이름이 해시가 아닙니다(16자 16진소문자.png 형식이어야 함).`);
   }
+
+  await makeDir(dir);
+  const previewDir = await join(dir, PREVIEWS_DIR);
+  // 이 줄이 없으면 첫 저장이 "그런 디렉터리 없음"으로 죽는다. previews/를 미리
+  // 만드는 것을 확인하는 단언이 projectFs.test.ts에 있다.
+  await makeDir(previewDir);
+  await invoke("project_write_text", {
+    path: await join(dir, PROJECT_JSON),
+    contents: serializeProject(project),
+  });
 
   for (const [name, dataUrl] of previews) {
     await invoke("project_write_b64", {

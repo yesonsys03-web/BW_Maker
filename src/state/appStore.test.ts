@@ -996,6 +996,24 @@ describe("restoreProject", () => {
     expect(s.matchedIdsByPath["/cuts/a.psd"]).toEqual([1]);
   });
 
+  // 저장할 때 프리셋이 걸린 적 없던 파일은 matchedIds가 null로 적힌다. 그것을
+  // []로 되살리면 그 파일의 색 통일 대상이 "전부"에서 "아무 데도 안"으로 뒤집히고
+  // (엔진은 없는 목록을 "전부 해당"으로 읽는다), 되돌릴 길이 없다 — 복원본에는
+  // 자동 적용이 걸리지 않아 matchedIds를 다시 채울 applyPresetResult가 안 온다.
+  test("restoring an entry that never had a preset leaves its match list unset, not empty", () => {
+    const s = appReducer(initialAppState, {
+      type: "restoreProject",
+      entries: [{
+        path: "/cuts/a.psd", mtime: 1700, tree: RESTORED_TREE as never, matchedIds: null,
+        ops: RESTORED_OPS as never, previewKey: "k", previewFile: "a.png",
+      }],
+    } as never);
+
+    expect(s.matchedIdsByPath).not.toHaveProperty("/cuts/a.psd");
+    // 작업 자체는 살아 있어야 한다 — 버리는 것은 "없다"는 사실뿐이다.
+    expect(s.opsByPath["/cuts/a.psd"].manualLineIds).toEqual([2]);
+  });
+
   // 배경 큐가 그 파일을 열면 openSuccess가 도는데, 그것이 초기 상태로 덮으면
   // 복원한 의미가 없다 — 손으로 한 지정이 조용히 사라진다.
   test("opening a restored file in the background keeps the restored work", () => {

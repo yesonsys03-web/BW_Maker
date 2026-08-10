@@ -104,6 +104,15 @@ test("matchedIds not a number array is refused", () => {
   expect(() => parseProject(JSON.stringify(p))).toThrow(/matchedIds/);
 });
 
+// null은 정상값이다 — "프리셋을 한 번도 안 걸었다"와 "걸었는데 한 장도 안 걸렸다"는
+// 다른 사실이고, 그 차이가 미리보기 키와 내보내기를 양쪽에서 바꾼다.
+test("matchedIds may be null and survives a round trip", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as unknown as ProjectFile;
+  p.files[0].matchedIds = null;
+  const back = parseProject(serializeProject(p));
+  expect(back.files[0].matchedIds).toBeNull();
+});
+
 test("includedIds not a number array is refused", () => {
   const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
   const ops = ((p.files as Record<string, unknown>[])[0].ops as Record<string, unknown>);
@@ -290,6 +299,38 @@ test("a preview whose stored key no longer matches is dropped", () => {
     [e as never], new Map([["a.png", "data:image/png;base64,AAA="]]), null, null
   );
   expect(out).toEqual([]);
+});
+
+/**
+ * 프리셋을 고르기 전에 폴더를 연 파일은 matchedIds가 없는 채로 저장된다(null).
+ * 그것을 `?? []`로 되살리면 키 세그먼트가 "all"에서 ""로 바뀌어, 방금 쓴 PNG를
+ * 한 장도 못 붙인다. lineColor가 있어야 그 차이가 키에 나타난다 — 색이 없으면
+ * lineColorIdsFor가 어느 쪽이든 null을 준다.
+ */
+test("a preview saved before any preset was applied still comes back", () => {
+  const ops = {
+    includedIds: [1], previewHiddenIds: [], soloIds: [], edgeColourIds: [],
+    manualLineIds: [], ops: [], entries: [],
+  };
+  const key = previewCacheKey(
+    { path: "/cuts/a.psd", mtime: 1700 }, true, [1], "#ff0000", undefined, null, [], [1]
+  );
+  const entry = {
+    path: "/cuts/a.psd", mtime: 1700, tree: [LEAF], matchedIds: null,
+    ops, previewKey: key, previewFile: "a.png",
+  };
+  const out = restorablePreviews(
+    [entry as never], new Map([["a.png", "data:image/png;base64,AAA="]]), "#ff0000", null
+  );
+  expect(out).toHaveLength(1);
+
+  // 그리고 []는 같은 그림을 받지 못한다 — 그것은 "걸었는데 한 장도 안 걸렸다"라
+  // 정말로 다른 그림이다. 두 경우를 뭉개면 안 되는 이유가 이 대비다.
+  const asEmpty = restorablePreviews(
+    [{ ...entry, matchedIds: [] } as never],
+    new Map([["a.png", "data:image/png;base64,AAA="]]), "#ff0000", null
+  );
+  expect(asEmpty).toEqual([]);
 });
 
 test("an entry whose PNG is gone is dropped without throwing", () => {
