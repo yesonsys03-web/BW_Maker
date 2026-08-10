@@ -11,6 +11,24 @@ import type { BatchItemResult, EngineError, Preset } from "../lib/types";
 interface BatchPanelProps {
   files: FileEntry[];
   /**
+   * 배치가 처음 고를 프리셋의 이름. 출처는 위쪽 `PresetBar`의 현재 선택이다 —
+   * 프로젝트를 열면 그 프리셋이 곧 위쪽의 선택이 되므로, 프로젝트를 연 직후에는
+   * 둘이 같다. 프로젝트를 안 열었으면 여기도 위쪽도 같은 loadPresets()를 읽으므로
+   * 결과는 예전과 같다.
+   *
+   * 아티스트가 화면에서 보고 승인한 설정과 배치가 실제로 내보내는 설정이 갈리면
+   * 산출물이 조용히 달라진다 — 배치가 자기 목록의 첫 번째로 시작하는 바람에
+   * 2026-08-10에 생성된 라인이 빠진 산출물이 실제로 나갔다. 프로젝트의 프리셋이
+   * 아니라 "지금 위쪽 바가 고른 것"을 따르는 이유도 같다: 프로젝트를 연 뒤
+   * 위쪽을 바꿨다면 배치도 그것을 따라야 화면과 산출물이 갈리지 않는다.
+   *
+   * **목록을 읽는 그 순간에만 본다.** 값으로 보고 바뀔 때마다 선택을 맞추면,
+   * 아티스트가 배치 드롭다운에서 고른 것이 위쪽 바를 건드릴 때마다 되돌아간다
+   * (`PresetBar`에서 밟았던 함정이다). 배치 탭은 눌러야 마운트되므로, 그 시점엔
+   * 이미 프로젝트의 프리셋이 위쪽에 올라와 있다.
+   */
+  defaultPresetName: string | null;
+  /**
    * 화면에서 손으로 "라인으로 지정"한 레이어. {경로: [id]} 꼴이고 열어둔
    * 파일에만 있다.
    *
@@ -76,7 +94,7 @@ interface PendingRun {
  * independent of any currently-open session, and the engine keeps going past
  * per-file failures, so this UI only ever renders the final results list.
  */
-export function BatchPanel({ files, manualLineIdsByPath, onError, onRunningChange }: BatchPanelProps) {
+export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, onError, onRunningChange }: BatchPanelProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedPresetName, setSelectedPresetName] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set(files.map((f) => f.path)));
@@ -106,7 +124,12 @@ export function BatchPanel({ files, manualLineIdsByPath, onError, onRunningChang
         const loaded = await loadPresets();
         if (cancelled) return;
         setPresets(loaded);
-        setSelectedPresetName(loaded[0]?.name ?? null);
+        // 목록에 없는 이름이면(지웠거나 이름을 바꿨으면) 예전처럼 첫 번째로 간다.
+        const wanted =
+          defaultPresetName && loaded.some((p) => p.name === defaultPresetName)
+            ? defaultPresetName
+            : loaded[0]?.name ?? null;
+        setSelectedPresetName(wanted);
       } catch (e) {
         if (cancelled) return;
         onError("프리셋 목록 불러오기 실패", toEngineError(e));
@@ -116,6 +139,8 @@ export function BatchPanel({ files, manualLineIdsByPath, onError, onRunningChang
       cancelled = true;
     };
     // Loaded once on mount; onError identity is stable (useCallback in appStore).
+    // defaultPresetName은 일부러 의존성에 없다 — 넣으면 아티스트가 배치에서 고른
+    // 것이 위쪽 바를 건드릴 때마다 되돌아간다(prop 주석 참고).
   }, []);
 
   useEffect(() => {

@@ -8,7 +8,7 @@
  * 했다. 그 조율은 순수 함수로 뽑을 수 없어(무엇을 언제 부르는가가 곧 동작이다)
  * 실제로 패널을 띄우고 엔진만 가짜로 바꾼다.
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 const engine = vi.hoisted(() => ({
@@ -108,6 +108,7 @@ async function startRun(manualLineIdsByPath: Record<string, number[]> = {}) {
   render(
     <BatchPanel
       files={FILES}
+      defaultPresetName={null}
       manualLineIdsByPath={manualLineIdsByPath}
       onError={vi.fn()}
       onRunningChange={(r) => runningSignals.push(r)}
@@ -278,4 +279,87 @@ test("a file's manual line designation rides along to the batch", async () => {
   // b.psd 차례에는 그 파일의 지정만 실린다.
   expect(engine.batchRun.mock.calls[1][0]).toEqual(["/cuts/b.psd"]);
   expect(engine.batchRun.mock.calls[1][4]).toEqual({ "/cuts/b.psd": [7, 9] });
+});
+
+/**
+ * 배치의 기본 프리셋.
+ *
+ * 배치는 자기 목록의 첫 번째로 시작했다. 위쪽 `PresetBar`의 선택과 갈리면
+ * 아티스트가 보고 승인한 설정과 실제로 나가는 산출물이 조용히 달라진다 —
+ * 2026-08-10에 이것 때문에 생성된 라인이 빠진 산출물이 실제로 나갔다.
+ */
+const PSD = { ...PRESET, outputFormat: "psd" as const };
+const PRESET_B = { ...PSD, name: "line 추출 (굵게)" };
+const PRESET_C = { ...PSD, name: "line 추출 (얇게)" };
+
+function presetSelect() {
+  return screen.getByRole("combobox") as HTMLSelectElement;
+}
+
+/**
+ * 실행하지 않고 패널만 띄운다. 기본 선택을 보기 위한 것.
+ *
+ * 화면의 `<select>`만으로는 부족하다 — 목록에 없는 이름을 넣으면 브라우저가
+ * 첫 번째를 고른 것처럼 보여주므로, "지운 이름이 그대로 남은" 고장이 정상과
+ * 똑같이 보인다. 그래서 실제로 배치를 돌려 엔진에 무엇이 갔는지로 확인한다
+ * (그것이 곧 산출물이다).
+ */
+function panel(defaultPresetName: string | null) {
+  return (
+    <BatchPanel
+      files={FILES}
+      defaultPresetName={defaultPresetName}
+      manualLineIdsByPath={{}}
+      onError={vi.fn()}
+      onRunningChange={() => {}}
+    />
+  );
+}
+
+/** 배치를 실행하고, 엔진이 받은 프리셋을 돌려준다. */
+async function runAndTakePreset() {
+  await waitFor(() => expect(screen.getByRole("button", { name: "배치 실행" })).toBeTruthy());
+  click("배치 실행");
+  await waitFor(() => expect(engine.batchRun).toHaveBeenCalled());
+  return engine.batchRun.mock.calls[0][1];
+}
+
+test("the batch starts on the preset the top bar has, not the first in the list", async () => {
+  vi.mocked(loadPresets).mockResolvedValueOnce([PSD, PRESET_B, PRESET_C]);
+
+  render(panel(PRESET_B.name));
+  await waitFor(() => expect(presetSelect().value).toBe(PRESET_B.name));
+
+  expect(await runAndTakePreset()).toEqual(PRESET_B);
+});
+
+test("a name that is no longer in the list falls back to the first", async () => {
+  // 프리셋을 지웠거나 이름을 바꿨을 수 있다. 그럴 땐 예전 동작 그대로다.
+  // 이름을 그대로 들고 있으면 고른 프리셋이 없는 셈이라 배치 실행 자체가 막힌다.
+  vi.mocked(loadPresets).mockResolvedValueOnce([PSD, PRESET_B, PRESET_C]);
+
+  render(panel("사라진 프리셋"));
+
+  expect(await runAndTakePreset()).toEqual(PSD);
+});
+
+test("what the artist picked in the batch dropdown survives a change up top", async () => {
+  // 이 이름을 값으로 보고 바뀔 때마다 선택을 맞추면(의존성에 넣거나 별도 effect로
+  // 만들면), 배치에서 고른 것이 위쪽 바를 건드릴 때마다 되돌아간다. 목록을 읽는
+  // 그 순간에만 봐야 한다.
+  vi.mocked(loadPresets).mockResolvedValueOnce([PSD, PRESET_B, PRESET_C]);
+
+  const { rerender } = render(panel(PSD.name));
+  await waitFor(() => expect(presetSelect().value).toBe(PSD.name));
+
+  fireEvent.change(presetSelect(), { target: { value: PRESET_B.name } });
+  expect(presetSelect().value).toBe(PRESET_B.name);
+
+  // 위쪽 바에서 다른 프리셋을 골랐다.
+  rerender(panel(PRESET_C.name));
+  // 되맞추는 effect가 있다면 여기서 돈다(비동기라 한 번 흘려보낸다).
+  await act(async () => {});
+
+  expect(presetSelect().value).toBe(PRESET_B.name);
+  expect(await runAndTakePreset()).toEqual(PRESET_B);
 });

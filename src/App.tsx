@@ -1222,6 +1222,7 @@ function AppShell() {
           ) : (
             <BatchPanel
               files={state.files}
+              defaultPresetName={selectedPreset?.name ?? null}
               manualLineIdsByPath={manualLineIdsByPath}
               onError={pushError}
               onRunningChange={handleBatchRunningChange}
