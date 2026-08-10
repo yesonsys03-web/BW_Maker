@@ -1,6 +1,7 @@
 import { validatePreset } from "./presets";
+import { previewRenderSpec } from "./previewCache";
 import type { OpsState } from "./opsReducer";
-import type { Preset, TreeNode } from "./types";
+import type { EdgeLines, Preset, TreeNode } from "./types";
 
 export interface ProjectEntry {
   path: string;
@@ -173,4 +174,43 @@ export function reconcileProject(
     }
   }
   return { fresh, stale };
+}
+
+/**
+ * 복원한 항목 중 미리보기를 그대로 붙여도 되는 것만 고른다.
+ *
+ * **저장된 previewKey는 믿지 않는다.** 복원한 상태로 키를 다시 계산해서 저장된
+ * 것과 같을 때만 붙인다. 다르면 저장과 복원 사이에 키 구성이 바뀌었다는 뜻이고,
+ * 그때 옛 그림을 붙이면 아티스트는 지금 설정과 다른 그림을 보면서 확인했다고
+ * 믿게 된다(설계 5절).
+ *
+ * 미리보기 유효성 판정을 여기서 새로 만들지 않는 것이 요점이다 — previewCacheKey가
+ * 이미 경로·수정시각·보이는 레이어·라인색·경계선 설정·지정·체크를 전부 담고 있다.
+ */
+export function restorablePreviews(
+  entries: ProjectEntry[],
+  previews: Map<string, string>,
+  lineColor: string | null,
+  edgeLines: EdgeLines | null
+): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const entry of entries) {
+    if (!entry.previewKey || !entry.previewFile) continue;
+    const dataUrl = previews.get(entry.previewFile);
+    if (!dataUrl) continue;
+    const plan = previewRenderSpec(
+      { path: entry.path, mtime: entry.mtime },
+      entry.tree,
+      entry.ops.includedIds,
+      entry.ops.previewHiddenIds,
+      entry.ops.soloIds,
+      lineColor,
+      entry.matchedIds,
+      edgeLines,
+      entry.ops.edgeColourIds
+    );
+    if (!plan.key || plan.key !== entry.previewKey) continue;
+    out.push([plan.key, dataUrl]);
+  }
+  return out;
 }

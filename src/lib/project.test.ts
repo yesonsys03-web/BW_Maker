@@ -247,3 +247,52 @@ test("a duplicate path in project.files is rejected at parse time", () => {
     expect(String(e)).not.toContain(path);
   }
 });
+
+import { previewCacheKey } from "./previewCache";
+import { restorablePreviews } from "./project";
+
+const LEAF = {
+  id: 1, name: "line", kind: "pixel", visible: true, opacity: 255, blendMode: "normal",
+  bbox: [0, 0, 4, 4], hasMask: false, hasPixels: true, path: ["line"],
+};
+
+function entryWithRealKey() {
+  const tree = [LEAF] as never;
+  const ops = {
+    includedIds: [1], previewHiddenIds: [], soloIds: [], edgeColourIds: [],
+    manualLineIds: [], ops: [], entries: [],
+  };
+  const key = previewCacheKey(
+    { path: "/cuts/a.psd", mtime: 1700 }, true, [1], null, [1], null, [], [1]
+  );
+  return {
+    path: "/cuts/a.psd", mtime: 1700, tree, matchedIds: [1], ops: ops as never,
+    previewKey: key, previewFile: "a.png",
+  };
+}
+
+test("a preview whose key still comes out the same is restorable", () => {
+  const out = restorablePreviews(
+    [entryWithRealKey() as never],
+    new Map([["a.png", "data:image/png;base64,AAA="]]),
+    null, null
+  );
+  expect(out).toHaveLength(1);
+  expect(out[0][1]).toBe("data:image/png;base64,AAA=");
+});
+
+// 저장과 복원 사이에 키 구성이 바뀌면(앱 업데이트로 항목이 늘어나는 일은 실제로
+// 있었다) 옛 그림을 붙이면 안 된다 — 아티스트가 지금 설정과 다른 그림을 보면서
+// 확인했다고 믿게 된다.
+test("a preview whose stored key no longer matches is dropped", () => {
+  const e = { ...entryWithRealKey(), previewKey: "저장될 때의 옛 키" };
+  const out = restorablePreviews(
+    [e as never], new Map([["a.png", "data:image/png;base64,AAA="]]), null, null
+  );
+  expect(out).toEqual([]);
+});
+
+test("an entry whose PNG is gone is dropped without throwing", () => {
+  const out = restorablePreviews([entryWithRealKey() as never], new Map(), null, null);
+  expect(out).toEqual([]);
+});

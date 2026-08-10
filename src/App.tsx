@@ -31,6 +31,7 @@ import { DEFAULT_ROLE_TOKENS } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, toEngineError } from "./lib/preview";
 import { PreviewCache, needsPrefetch, previewRenderSpec } from "./lib/previewCache";
 import { openFailureReport, type FailedOpen } from "./lib/openReport";
+import { restorablePreviews, type ProjectEntry } from "./lib/project";
 import { undrawableReport } from "./lib/skippedReport";
 import { missingFromChunk, nextThumbnailChunk } from "./lib/thumbnailQueue";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
@@ -479,6 +480,20 @@ function AppShell() {
       ops.edgeColourIds
     );
   }, []);
+
+  const primeRestoredPreviews = useCallback((entries: ProjectEntry[], previews: Map<string, string>) => {
+    for (const [key, dataUrl] of restorablePreviews(
+      entries, previews,
+      presetRef.current?.lineColor ?? null,
+      presetRef.current?.edgeLines ?? null
+    )) {
+      previewCacheRef.current.set(key, dataUrl);
+      prefetchedKeysRef.current.add(key);
+    }
+  }, []);
+  // 아직 아무도 부르지 않는다 — 프로젝트 열기 배선(다음 작업)이 붙인다.
+  // noUnusedLocals가 그때까지 미사용으로 잡으므로 여기서만 참조해 둔다.
+  void primeRestoredPreviews;
 
   useEffect(() => {
     // loading(=loadProgress 상태)만으로는 부족하다. 로드 큐가 방금 시작한 것은
