@@ -1,6 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod engine;
 mod files;
+mod project_fs;
 
 use tauri::Manager;
 
@@ -22,7 +23,11 @@ pub fn run() {
             engine::read_file_b64,
             engine::restart_engine,
             engine::paths_exist,
-            files::collect_psd_files
+            files::collect_psd_files,
+            project_fs::project_make_dir,
+            project_fs::project_read_text,
+            project_fs::project_write_text,
+            project_fs::project_write_b64
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

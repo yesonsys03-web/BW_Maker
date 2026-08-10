@@ -1,5 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
-import { exists, mkdir, readFile, readTextFile, writeFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { loadPngDataUrl, pathsExist } from "./engine";
 import { parseProject, serializeProject, type ProjectFile } from "./project";
 
 const PROJECT_JSON = "project.json";
@@ -8,18 +9,21 @@ const PREVIEWS_DIR = "previews";
 // 원본 코드는 src/lib/project.ts의 previewFileName 참고
 const PREVIEW_HASH_REGEX = /^[0-9a-f]{16}\.png$/;
 
-function dataUrlToBytes(dataUrl: string): Uint8Array {
-  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
-  const bin = atob(base64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
-  return out;
+/**
+ * 디스크 접근은 전부 Rust 커맨드(`src-tauri/src/project_fs.rs`)를 거친다.
+ * plugin-fs가 아닌 이유는 그 파일 맨 위에 있다 — 요약하면 이 앱의 fs capability는
+ * AppData 안으로 묶여 있는데 프로젝트 폴더는 사용자가 고르는 곳이라 항상 그 밖이고,
+ * 저장 다이얼로그가 열어주는 스코프는 고른 경로 **하나뿐**이라 `project.json`과
+ * `previews/*.png`를 덮지 못한다. presets.ts가 plugin-fs를 쓰는 것은 거기가
+ * appDataDir 안이기 때문이다 — 같은 규칙이 아니다.
+ */
+async function makeDir(path: string): Promise<void> {
+  await invoke("project_make_dir", { path });
 }
 
-function bytesToDataUrl(bytes: Uint8Array): string {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
-  return `data:image/png;base64,${btoa(bin)}`;
+/** data URL(`data:image/png;base64,...`)에서 base64 본문만 떼어낸다. */
+function dataUrlToBase64(dataUrl: string): string {
+  return dataUrl.slice(dataUrl.indexOf(",") + 1);
 }
 
 /**
@@ -30,17 +34,22 @@ function bytesToDataUrl(bytes: Uint8Array): string {
  *
  * 중요: 미리보기 이름은 반드시 해시여야 한다. 파일 이름에 기밀 정보(납품 PSD 경로)가
  * 남으면 안 되므로, 이 모듈에서 마지막으로 검사할 수 있는 곳이다. 호출부의 버그로
- * entry.path 같은 값이 넘어가면 이 검사가 적잖아 낸다.
+ * entry.path 같은 값이 넘어가면 이 검사가 잡아낸다.
  */
 export async function saveProjectTo(
   dir: string,
   project: ProjectFile,
   previews: Map<string, string>
 ): Promise<void> {
-  await mkdir(dir, { recursive: true });
+  await makeDir(dir);
   const previewDir = await join(dir, PREVIEWS_DIR);
-  await mkdir(previewDir, { recursive: true });
-  await writeTextFile(await join(dir, PROJECT_JSON), serializeProject(project));
+  // 이 줄이 없으면 첫 저장이 "그런 디렉터리 없음"으로 죽는다. previews/를 미리
+  // 만드는 것을 확인하는 단언이 projectFs.test.ts에 있다.
+  await makeDir(previewDir);
+  await invoke("project_write_text", {
+    path: await join(dir, PROJECT_JSON),
+    contents: serializeProject(project),
+  });
 
   // 미리보기 이름이 모두 해시 형식인지 검사
   const invalidNames: string[] = [];
@@ -54,7 +63,10 @@ export async function saveProjectTo(
   }
 
   for (const [name, dataUrl] of previews) {
-    await writeFile(await join(previewDir, name), dataUrlToBytes(dataUrl));
+    await invoke("project_write_b64", {
+      path: await join(previewDir, name),
+      b64: dataUrlToBase64(dataUrl),
+    });
   }
 }
 
@@ -68,14 +80,21 @@ export async function saveProjectTo(
 export async function loadProjectFrom(
   dir: string
 ): Promise<{ project: ProjectFile; previews: Map<string, string> }> {
-  const project = parseProject(await readTextFile(await join(dir, PROJECT_JSON)));
+  const json = (await invoke("project_read_text", {
+    path: await join(dir, PROJECT_JSON),
+  })) as string;
+  const project = parseProject(json);
   const previewDir = await join(dir, PREVIEWS_DIR);
   const previews = new Map<string, string>();
   for (const entry of project.files) {
     if (!entry.previewFile) continue;
     const p = await join(previewDir, entry.previewFile);
-    if (!(await exists(p))) continue;
-    previews.set(entry.previewFile, bytesToDataUrl(await readFile(p)));
+    // 존재 확인과 PNG 읽기는 이미 있는 커맨드를 그대로 쓴다(중복 구현 금지).
+    // loadPngDataUrl이 `data:image/png;base64,`까지 붙여서 주므로 예전의
+    // bytesToDataUrl은 필요 없어졌다.
+    const [found] = await pathsExist([p]);
+    if (!found) continue;
+    previews.set(entry.previewFile, await loadPngDataUrl(p));
   }
   return { project, previews };
 }
