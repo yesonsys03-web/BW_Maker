@@ -494,18 +494,41 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     // The engine child process died and was restarted (EngineStatus banner).
     // Every session the old process held is gone with it, so every file
     // resets to idle — selecting one again opens a fresh session against
-    // the same path. Ops/includedIds/previewHiddenIds are left in
-    // opsByPath; the next openSuccess for that path rebuilds them anyway,
-    // and until then they're inert, unreferenced state.
-    case "engineRestarted":
+    // the same path. Ops/includedIds/previewHiddenIds are left in opsByPath.
+    // For a plainly-opened file that is inert, unreferenced state: the next
+    // openSuccess for that path rebuilds it from the fresh tree. For a
+    // *restored* file it is neither inert nor rebuilt — openSuccess above
+    // deliberately holds on to it while the mtime still matches, so it stays
+    // live across the restart and the same must go for its matchedIds.
+    case "engineRestarted": {
+      // 복원한 파일의 매칭 결과는 지킨다. 아래 "옛 세션에서 나온 id라 버린다"는
+      // 근거가 복원 경로에는 맞지 않는다 — restoreProject가 이미 앱 재시작을
+      // 건너 저장된 id를 세우고 있고 그것이 이 기능의 전제다. 엔진 프로세스가
+      // 죽어도 디스크의 PSD는 그대로이므로 그 id는 여전히 유효하다. PSD가
+      // 실제로 바뀌었으면 다음 openSuccess가 `!isRestoredMatch`로 지운다 —
+      // 검증 게이트는 거기 있다.
+      //
+      // 여기서 버리면 되돌아올 길이 없다: 로드 큐는 복원본에 자동 적용을 걸지
+      // 않고(App.tsx의 alreadyApplied), 그물 효과도 presetApplied가 false가
+      // 아니면 비켜서므로 matchedIds를 다시 채울 applyPresetResult가 영영 오지
+      // 않는다. 그리고 matchedIds는 표시용이 아니라 내보내기 인자다
+      // (ExportDialog가 그대로 넘기고, 엔진은 그것이 없으면 "전부 해당"으로
+      // 읽는다) — 비어 있으면 색 통일이 매칭된 라인이 아니라 포함된 레이어
+      // 전부에 걸리는데, 아티스트에게는 아무 표시도 안 간다.
+      const matchedIdsByPath: Record<string, number[]> = {};
+      for (const path of Object.keys(state.restoredMtimeByPath)) {
+        const restoredMatches = state.matchedIdsByPath[path];
+        if (restoredMatches) matchedIdsByPath[path] = restoredMatches;
+      }
       return {
         ...state,
         activePath: null,
         // 옛 프로세스가 들고 있던 세션이 전부 사라졌으므로 그 세션에서 나온
-        // 매칭 결과도 전부 버린다.
-        matchedIdsByPath: {},
+        // 매칭 결과는 버린다(복원한 파일만 위와 같이 예외다).
+        matchedIdsByPath,
         files: state.files.map((f) => ({ path: f.path, status: "idle" })),
       };
+    }
 
     case "restoreProject": {
       const files: FileEntry[] = action.entries.map((e) => ({

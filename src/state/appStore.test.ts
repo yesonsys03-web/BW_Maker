@@ -700,6 +700,31 @@ describe("engineRestarted", () => {
     expect(restarted.activePath).toBeNull();
     expect(restarted.matchedIdsByPath).toEqual({});
   });
+
+  // 복원한 파일만은 예외다. 엔진이 죽어도 디스크의 PSD는 그대로라 저장해둔 id가
+  // 여전히 유효하고, 여기서 버리면 되돌아올 길이 없다 — 로드 큐도 그물 효과도
+  // 복원본에는 자동 적용을 걸지 않으므로 matchedIds를 다시 채울 applyPresetResult가
+  // 영영 오지 않는다. matchedIds는 내보내기 인자이므로 비면 색 통일이 매칭된
+  // 라인이 아니라 포함된 레이어 전부에 걸린다.
+  //
+  // 두 번째 단언이 요점이다. 그것이 없으면 "복원 여부를 안 보고 그냥 전부
+  // 지킨다"로 바꿔도 이 테스트가 통과해, 옛 세션의 id가 새 세션에 남는다.
+  test("keeps a restored file's matches and still drops a plain file's", () => {
+    let s = appReducer(initial, {
+      type: "restoreProject",
+      entries: [{
+        path: "/restored.psd", mtime: 1700, tree, matchedIds: [1],
+        ops: buildInitialOpsState(tree), previewKey: null, previewFile: null,
+      }],
+    } as never);
+    s = appReducer(s, { type: "addFiles", paths: ["/plain.psd"] });
+    s = { ...s, matchedIdsByPath: { ...s.matchedIdsByPath, "/plain.psd": [4, 5] } };
+
+    const restarted = appReducer(s, { type: "engineRestarted" });
+
+    expect(restarted.matchedIdsByPath["/restored.psd"]).toEqual([1]);
+    expect(restarted.matchedIdsByPath).not.toHaveProperty("/plain.psd");
+  });
 });
 
 // 폴더를 갈아끼우기 위한 것이다. `+ 폴더`는 기존 목록에 덧붙이므로, 폴더 2만

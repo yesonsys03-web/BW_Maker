@@ -334,6 +334,45 @@ test("the load queue skips auto-apply for a restored file but still applies it t
   expect(engine.applyPreset).toHaveBeenCalledWith(2, PRESET);
 });
 
+// 위 판정의 반대편. 큐의 `alreadyApplied`는 "복원한 mtime이 **있고** 그것이 방금 연
+// mtime과 같을 때"만 참이어야 한다. OpenResult.mtime은 optional이라(lib/types.ts)
+// 엔진이 mtime을 안 주는 경우가 있고, "있고"를 빼면 복원한 적 없는 파일에서
+// `undefined === undefined`가 참이 되어 폴더 전체가 "이미 적용됨"으로 판정된다 —
+// 큐가 프리셋을 한 장도 안 걸고 지나간다.
+//
+// 파일이 둘이어야 이것을 잡는다. 첫 파일은 보고 있는 파일이라 뒤늦게 그물 효과가
+// 프리셋을 걸어주지만(App의 "그물" useEffect), 나머지는 아무도 안 걸어준다 —
+// 폴더 전체가 조용히 프리셋 없이 남는 것이 실제 증상이다.
+test("files that were never restored still get the preset when the engine reports no mtime", async () => {
+  vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
+  engine.applyPreset.mockResolvedValue({ matchedLayerIds: [1], operations: [] });
+
+  const seeded = appReducer(initialAppState, {
+    type: "addFiles",
+    paths: ["/cuts/one.psd", "/cuts/two.psd"],
+  });
+
+  render(<App initialState={seeded} />);
+
+  await waitFor(() => expect(opens).toHaveLength(1));
+  // 프리셋이 선택될 때까지 기다린다(위 테스트와 같은 이유의 레이스 방지).
+  await waitFor(() => expect(screen.getByText(PRESET.name)).toBeTruthy());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // 엔진이 mtime을 돌려주지 않는다.
+  opens[0].d.resolve({
+    sessionId: 1, width: 10, height: 10, colorMode: "RGB", depth: 8, tree: treeOf([1]),
+  });
+  await waitFor(() => expect(opens).toHaveLength(2));
+  opens[1].d.resolve({
+    sessionId: 2, width: 10, height: 10, colorMode: "RGB", depth: 8, tree: treeOf([1]),
+  });
+
+  await waitFor(() => expect(engine.applyPreset).toHaveBeenCalledTimes(2));
+  expect(engine.applyPreset).toHaveBeenCalledWith(1, PRESET);
+  expect(engine.applyPreset).toHaveBeenCalledWith(2, PRESET);
+});
+
 // 세 번째 경로: 엔진이 죽었다 재시작하면(EngineStatus) 그 파일의 FileEntry가
 // { path, status: "idle" }로 통째로 갈아 끼워진다 — mtime도 함께 사라진다.
 // restoredMtimeByPath는 지워지지 않는다(엔진이 죽어도 디스크의 PSD는 그대로다).
@@ -405,6 +444,22 @@ test("re-processing a restored file after an engine restart still skips auto-app
   // 재적용을 걸었다면 매칭 결과([])로 덮여 entries가 비어 "0장"이 됐을 것이다.
   expect(screen.queryByText("0장")).toBeNull();
   expect(engine.applyPreset).not.toHaveBeenCalled();
+
+  // 그리고 복원한 matchedIds도 살아남아야 한다. ops만 지키고 이것을 버리면 손실을
+  // 맞바꾼 것뿐이다 — 큐도 그물 효과도 복원본에는 자동 적용을 걸지 않으므로
+  // 되돌아올 길이 없고, matchedIds는 내보내기 인자라 비면 색 통일이 매칭된 라인이
+  // 아니라 포함된 레이어 전부에 걸린다(아티스트에게는 아무 표시도 안 간다).
+  //
+  // "라인만"으로 본다. matchedIds가 비면 이 필터가 이름 규칙으로 대체 동작하고
+  // 그때만 안내문이 뜨므로(layerFilter의 isLineFallbackActive), 안내문이 없다는
+  // 것이 곧 matchedIds가 남아 있다는 것이다. 재시작 중에는 활성 파일이 잠시
+  // 사라져 패널이 필터를 "전체"로 되돌리므로(LayerTree의 path 효과) 파일이 다시
+  // 열린 지금 누른다.
+  click(screen.getByRole("button", { name: "라인만" }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "라인만" }).getAttribute("aria-pressed")).toBe("true")
+  );
+  expect(screen.queryByText(/프리셋을 아직 적용하지 않아/)).toBeNull();
 });
 
 test("no thumbnail is rendered while the load queue is running", async () => {
