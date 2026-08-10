@@ -103,8 +103,8 @@ test("parseBottomPanelHeight clamps what was stored, not just what was typed", (
 });
 
 // --- 파일 패널 폭 ---
-// 240px 고정이었다. 파일명이 `HH03_BG-HLobbyINTBackLeftCorner015_CO_v01.psd`처럼
-// 길어 어차피 잘렸는데, 행에 장수까지 붙으면서 남는 폭이 더 줄었다.
+// 240px 고정이었다. 납품 파일명이 45자 안팎이라 어차피 잘렸는데, 행에 장수까지
+// 붙으면서 남는 폭이 더 줄었다.
 
 test("clampFilePanelWidth keeps a width that is already sensible", () => {
   expect(clampFilePanelWidth(320)).toBe(320);

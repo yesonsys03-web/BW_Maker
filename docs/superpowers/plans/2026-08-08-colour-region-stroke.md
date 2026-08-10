@@ -894,7 +894,7 @@ from psd_engine.edges import region_boundary, segment_colours
 
 - [ ] **Step 2: 볼륨이 붙어 있는지 확인한다**
 
-Run: `test -d "/Volumes/bgfinal/colordata/Hazbin_Hotel/HH03_시즌_자료/HH0305/Design/Color/CH" && echo 붙어있음`
+Run: `test -d "$BG_DELIVERY_DIR" && echo 붙어있음`
 Expected: `붙어있음` — 안 나오면 외장 볼륨을 먼저 마운트한다.
 
 - [ ] **Step 3: #001의 과생성 여부를 가린다**

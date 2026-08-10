@@ -1321,7 +1321,7 @@ if __name__ == "__main__":
 
 ```bash
 engine/.venv/bin/python scripts/audit-line-matching.py \
-  "/Volumes/bgfinal/colordata/Hazbin_Hotel/HH03_시즌_자료/HH0306/Design/COLOR/BG/02_Color"
+  "$BG_DELIVERY_DIR"
 ```
 
 Expected:

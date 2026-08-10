@@ -45,8 +45,8 @@ export function parseTreePanelWidth(raw: string | null): number {
 /**
  * 파일 패널 폭.
  *
- * 240px 고정이었다. 납품 파일명이 `HH03_BG-HLobbyINTBackLeftCorner015_CO_v01.psd`
- * 처럼 길어 그 폭에서는 어느 파일이든 잘렸고, 행에 결과 장수까지 붙으면서 이름에
+ * 240px 고정이었다. 납품 파일명이 45자 안팎이라 그 폭에서는 어느 파일이든
+ * 잘렸고, 행에 결과 장수까지 붙으면서 이름에
  * 남는 자리가 더 줄었다. 레이어 패널과 같은 이유로 끌어서 맞춘다.
  */
 export const FILE_PANEL_MIN_WIDTH = 200;

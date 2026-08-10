@@ -100,9 +100,9 @@ test("an unknown version is refused", () => {
 
 // 납품 파일명은 기밀이라 디스크에 남으면 안 된다.
 test("the preview file name leaks nothing from the key", () => {
-  const name = previewFileName("/Volumes/x/HH03_SECRET.psd\n1700\ncomposite");
+  const name = previewFileName("/Volumes/x/ZZ00_BG-SampleINTShop000_CO_v01.psd\n1700\ncomposite");
   expect(name).toMatch(/^[0-9a-f]{16}\.png$/);
-  expect(name).not.toContain("HH03");
+  expect(name).not.toContain("ZZ00");
 });
 
 test("the same key always makes the same preview file name", () => {

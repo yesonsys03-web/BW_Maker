@@ -271,7 +271,7 @@ def _extract_rgba_masked(layer):
     마스크 달린 레이어를 layer.composite 없이 읽는다. 가드를 못 넘으면 None.
 
     **왜 있는가.** composite는 psd-tools의 float32 전체 경로다. 실측(2026-08-05,
-    HH03_BG-RosieEmporiumINTShop017_CO_v01.psd의 BG 그룹, 잎 140장):
+    납품본 한 판의 BG 그룹, 잎 140장):
 
         마스크 없는 잎  ~50 Mpx/s   29.9Mpx 0.52초, 메모리 미미
         마스크 있는 잎   ~4 Mpx/s   39.6Mpx 10.07초, +5.06GB
@@ -524,7 +524,7 @@ def _fast_mergeable(psd, layers, allow_clipping=False):
         빠른 경로 32건(58%) → 36건(65%)   빠른 361.3 → 397.6 Mpx
 
     풀린 4건은 3~6배 빨라졌다(그 파일들의 픽셀 시간 합 32.3초 → 7.7초). 그중
-    가장 큰 것이 VtINTVoxOffice006의 'BG' 9장 11.6초 → 1.8초다.
+    가장 큰 것이 어느 한 판의 'BG' 9장 11.6초 → 1.8초다.
 
     **`allow_clipping`은 오버레이 전용이다. 내보내기는 주지 않는다.**
     병합 대상 안에 base와 그 클리핑 잎이 함께 있으면 `_clipped_colour`가
@@ -553,7 +553,7 @@ def _fast_mergeable(psd, layers, allow_clipping=False):
 
     **이것으로 풀리지 않는 쪽을 적어 둔다.** 남은 느린 405.2 Mpx의 대부분은 잎이
     아니라 **조상 그룹**이 막고 있다(ancestor:mask 132.3 Mpx, ancestor:opacity
-    205.2 Mpx). 프로파일한 파일 VtINTVoxOffice069의 'BG'(38장 123.8초)와 'OL'
+    205.2 Mpx). 프로파일한 판 하나의 'BG'(38장 123.8초)와 'OL'
     (11장 68.4초)이 정확히 그 경우라 이 변경으로 1초도 줄지 않는다 — 'OL'은 잎이
     하나도 걸리지 않고 pass-through 그룹 'light2'의 마스크 하나에 걸려 있으며,
     'BG'는 거기에 잎 'LINE'의 OuterGlow가 더해진다. 그쪽을 풀려면 그룹의 자식을
