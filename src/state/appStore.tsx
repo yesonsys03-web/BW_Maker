@@ -9,6 +9,7 @@ import {
 } from "react";
 import { EngineRpcError, applyPreset, closeSession, openPsd, type SkippedLayer } from "../lib/engine";
 import { buildEntries, opsReducer, type OpsState } from "../lib/opsReducer";
+import type { ProjectEntry } from "../lib/project";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { EngineError, OpenResult, Operation, Preset, TreeNode } from "../lib/types";
 
@@ -77,6 +78,11 @@ export interface AppState {
    */
   matchedIdsByPath: Record<string, number[]>;
   errors: ErrorEntry[];
+  /**
+   * 프로젝트에서 복원한 파일의 수정시각. openSuccess가 이걸 보고 복원한 작업을
+   * 지킬지 정한다 — 아래 openSuccess 주석 참고.
+   */
+  restoredMtimeByPath: Record<string, number>;
 }
 
 export type AppAction =
@@ -101,7 +107,8 @@ export type AppAction =
   | { type: "removeFile"; path: string }
   | { type: "clearFiles" }
   | { type: "sessionRefreshed"; path: string; result: OpenResult }
-  | { type: "engineRestarted" };
+  | { type: "engineRestarted" }
+  | { type: "restoreProject"; entries: ProjectEntry[] };
 
 export const EMPTY_OPS: OpsState = {
   includedIds: [],
@@ -119,6 +126,7 @@ export const initialAppState: AppState = {
   opsByPath: {},
   matchedIdsByPath: {},
   errors: [],
+  restoredMtimeByPath: {},
 };
 
 function isGroup(node: TreeNode): boolean {
@@ -193,11 +201,22 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
     case "openSuccess": {
       const { path, result } = action;
+      // 복원한 파일인지, 그리고 그 사이 디스크에서 바뀌지 않았는지. `path in`으로
+      // 실제로 복원된 항목인지부터 확인하는 것이 중요하다 — 복원한 적 없는 파일은
+      // restoredMtimeByPath[path]도 result.mtime도 둘 다 undefined일 수 있고,
+      // 그 둘을 그냥 ===로 비교하면 "둘 다 없음"을 "수정시각이 같음"으로 오판해
+      // 평범하게 다시 연 파일의 옛 작업까지 지켜버린다.
+      const isRestoredMatch =
+        path in state.restoredMtimeByPath && state.restoredMtimeByPath[path] === result.mtime;
       // 새 세션이라 이 파일의 옛 매칭 결과는 버린다. **이 파일 것만** 버리는
       // 것이 요점이다 — 배경에서 파일을 여는 동안 보고 있는 파일의 "라인만"
       // 목록까지 비워지면 안 된다.
+      //
+      // 단, 프로젝트에서 복원한 매칭 결과는 예외다 — 수정시각이 그대로라면
+      // 그대로 붙든다. 지우면 캐시 키가 달라져 복원해둔 미리보기를 전부
+      // 다시 그린다(설계 7절).
       const matchedIdsByPath = { ...state.matchedIdsByPath };
-      delete matchedIdsByPath[path];
+      if (!isRestoredMatch) delete matchedIdsByPath[path];
       return {
         ...state,
         matchedIdsByPath,
@@ -213,7 +232,19 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           presetApplied: false,
           edited: false,
         }),
-        opsByPath: { ...state.opsByPath, [path]: buildInitialOpsState(result.tree) },
+        // 복원한 작업은 지킨다. 이 자리가 이 기능에서 제일 조용히 망가지는
+        // 곳이다 — 프로젝트를 열어 손으로 한 지정을 되살려 놓아도, 배경 큐가
+        // 그 파일을 여는 순간 여기서 초기 상태로 덮여 전부 사라진다.
+        //
+        // 지키는 조건은 **수정시각이 그대로일 때뿐**이다. 저장된 것은 전부
+        // 레이어 id이고 PSD가 바뀌면 id가 밀리므로, 그때 붙들면 "라인 지정"이
+        // 엉뚱한 레이어를 가리킨다(설계 4절).
+        opsByPath: {
+          ...state.opsByPath,
+          [path]: isRestoredMatch && state.opsByPath[path]
+            ? state.opsByPath[path]
+            : buildInitialOpsState(result.tree),
+        },
       };
     }
 
@@ -463,6 +494,25 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         matchedIdsByPath: {},
         files: state.files.map((f) => ({ path: f.path, status: "idle" })),
       };
+
+    case "restoreProject": {
+      const files: FileEntry[] = action.entries.map((e) => ({
+        path: e.path, status: "idle", tree: e.tree, mtime: e.mtime,
+      }));
+      const opsByPath: Record<string, OpsState> = {};
+      const matchedIdsByPath: Record<string, number[]> = {};
+      const restoredMtimeByPath: Record<string, number> = {};
+      for (const e of action.entries) {
+        opsByPath[e.path] = e.ops;
+        matchedIdsByPath[e.path] = e.matchedIds;
+        restoredMtimeByPath[e.path] = e.mtime;
+      }
+      return {
+        ...initialAppState,
+        files, opsByPath, matchedIdsByPath, restoredMtimeByPath,
+        activePath: files[0]?.path ?? null,
+      };
+    }
 
     default:
       return state;

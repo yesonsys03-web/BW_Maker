@@ -21,6 +21,7 @@ import {
   applyPresetEffect,
   buildInitialOpsState,
   EMPTY_OPS,
+  initialAppState,
   openFileEffect,
   removeFileEffect,
   type AppAction,
@@ -45,7 +46,9 @@ const preset: Preset = {
   lineColor: null,
 } as unknown as Preset;
 
-const initial: AppState = { files: [], activePath: null, opsByPath: {}, matchedIdsByPath: {}, errors: [] };
+const initial: AppState = {
+  files: [], activePath: null, opsByPath: {}, matchedIdsByPath: {}, errors: [], restoredMtimeByPath: {},
+};
 
 const leaf = (id: number, kind: string, visible = true): TreeNode => ({
   id,
@@ -922,5 +925,83 @@ describe("removeFileEffect (async orchestration against the mocked engine)", () 
       error: { message: "engine not running", traceback: "" },
     });
     expect(actions[1]).toEqual({ type: "removeFile", path: "/a.psd" });
+  });
+});
+
+// 프로젝트 파일 복원(Task 4). 저장해둔 작업을 스토어에 되살리는 것과, 배경 로드
+// 큐가 그 파일을 열 때 openSuccess가 그걸 초기 상태로 덮지 않는 것을 함께 본다 —
+// 이 파일에서 제일 조용히 망가지는 자리다.
+describe("restoreProject", () => {
+  const RESTORED_OPS = {
+    includedIds: [1, 2], previewHiddenIds: [2], soloIds: [], edgeColourIds: [],
+    manualLineIds: [2], ops: [], entries: [],
+  };
+  const RESTORED_TREE = [{
+    id: 1, name: "line", kind: "pixel", visible: true, opacity: 255, blendMode: "normal",
+    bbox: [0, 0, 4, 4], hasMask: false, hasPixels: true, path: ["line"],
+  }];
+
+  function restored() {
+    return appReducer(initialAppState, {
+      type: "restoreProject",
+      entries: [{
+        path: "/cuts/a.psd", mtime: 1700, tree: RESTORED_TREE as never, matchedIds: [1],
+        ops: RESTORED_OPS as never, previewKey: "k", previewFile: "a.png",
+      }],
+    } as never);
+  }
+
+  test("restoring a project seeds the list, the tree and the work", () => {
+    const s = restored();
+    expect(s.files.map((f) => f.path)).toEqual(["/cuts/a.psd"]);
+    expect(s.files[0].tree).toEqual(RESTORED_TREE);
+    expect(s.opsByPath["/cuts/a.psd"].manualLineIds).toEqual([2]);
+    expect(s.matchedIdsByPath["/cuts/a.psd"]).toEqual([1]);
+  });
+
+  // 배경 큐가 그 파일을 열면 openSuccess가 도는데, 그것이 초기 상태로 덮으면
+  // 복원한 의미가 없다 — 손으로 한 지정이 조용히 사라진다.
+  test("opening a restored file in the background keeps the restored work", () => {
+    const s = appReducer(restored(), {
+      type: "openSuccess",
+      path: "/cuts/a.psd",
+      result: {
+        sessionId: 7, width: 4, height: 4, colorMode: "RGB", depth: 8,
+        tree: RESTORED_TREE, mtime: 1700,
+      },
+    } as never);
+
+    expect(s.opsByPath["/cuts/a.psd"].manualLineIds).toEqual([2]);
+    expect(s.files[0].sessionId).toBe(7);
+  });
+
+  // matchedIdsByPath에도 같은 보장이 있어야 한다 — 이걸 지우면 미리보기 캐시
+  // 키가 달라져 복원해둔 미리보기를 전부 다시 그린다(설계 7절), 기능의 요점이
+  // 무너진다.
+  test("opening a restored file in the background keeps the restored match results", () => {
+    const s = appReducer(restored(), {
+      type: "openSuccess",
+      path: "/cuts/a.psd",
+      result: {
+        sessionId: 7, width: 4, height: 4, colorMode: "RGB", depth: 8,
+        tree: RESTORED_TREE, mtime: 1700,
+      },
+    } as never);
+
+    expect(s.matchedIdsByPath["/cuts/a.psd"]).toEqual([1]);
+  });
+
+  // 파일이 그 사이 바뀌었으면 복원본을 붙들면 안 된다 — id가 밀렸다.
+  test("opening a restored file whose mtime moved resets the work", () => {
+    const s = appReducer(restored(), {
+      type: "openSuccess",
+      path: "/cuts/a.psd",
+      result: {
+        sessionId: 7, width: 4, height: 4, colorMode: "RGB", depth: 8,
+        tree: RESTORED_TREE, mtime: 1899,
+      },
+    } as never);
+
+    expect(s.opsByPath["/cuts/a.psd"].manualLineIds).toEqual([]);
   });
 });
