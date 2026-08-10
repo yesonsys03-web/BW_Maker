@@ -229,7 +229,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           mtime: result.mtime,
           // 새로 연 파일이므로 자동 적용을 다시 걸어야 하고, 이전 세션에서의
           // 편집 표시도 함께 사라진다(ops 자체가 아래에서 초기화된다).
-          presetApplied: false,
+          //
+          // 단, 복원본을 그대로 붙드는 경우는 다르다 — 그 ops는 이전 세션에서
+          // 이미 프리셋 적용을 거친 뒤 아티스트가 손으로 편집한 결과다. 여기서
+          // false로 두면 로드 큐가 자동 적용을 다시 걸어 방금 지킨 opsByPath를
+          // applyPresetResult로 덮어써, 체크박스·병합 편집이 조용히 사라진다
+          // (App.tsx의 로드 큐 주석 참고).
+          presetApplied: isRestoredMatch,
           edited: false,
         }),
         // 복원한 작업은 지킨다. 이 자리가 이 기능에서 제일 조용히 망가지는
@@ -448,11 +454,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       // 다시 추가했을 때 옛 세션의 id가 되살아난다.
       const matchedIdsByPath = { ...state.matchedIdsByPath };
       delete matchedIdsByPath[action.path];
+      // 복원 mtime도 같은 이유로 지운다. 남겨두면 같은 경로를 다시 추가해 새
+      // 세션을 열었을 때, 그 mtime이 우연히 옛 기록과 같아 openSuccess가 이번
+      // 세션과 무관한 옛 작업/매칭을 그대로 붙들 수 있다.
+      const restoredMtimeByPath = { ...state.restoredMtimeByPath };
+      delete restoredMtimeByPath[action.path];
       return {
         ...state,
         files: state.files.filter((f) => f.path !== action.path),
         opsByPath,
         matchedIdsByPath,
+        restoredMtimeByPath,
         activePath: wasActive ? null : state.activePath,
       };
     }
@@ -670,8 +682,19 @@ export interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
-export function AppProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(appReducer, initialAppState);
+export function AppProvider({
+  children,
+  initialState,
+}: {
+  children: ReactNode;
+  /**
+   * 테스트 전용 훅. 프로젝트 복원(restoreProject)처럼, 화면을 실제로 조작하지
+   * 않고서는 도달할 수 없는 상태에서 시작해야 하는 테스트를 위한 것이다.
+   * 프로덕션 코드(main.tsx)는 넘기지 않으므로 initialAppState 그대로 시작한다.
+   */
+  initialState?: AppState;
+}) {
+  const [state, dispatch] = useReducer(appReducer, initialState ?? initialAppState);
 
   const addFiles = useCallback((paths: string[]) => dispatch({ type: "addFiles", paths }), []);
 

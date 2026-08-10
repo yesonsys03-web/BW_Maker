@@ -54,7 +54,9 @@ vi.mock("@tauri-apps/api/webview", () => ({
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import App from "./App";
 import { PreviewCanvas } from "./components/PreviewCanvas";
+import { loadPresets } from "./lib/presets";
 import { PreviewCache } from "./lib/previewCache";
+import { appReducer, initialAppState } from "./state/appStore";
 
 /** 테스트가 원하는 시점에 풀어주는 약속. 큐를 한 걸음씩 몰기 위한 것. */
 function deferred<T>() {
@@ -98,6 +100,29 @@ class FakeIntersectionObserver {
 }
 
 const PATHS = ["/cuts/a.psd", "/cuts/b.psd", "/cuts/c.psd"];
+
+/** 로드 큐의 자동 적용 경로를 켜기 위한 최소 프리셋. loadPresets를 오버라이드할 때만 쓴다. */
+const PRESET = {
+  name: "line 추출",
+  include: { type: "contains" as const, value: "line", caseSensitive: false },
+  excludeGroupPrefixes: [],
+  matchGroups: true,
+  includeHidden: true,
+  merge: "none" as const,
+  roleTokens: [],
+  mergeRule: "group" as const,
+  naming: "original" as const,
+  outputSuffix: "_LINE",
+  embedPreview: true,
+  lineColor: null,
+  splitLayers: false,
+  outputFormat: "psd" as const,
+  excludeTokens: [],
+  edgeLines: {
+    enabled: false, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64,
+    colourMode: "composite" as const, edgeMode: "region" as const,
+  },
+};
 
 function treeOf(ids: number[], visible = true) {
   return ids.map((id) => ({
@@ -241,6 +266,72 @@ test("resume picks the remaining files back up", async () => {
 
   click(screen.getByRole("button", { name: "재개" }));
   await waitFor(() => expect(opens).toHaveLength(3));
+});
+
+// 로드 큐는 프리셋이 선택되면 파일을 연 직후 자동으로 붙인다(위 큐 정의 부근).
+// 복원한 파일은 이미 이전 세션에서 프리셋을 거친 결과이므로, 큐가 다시 붙이면
+// 방금 복원해 지킨 체크박스·병합 편집이 조용히 새 매칭으로 덮인다. appStore의
+// openSuccess가 presetApplied를 정직하게 세워도, 이 큐가 그것을 확인하지 않으면
+// 아무 소용이 없다 — 둘이 같이 맞아야 한다.
+test("the load queue skips auto-apply for a restored file but still applies it to a plain one", async () => {
+  vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
+  engine.applyPreset.mockResolvedValue({ matchedLayerIds: [], operations: [] });
+
+  let seeded = appReducer(initialAppState, {
+    type: "restoreProject",
+    entries: [
+      {
+        path: "/cuts/restored.psd",
+        mtime: 1700,
+        tree: treeOf([1]) as never,
+        matchedIds: [1],
+        ops: {
+          includedIds: [1], previewHiddenIds: [], soloIds: [], edgeColourIds: [],
+          manualLineIds: [], ops: [], entries: [],
+        } as never,
+        previewKey: null,
+        previewFile: null,
+      },
+    ],
+  } as never);
+  seeded = appReducer(seeded, { type: "addFiles", paths: ["/cuts/plain.psd"] });
+
+  render(<App initialState={seeded} />);
+
+  // 복원한 파일이 먼저 열린다 — restoreProject가 목록 맨 앞에 넣는다.
+  await waitFor(() => expect(opens).toHaveLength(1));
+  expect(opens[0].path).toBe("/cuts/restored.psd");
+  // 프리셋이 선택될 때까지 기다린다. 그래야 아래 판정이 "프리셋이 아직 안 걸려서
+  // 안 불렸다"가 아니라 "복원본이라 걸지 않았다"임을 보장한다.
+  //
+  // PresetBar가 옵션을 그리는 렌더와, 그 선택이 App의 selectedPreset(→ presetRef)에
+  // 닿는 렌더는 한 박자 다르다(PresetBar의 onSelectedPresetChange effect가 그 다음
+  // 커밋에서 App의 state를 바꾸고, presetRef 동기화 effect는 또 그 다음이다).
+  // getByText가 성공한 시점에는 아직 presetRef가 못 따라왔을 수 있으므로, 실제
+  // 매크로태스크 틱을 하나 흘려보내 그 사슬이 다 돌게 한다.
+  await waitFor(() => expect(screen.getByText(PRESET.name)).toBeTruthy());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  opens[0].d.resolve({
+    sessionId: 1, width: 10, height: 10, colorMode: "RGB", depth: 8,
+    tree: treeOf([1]), mtime: 1700,
+  });
+  await waitFor(() => expect(screen.queryAllByText("열림").length).toBeGreaterThanOrEqual(1));
+
+  // 큐가 다음 파일로 넘어간다. 복원본에 자동 적용을 걸었다면 그 응답부터
+  // 기다려야 했겠지만, 걸지 않았으므로 곧바로 다음 파일이 열린다.
+  await waitFor(() => expect(opens).toHaveLength(2));
+  expect(opens[1].path).toBe("/cuts/plain.psd");
+
+  opens[1].d.resolve({
+    sessionId: 2, width: 10, height: 10, colorMode: "RGB", depth: 8,
+    tree: treeOf([1]), mtime: 999,
+  });
+  await waitFor(() => expect(screen.queryAllByText("열림").length).toBeGreaterThanOrEqual(2));
+
+  await waitFor(() => expect(engine.applyPreset).toHaveBeenCalledTimes(1));
+  // 복원본(세션 1)이 아니라 평범한 파일(세션 2)에만 걸렸다.
+  expect(engine.applyPreset).toHaveBeenCalledWith(2, PRESET);
 });
 
 test("no thumbnail is rendered while the load queue is running", async () => {

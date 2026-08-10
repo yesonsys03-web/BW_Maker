@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import { AppProvider, applyPresetEffect, openFileEffect, useAppStore, type FileEntry } from "./state/appStore";
+import { AppProvider, applyPresetEffect, openFileEffect, useAppStore, type AppState, type FileEntry } from "./state/appStore";
 import type { SkippedLayer } from "./lib/engine";
 import { FilePanel } from "./components/FilePanel";
 import { LayerTree } from "./components/LayerTree";
@@ -346,6 +346,15 @@ function AppShell() {
     void drainLoadQueue({
       pendingPaths: () => filesRef.current.filter((f) => f.status === "idle").map((f) => f.path),
       processPath: async (path) => {
+        // 열기 전 mtime을 미리 적어둔다 — 복원한 파일인지, 그리고 그 mtime이
+        // 지금 이 파일의 것인지를 열기 *뒤에* 판정하기 위해서다. openSuccess가
+        // dispatch한 presetApplied는 리듀서 안에서 곧바로 계산되지만, 이 컴포넌트가
+        // 그것을 다시 읽으려면 재렌더와 filesRef 갱신 effect를 거쳐야 하고, 그
+        // 시점은 여기서 보장할 수 없다 — 그래서 리듀서와 같은 조건(복원된
+        // mtime === 방금 연 mtime)을 여기서도 독립적으로 계산한다. restoreProject가
+        // 세운 FileEntry.mtime이 그 값이고, 평범하게 addFiles로 들어온 파일은 열기
+        // 전 mtime이 없으므로 이 판정은 항상 false다.
+        const priorMtime = filesRef.current.find((f) => f.path === path)?.mtime;
         // 아직 아무것도 안 보고 있으면 첫 파일을 띄워준다. 그 뒤로는 사람이
         // 보고 있는 화면을 뺏지 않는다.
         const result = await openFileEffect(dispatch, path, {
@@ -354,9 +363,14 @@ function AppShell() {
             openFailures.push({ path: failed, name: fileName(failed), message: error.message, traceback: error.traceback }),
         });
         const preset = presetRef.current;
+        // 복원한 파일이고 mtime이 그대로면 openSuccess가 이미 presetApplied를
+        // true로 세워 이전 세션의 편집을 지켰다(appStore.tsx의 openSuccess 주석
+        // 참고) — 그 위에 자동 적용을 또 걸면 방금 지킨 체크박스·병합 편집이
+        // 프리셋 매칭 결과로 조용히 덮인다.
+        const alreadyApplied = priorMtime !== undefined && priorMtime === result?.mtime;
         // 프리셋은 파일을 연 직후에 붙인다 — 그래야 세션이 아직 엔진의 LRU 안에
         // 있어서 다시 파싱하지 않는다.
-        if (result && preset) {
+        if (result && preset && !alreadyApplied) {
           const undrawable = await applyPresetEffect(dispatch, path, result.sessionId, preset);
           if (undrawable.length > 0) undrawableByPath.push({ path, layers: undrawable });
         }
@@ -961,9 +975,10 @@ function AppShell() {
   );
 }
 
-function App() {
+// initialState는 테스트 전용이다(AppProvider 주석 참고) — main.tsx는 넘기지 않는다.
+function App({ initialState }: { initialState?: AppState } = {}) {
   return (
-    <AppProvider>
+    <AppProvider initialState={initialState}>
       <AppShell />
     </AppProvider>
   );

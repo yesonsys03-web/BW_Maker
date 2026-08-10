@@ -641,6 +641,18 @@ describe("removeFile", () => {
     expect(s.matchedIdsByPath).not.toHaveProperty("/a.psd");
     expect(s.matchedIdsByPath["/b.psd"]).toEqual([2]);
   });
+
+  // opsByPath/matchedIdsByPath와 같은 자리에 있는 세 번째 칸이다. 여기서 안 지우면
+  // 같은 경로를 나중에 다시 추가해 새 세션을 열었을 때, 그 mtime이 옛 기록과 같을
+  // 경우 openSuccess가 이번 세션과 무관한 옛 작업/매칭을 그대로 붙들 수 있다.
+  test("drops the restored mtime record too", () => {
+    const s0 = twoFilesOpened();
+    const withRestored: AppState = { ...s0, restoredMtimeByPath: { "/a.psd": 1700, "/b.psd": 1800 } };
+    const s = appReducer(withRestored, { type: "removeFile", path: "/a.psd" });
+    expect(s.restoredMtimeByPath).not.toHaveProperty("/a.psd");
+    // 남은 파일 것은 그대로다 — 지우는 것은 뺀 파일 것뿐이다.
+    expect(s.restoredMtimeByPath["/b.psd"]).toBe(1800);
+  });
 });
 
 describe("sessionRefreshed (S2: transparent reopen after LRU eviction)", () => {
@@ -1003,5 +1015,34 @@ describe("restoreProject", () => {
     } as never);
 
     expect(s.opsByPath["/cuts/a.psd"].manualLineIds).toEqual([]);
+  });
+
+  // presetApplied가 정직해야 로드 큐가 자동 적용을 다시 걸지 않는다(App.tsx의
+  // 로드 큐 주석 참고) — 복원한 ops는 이전 세션에서 이미 프리셋을 거친 결과이므로,
+  // false로 남으면 큐가 그 위에 새 매칭을 덮어써 체크박스·병합 편집이 사라진다.
+  test("opening a restored file whose mtime matches marks presetApplied — the restored ops already came from a preset", () => {
+    const s = appReducer(restored(), {
+      type: "openSuccess",
+      path: "/cuts/a.psd",
+      result: {
+        sessionId: 7, width: 4, height: 4, colorMode: "RGB", depth: 8,
+        tree: RESTORED_TREE, mtime: 1700,
+      },
+    } as never);
+
+    expect(s.files[0].presetApplied).toBe(true);
+  });
+
+  // 평범하게 연 파일은 그대로 false여야 한다 — 로드 큐가 자동 적용을 걸 자리가
+  // 있어야 새로 연 파일에 프리셋이 붙는다.
+  test("opening a file that was never restored leaves presetApplied false", () => {
+    const opened = appReducer(initialAppState, { type: "addFiles", paths: ["/cuts/b.psd"] });
+    const s = appReducer(opened, {
+      type: "openSuccess",
+      path: "/cuts/b.psd",
+      result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree: [] },
+    });
+
+    expect(s.files[0].presetApplied).toBe(false);
   });
 });
