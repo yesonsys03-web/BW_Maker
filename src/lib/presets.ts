@@ -125,84 +125,87 @@ const NAMING_MODES = new Set(["pathPrefix", "original"]);
 
 /**
  * Validates and normalizes one parsed JSON entry into a `Preset`. Throws a
- * descriptive error (including the array index and offending field) on any
- * shape mismatch — valid-but-wrong-shaped JSON must never silently pass
- * through as a `Preset` and blow up later deep inside PresetDialog/engine
- * calls with an opaque TypeError.
+ * descriptive error (including the field name and path) on any shape mismatch —
+ * valid-but-wrong-shaped JSON must never silently pass through as a `Preset`
+ * and blow up later deep inside PresetDialog/engine calls with an opaque TypeError.
+ *
+ * @param value The value to validate
+ * @param index The array index (used in default prefix)
+ * @param prefix Optional prefix for error messages (default: `presets.json[index]`)
  */
-function validatePreset(value: unknown, index: number): Preset {
-  const prefix = `presets.json[${index}]`;
+export function validatePreset(value: unknown, index: number, prefix?: string): Preset {
+  const msgPrefix = prefix ?? `presets.json[${index}]`;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${prefix}: 객체가 아닙니다.`);
+    throw new Error(`${msgPrefix}: 객체가 아닙니다.`);
   }
   const v = value as Record<string, unknown>;
 
-  if (typeof v.name !== "string") throw new Error(`${prefix}.name: 문자열이 아닙니다.`);
+  if (typeof v.name !== "string") throw new Error(`${msgPrefix}.name: 문자열이 아닙니다.`);
 
   if (typeof v.include !== "object" || v.include === null) {
-    throw new Error(`${prefix}.include: 객체가 아닙니다.`);
+    throw new Error(`${msgPrefix}.include: 객체가 아닙니다.`);
   }
   const include = v.include as Record<string, unknown>;
   if (typeof include.type !== "string" || !INCLUDE_TYPES.has(include.type)) {
-    throw new Error(`${prefix}.include.type: "contains" 또는 "regex"가 아닙니다.`);
+    throw new Error(`${msgPrefix}.include.type: "contains" 또는 "regex"가 아닙니다.`);
   }
-  if (typeof include.value !== "string") throw new Error(`${prefix}.include.value: 문자열이 아닙니다.`);
+  if (typeof include.value !== "string") throw new Error(`${msgPrefix}.include.value: 문자열이 아닙니다.`);
   if (typeof include.caseSensitive !== "boolean") {
-    throw new Error(`${prefix}.include.caseSensitive: boolean이 아닙니다.`);
+    throw new Error(`${msgPrefix}.include.caseSensitive: boolean이 아닙니다.`);
   }
 
   if (!Array.isArray(v.excludeGroupPrefixes) || !v.excludeGroupPrefixes.every((s) => typeof s === "string")) {
-    throw new Error(`${prefix}.excludeGroupPrefixes: 문자열 배열이 아닙니다.`);
+    throw new Error(`${msgPrefix}.excludeGroupPrefixes: 문자열 배열이 아닙니다.`);
   }
-  if (typeof v.matchGroups !== "boolean") throw new Error(`${prefix}.matchGroups: boolean이 아닙니다.`);
-  if (typeof v.includeHidden !== "boolean") throw new Error(`${prefix}.includeHidden: boolean이 아닙니다.`);
+  if (typeof v.matchGroups !== "boolean") throw new Error(`${msgPrefix}.matchGroups: boolean이 아닙니다.`);
+  if (typeof v.includeHidden !== "boolean") throw new Error(`${msgPrefix}.includeHidden: boolean이 아닙니다.`);
   // byRole은 요소별 병합으로 대체되기 전 잠깐 존재했던 이름이다. 그 사이에
   // 저장된 프리셋이 로드에서 튕기지 않도록 새 이름으로 읽어준다.
   if (v.merge === "byRole") v.merge = "byElement";
   if (typeof v.merge !== "string" || !MERGE_MODES.has(v.merge)) {
-    throw new Error(`${prefix}.merge: "none"/"all"/"perGroup" 중 하나가 아닙니다.`);
+    throw new Error(`${msgPrefix}.merge: "none"/"all"/"perGroup" 중 하나가 아닙니다.`);
   }
   if (typeof v.naming !== "string" || !NAMING_MODES.has(v.naming)) {
-    throw new Error(`${prefix}.naming: "pathPrefix" 또는 "original"이 아닙니다.`);
+    throw new Error(`${msgPrefix}.naming: "pathPrefix" 또는 "original"이 아닙니다.`);
   }
-  if (typeof v.outputSuffix !== "string") throw new Error(`${prefix}.outputSuffix: 문자열이 아닙니다.`);
+  if (typeof v.outputSuffix !== "string") throw new Error(`${msgPrefix}.outputSuffix: 문자열이 아닙니다.`);
   // roleTokens도 나중에 추가된 항목이라 그 전에 저장된 파일에는 없다 — 없으면
   // 기본값으로 읽고, 들어있는데 모양이 어긋나면 통과시키지 않는다.
   // splitLayers도 나중에 추가된 항목 — 없으면 기본값(합쳐서 한 파일)으로 읽는다.
   if (v.splitLayers !== undefined && typeof v.splitLayers !== "boolean") {
-    throw new Error(`${prefix}.splitLayers: boolean이 아닙니다.`);
+    throw new Error(`${msgPrefix}.splitLayers: boolean이 아닙니다.`);
   }
   // mergeRule도 나중에 추가된 항목 — 없으면 기존 동작(역할 접미사)으로 읽는다.
   if (v.mergeRule !== undefined && (typeof v.mergeRule !== "string" || !MERGE_RULES.has(v.mergeRule))) {
-    throw new Error(`${prefix}.mergeRule: "role"/"group"/"plane" 중 하나가 아닙니다.`);
+    throw new Error(`${msgPrefix}.mergeRule: "role"/"group"/"plane" 중 하나가 아닙니다.`);
   }
   if (v.roleTokens !== undefined) {
     if (!Array.isArray(v.roleTokens) || !v.roleTokens.every((t) => typeof t === "string")) {
-      throw new Error(`${prefix}.roleTokens: 문자열 배열이 아닙니다.`);
+      throw new Error(`${msgPrefix}.roleTokens: 문자열 배열이 아닙니다.`);
     }
   }
   // excludeTokens도 나중에 추가된 항목 — 없으면 기본 어휘로 읽는다. 빈 배열은
   // "제외하지 않겠다"는 뜻이므로 기본값으로 되돌리지 않는다.
   if (v.excludeTokens !== undefined) {
     if (!Array.isArray(v.excludeTokens) || !v.excludeTokens.every((t) => typeof t === "string")) {
-      throw new Error(`${prefix}.excludeTokens: 문자열 배열이 아닙니다.`);
+      throw new Error(`${msgPrefix}.excludeTokens: 문자열 배열이 아닙니다.`);
     }
   }
-  if (typeof v.embedPreview !== "boolean") throw new Error(`${prefix}.embedPreview: boolean이 아닙니다.`);
+  if (typeof v.embedPreview !== "boolean") throw new Error(`${msgPrefix}.embedPreview: boolean이 아닙니다.`);
   // lineColor는 나중에 추가된 항목이라, 그 이전에 저장된 presets.json에는 아예
   // 없다. 없는 것은 "원본 색 유지"(null)로 읽는다 — 형식이 깨진 값과 달리
   // 구버전 파일은 잘못된 것이 아니기 때문이다. 반대로 들어있는데 형식이
   // 어긋나면 통과시키지 않는다.
   if (v.lineColor !== undefined && v.lineColor !== null) {
     if (typeof v.lineColor !== "string" || !isValidLineColor(v.lineColor)) {
-      throw new Error(`${prefix}.lineColor: null 또는 "#RRGGBB" 형식이 아닙니다.`);
+      throw new Error(`${msgPrefix}.lineColor: null 또는 "#RRGGBB" 형식이 아닙니다.`);
     }
   }
   // outputFormat도 나중에 추가된 항목이라 그 이전에 저장된 presets.json에는
   // 아예 없다. 없는 것은 "원본 따름"(psd)으로 읽는다 — 구버전 파일은 잘못된
   // 것이 아니기 때문이다. 반대로 들어있는데 모르는 값이면 통과시키지 않는다.
   if (v.outputFormat !== undefined && !OUTPUT_FORMATS.has(v.outputFormat as string)) {
-    throw new Error(`${prefix}.outputFormat: "psd", "png", "jpg" 중 하나가 아닙니다.`);
+    throw new Error(`${msgPrefix}.outputFormat: "psd", "png", "jpg" 중 하나가 아닙니다.`);
   }
   // edgeLines도 나중에 추가된 항목이라 그 이전 presets.json에는 없다. 없는 것은
   // 꺼짐으로 읽는다 — 구버전 파일은 잘못된 것이 아니다. 반대로 들어있는데 형식이
@@ -216,11 +219,11 @@ function validatePreset(value: unknown, index: number): Preset {
     v.edgeLines !== undefined &&
     (typeof v.edgeLines !== "object" || v.edgeLines === null || Array.isArray(v.edgeLines))
   ) {
-    throw new Error(`${prefix}.edgeLines: 객체가 아닙니다.`);
+    throw new Error(`${msgPrefix}.edgeLines: 객체가 아닙니다.`);
   }
   const edge = { ...DEFAULT_EDGE_LINES, ...((v.edgeLines as object | undefined) ?? {}) };
   if (typeof edge.enabled !== "boolean") {
-    throw new Error(`${prefix}.edgeLines.enabled: boolean이 아닙니다.`);
+    throw new Error(`${msgPrefix}.edgeLines.enabled: boolean이 아닙니다.`);
   }
   for (const key of ["threshold", "gap", "width", "minLength", "lineAlpha"] as const) {
     if (
@@ -229,7 +232,7 @@ function validatePreset(value: unknown, index: number): Preset {
       !Number.isInteger(edge[key]) ||
       edge[key] < 0
     ) {
-      throw new Error(`${prefix}.edgeLines.${key}: 0 이상의 정수가 아닙니다.`);
+      throw new Error(`${msgPrefix}.edgeLines.${key}: 0 이상의 정수가 아닙니다.`);
     }
   }
   // 저장된 프리셋에는 이 두 키가 없다(각 옵션이 생기기 전에 저장된 것들). 위의
@@ -238,10 +241,10 @@ function validatePreset(value: unknown, index: number): Preset {
   // 이라, edgeMode가 없던 예전 프리셋은 이제 새 검출을 쓴다 — region이 옛 change를
   // 밀어낸 이유가 바로 아티스트가 change를 결함으로 신고했기 때문이다(설계 문서 3절).
   if (edge.colourMode !== "composite" && edge.colourMode !== "paste") {
-    throw new Error(`${prefix}.edgeLines.colourMode: composite 또는 paste가 아닙니다.`);
+    throw new Error(`${msgPrefix}.edgeLines.colourMode: composite 또는 paste가 아닙니다.`);
   }
   if (edge.edgeMode !== "region" && edge.edgeMode !== "change") {
-    throw new Error(`${prefix}.edgeLines.edgeMode: region 또는 change가 아닙니다.`);
+    throw new Error(`${msgPrefix}.edgeLines.edgeMode: region 또는 change가 아닙니다.`);
   }
 
   return {

@@ -51,6 +51,144 @@ test("the same key always makes the same preview file name", () => {
   expect(previewFileName("k")).not.toBe(previewFileName("k2"));
 });
 
+// 이하는 검증 가드들이 진짜 작동하는지 확인하는 테스트. 각각 특정 필드를
+// 망가뜨려서 그 가드가 거절하는지 확인한다.
+// 주의: 각 테스트는 projectOf()를 JSON으로 직렬화해서 복사본을 만든 후 수정한다.
+
+test("path not a string is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  (p.files as Record<string, unknown>[])[0].path = 123;
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/path/);
+});
+
+test("tree not an array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  (p.files as Record<string, unknown>[])[0].tree = "not an array";
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/tree.*배열/);
+});
+
+test("tree node without id is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const node = { name: "x", kind: "pixel" };
+  (p.files as Record<string, unknown>[])[0].tree = [node];
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/\.id/);
+});
+
+test("tree node without name is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const node = { id: 1, kind: "pixel" };
+  (p.files as Record<string, unknown>[])[0].tree = [node];
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/\.name/);
+});
+
+test("tree node without kind is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const node = { id: 1, name: "x" };
+  (p.files as Record<string, unknown>[])[0].tree = [node];
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/\.kind/);
+});
+
+test("tree node with child without id is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const node = {
+    id: 1, name: "x", kind: "pixel",
+    children: [{ name: "y", kind: "pixel" }],
+  };
+  (p.files as Record<string, unknown>[])[0].tree = [node];
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/children\[0\]\.id/);
+});
+
+test("matchedIds not a number array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  (p.files as Record<string, unknown>[])[0].matchedIds = ["not", "numbers"];
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/matchedIds/);
+});
+
+test("includedIds not a number array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const ops = ((p.files as Record<string, unknown>[])[0].ops as Record<string, unknown>);
+  ops.includedIds = "not an array";
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/includedIds/);
+});
+
+test("previewHiddenIds not a number array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const ops = ((p.files as Record<string, unknown>[])[0].ops as Record<string, unknown>);
+  ops.previewHiddenIds = [1, "not a number"];
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/previewHiddenIds/);
+});
+
+test("soloIds not a number array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const ops = ((p.files as Record<string, unknown>[])[0].ops as Record<string, unknown>);
+  ops.soloIds = null;
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/soloIds/);
+});
+
+test("edgeColourIds not a number array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const ops = ((p.files as Record<string, unknown>[])[0].ops as Record<string, unknown>);
+  ops.edgeColourIds = 42;
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/edgeColourIds/);
+});
+
+test("manualLineIds not a number array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const ops = ((p.files as Record<string, unknown>[])[0].ops as Record<string, unknown>);
+  ops.manualLineIds = { not: "array" };
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/manualLineIds/);
+});
+
+test("ops.ops not an array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const ops = ((p.files as Record<string, unknown>[])[0].ops as Record<string, unknown>);
+  ops.ops = "not an array";
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/ops\.ops/);
+});
+
+test("ops.entries not an array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  const ops = ((p.files as Record<string, unknown>[])[0].ops as Record<string, unknown>);
+  ops.entries = 123;
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/entries/);
+});
+
+test("previewKey neither null nor string is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  (p.files as Record<string, unknown>[])[0].previewKey = 123;
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/previewKey/);
+});
+
+test("previewFile neither null nor string is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  (p.files as Record<string, unknown>[])[0].previewFile = false;
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/previewFile/);
+});
+
+test("top-level not an object is refused", () => {
+  expect(() => parseProject("123")).toThrow(/객체/);
+});
+
+test("files not an array is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  p.files = "not an array";
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/files.*배열/);
+});
+
+test("invalid preset is refused", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as Record<string, unknown>;
+  p.preset = "not a preset";
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/preset/);
+});
+
+test("preset can be null", () => {
+  const p = JSON.parse(JSON.stringify(projectOf())) as unknown as ProjectFile;
+  p.preset = null;
+  const serialized = JSON.stringify(p);
+  const back = parseProject(serialized);
+  expect(back.preset).toBeNull();
+});
+
 import { reconcileProject } from "./project";
 
 function entryAt(path: string, mtime: number) {

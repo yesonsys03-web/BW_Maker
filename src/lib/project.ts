@@ -1,3 +1,4 @@
+import { validatePreset } from "./presets";
 import type { OpsState } from "./opsReducer";
 import type { Preset, TreeNode } from "./types";
 
@@ -25,8 +26,9 @@ export interface ProjectFile {
  * 캐시 키를 previews/ 안의 파일 이름으로 바꾼다.
  *
  * 키에는 납품 파일 경로가 들어 있고 그 이름은 기밀이라 디스크에 남으면 안 된다.
- * FNV-1a 64비트를 32비트 둘로 나눠 돌린다 — 충돌 저항이 목적이 아니라 이름을
- * 짓는 것이 목적이고, 어긋나면 아래 대조(Task 5)에서 걸린다.
+ * 두 개의 서로 다른 해시 함수를 32비트 결과로 실어 16진 8자씩 총 16자를 만든다
+ * (h1은 FNV-1a, h2는 Murmur3 finalizer상수 0x85ebca6b로 섞는다). 충돌 저항이
+ * 목적이 아니라 이름을 짓는 것이 목적이고, 어긋나면 아래 대조(Task 5)에서 걸린다.
  */
 export function previewFileName(key: string): string {
   let h1 = 0x811c9dc5;
@@ -44,6 +46,33 @@ function numberArray(v: unknown, where: string): number[] {
     throw new Error(`${where}: 숫자 배열이 아닙니다.`);
   }
   return v as number[];
+}
+
+/**
+ * 트리 노드가 최소한의 모양을 갖췄는지 확인한다. 각 노드는 non-null 객체이고
+ * 숫자 id, 문자열 name·kind를 가져야 한다. children이 있으면 재귀로 검증한다.
+ * 깊은 스키마 검증이 아니라 — 로드 시점에 레이어 패널이 .id/.name/.kind를
+ * 읽고 그걸 렌더링해야 하므로, 그 최소한만 거절하고 나머지는 엔진이 준 대로 믿는다.
+ */
+function validateTreeNode(v: unknown, where: string): TreeNode {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    throw new Error(`${where}: 객체가 아닙니다.`);
+  }
+  const node = v as Record<string, unknown>;
+  if (typeof node.id !== "number") throw new Error(`${where}.id: 숫자가 아닙니다.`);
+  if (typeof node.name !== "string") throw new Error(`${where}.name: 문자열이 아닙니다.`);
+  if (typeof node.kind !== "string") throw new Error(`${where}.kind: 문자열이 아닙니다.`);
+  if (Array.isArray(node.children)) {
+    (node.children as unknown[]).forEach((child, i) => {
+      validateTreeNode(child, `${where}.children[${i}]`);
+    });
+  }
+  return v as TreeNode;
+}
+
+function validateTreeArray(v: unknown, where: string): TreeNode[] {
+  if (!Array.isArray(v)) throw new Error(`${where}: 배열이 아닙니다.`);
+  return v.map((node, i) => validateTreeNode(node, `${where}[${i}]`));
 }
 
 function validateOps(v: unknown, where: string): OpsState {
@@ -67,7 +96,7 @@ function validateEntry(v: unknown, i: number): ProjectEntry {
   if (typeof e.mtime !== "number" || !Number.isFinite(e.mtime)) {
     throw new Error(`${where}.mtime: 숫자가 아닙니다.`);
   }
-  if (!Array.isArray(e.tree)) throw new Error(`${where}.tree: 배열이 아닙니다.`);
+  const tree = validateTreeArray(e.tree, `${where}.tree`);
   numberArray(e.matchedIds, `${where}.matchedIds`);
   validateOps(e.ops, `${where}.ops`);
   if (e.previewKey !== null && typeof e.previewKey !== "string") {
@@ -79,7 +108,7 @@ function validateEntry(v: unknown, i: number): ProjectEntry {
   return {
     path: e.path,
     mtime: e.mtime,
-    tree: e.tree as TreeNode[],
+    tree,
     matchedIds: e.matchedIds as number[],
     ops: e.ops as OpsState,
     previewKey: e.previewKey as string | null,
@@ -94,9 +123,13 @@ export function parseProject(raw: string): ProjectFile {
   const p = v as Record<string, unknown>;
   if (p.version !== 1) throw new Error(`project.json version: 1이 아닙니다(${String(p.version)}).`);
   if (!Array.isArray(p.files)) throw new Error("project.json files: 배열이 아닙니다.");
+  let preset: Preset | null = null;
+  if (p.preset !== undefined && p.preset !== null) {
+    preset = validatePreset(p.preset, 0, "project.json preset");
+  }
   return {
     version: 1,
-    preset: (p.preset as Preset | null) ?? null,
+    preset,
     files: p.files.map(validateEntry),
   };
 }
