@@ -27,6 +27,7 @@ const engine = vi.hoisted(() => ({
   onEngineEvent: vi.fn(),
   onEngineDead: vi.fn(),
   callEngine: vi.fn(),
+  psdMtimes: vi.fn(),
 }));
 
 vi.mock("./lib/engine", () => ({
@@ -44,6 +45,13 @@ vi.mock("./lib/presets", async (orig) => ({
   savePresets: vi.fn(async () => {}),
 }));
 
+// 프로젝트 폴더 I/O는 Rust 커맨드를 거치므로(projectFs.ts) 여기서는 통째로 가짜다.
+// 이 테스트가 보려는 것은 디스크가 아니라 **무엇을 써 보내는가**이다.
+vi.mock("./lib/projectFs", () => ({
+  loadProjectFrom: vi.fn(),
+  saveProjectTo: vi.fn(async () => {}),
+}));
+
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => undefined) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
@@ -51,11 +59,13 @@ vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
 }));
 
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import App from "./App";
 import { PreviewCanvas } from "./components/PreviewCanvas";
 import { loadPresets } from "./lib/presets";
-import { PreviewCache } from "./lib/previewCache";
+import { PreviewCache, previewRenderSpec } from "./lib/previewCache";
+import { previewFileName, type ProjectEntry, type ProjectFile } from "./lib/project";
+import { loadProjectFrom, saveProjectTo } from "./lib/projectFs";
 import { appReducer, initialAppState } from "./state/appStore";
 
 /** 테스트가 원하는 시점에 풀어주는 약속. 큐를 한 걸음씩 몰기 위한 것. */
@@ -775,4 +785,174 @@ test("the hand-off to a latched render never reports the engine idle", async () 
   await waitFor(() => expect(engine.renderPreview).toHaveBeenCalledTimes(2));
 
   expect(onRenderingChange).not.toHaveBeenCalledWith(false);
+});
+
+/**
+ * 프로젝트 배선(Task 6). 여기서 잠그는 것은 전부 "테스트는 초록불인데 아티스트의
+ * 작업이 조용히 사라지는" 경로다 — 이 기능에서 그런 문이 지금까지 여섯 나왔다.
+ */
+const RESTORED = "/cuts/restored.psd";
+
+/** 저장된 프로젝트 항목 하나. previewKey는 실제 키 함수로 만든다(대조가 맞아야 한다). */
+function projectWithOnePreview(): { project: ProjectFile; previews: Map<string, string>; key: string; previewFile: string } {
+  const tree = treeOf([1, 2]);
+  const ops = {
+    includedIds: [1, 2], previewHiddenIds: [], soloIds: [], edgeColourIds: [],
+    manualLineIds: [], ops: [],
+    // 손으로 병합한 결과. 프리셋을 다시 걸면 사라지므로 "1장"이 남아 있다는 것이
+    // 곧 복원한 편집이 살아남았다는 증거다.
+    entries: [{ entryId: -1, sourceIds: [1, 2], name: "MERGED" }],
+  };
+  // 앱에는 선택된 프리셋이 없으므로(loadPresets가 []) 색·경계선은 양쪽 다 null이다.
+  const plan = previewRenderSpec(
+    { path: RESTORED, mtime: 1700 }, tree as never,
+    ops.includedIds, ops.previewHiddenIds, ops.soloIds, null, [1, 2], null, ops.edgeColourIds
+  );
+  const key = plan.key!;
+  const previewFile = previewFileName(key);
+  const entry: ProjectEntry = {
+    path: RESTORED, mtime: 1700, tree: tree as never, matchedIds: [1, 2],
+    ops: ops as never, previewKey: key, previewFile,
+  };
+  return {
+    project: { version: 1, preset: null, files: [entry] },
+    previews: new Map([[previewFile, "data:image/png;base64,RESTORED"]]),
+    key,
+    previewFile,
+  };
+}
+
+/** "프로젝트 열기..."를 눌러 위 프로젝트를 연 상태까지 간다. */
+async function openProject(fixture = projectWithOnePreview()) {
+  vi.mocked(loadProjectFrom).mockResolvedValue({ project: fixture.project, previews: fixture.previews });
+  engine.psdMtimes.mockResolvedValue({ [RESTORED]: 1700 });
+  vi.mocked(openDialog).mockResolvedValue("/proj/작업.bwproj" as never);
+
+  click(screen.getByRole("button", { name: "프로젝트 열기..." }));
+  // ProjectBar가 폴더 이름을 보이면 handleProjectOpen이 끝까지 갔다는 뜻이다.
+  await waitFor(() => expect(screen.getByText("작업.bwproj")).toBeTruthy());
+  return fixture;
+}
+
+/**
+ * 정정 4. buildProject가 previewPlanFor를 쓰면 sessionId가 없는 복원 항목에서
+ * null을 받아, **프로젝트를 열고 파일이 열리기 전에 저장하는 것만으로** 모든
+ * 파일의 previewKey/previewFile이 null이 된다. previews/의 PNG는 새 저장에서
+ * 빠지고 다음에 열면 그림 없이 복원된다 — 에러도 경고도 없이.
+ */
+test("saving right after opening a project keeps the restored previews", async () => {
+  render(<App />);
+  const fixture = await openProject();
+
+  // 아직 아무 파일도 안 열렸다(openPsd는 붙잡혀 있다) — 저장은 이 상태에서 난다.
+  expect(opens).toHaveLength(1);
+  expect(screen.queryAllByText("열림")).toHaveLength(0);
+
+  click(screen.getByRole("button", { name: "프로젝트 저장" }));
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  const [dir, saved, previews] = vi.mocked(saveProjectTo).mock.calls[0];
+  expect(dir).toBe("/proj/작업.bwproj");
+  expect(saved.files).toHaveLength(1);
+  expect(saved.files[0].previewKey).toBe(fixture.key);
+  expect(saved.files[0].previewFile).toBe(fixture.previewFile);
+  expect(previews.get(fixture.previewFile)).toBe("data:image/png;base64,RESTORED");
+});
+
+/**
+ * 정정 6. engineRestarted는 모든 FileEntry를 { path, status: "idle" }로 갈아치워
+ * tree와 mtime을 지운다(opsByPath는 남는다). "없으면 건너뛴다"로 두면 그 직후의
+ * ⌘S 한 번이 files: []인 project.json으로 기존 폴더를 덮어쓴다.
+ */
+test("saving after an engine restart neither loses the files nor writes an empty project", async () => {
+  let deadCallback: ((payload: { stderrTail?: string[] }) => void) | undefined;
+  engine.onEngineDead.mockImplementation((cb: (payload: { stderrTail?: string[] }) => void) => {
+    deadCallback = cb;
+    return Promise.resolve(() => {});
+  });
+
+  render(<App />);
+  const fixture = await openProject();
+
+  deadCallback?.({ stderrTail: [] });
+  await waitFor(() => expect(screen.getByRole("button", { name: "재시작" })).toBeTruthy());
+  click(screen.getByRole("button", { name: "재시작" }));
+  // 파일 항목이 초기화됐다 — tree도 mtime도 사라진 상태다.
+  await waitFor(() => expect(screen.getAllByText("대기").length).toBeGreaterThanOrEqual(1));
+
+  click(screen.getByRole("button", { name: "프로젝트 저장" }));
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  const [, saved] = vi.mocked(saveProjectTo).mock.calls[0];
+  // 빈 프로젝트가 아니다. 열려 있던 프로젝트의 tree/mtime으로 메워서 쓴다.
+  expect(saved.files).toHaveLength(1);
+  expect(saved.files[0].path).toBe(RESTORED);
+  expect(saved.files[0].mtime).toBe(1700);
+  expect(saved.files[0].ops.entries).toHaveLength(1);
+  expect(saved.files[0].previewFile).toBe(fixture.previewFile);
+});
+
+/**
+ * 같은 결함의 다른 쪽 — 메울 원본이 없는 세션(프로젝트를 연 적이 없다). 그때는
+ * 저장을 **거절**해야 한다. 조용히 반쪽짜리를 쓰는 것보다 아무것도 안 쓰는 편이 낫다.
+ */
+test("saving with nothing to fall back on is refused instead of writing a hollow project", async () => {
+  let deadCallback: ((payload: { stderrTail?: string[] }) => void) | undefined;
+  engine.onEngineDead.mockImplementation((cb: (payload: { stderrTail?: string[] }) => void) => {
+    deadCallback = cb;
+    return Promise.resolve(() => {});
+  });
+  vi.mocked(openDialog).mockResolvedValue(PATHS as never);
+  // 저장한 적 없는 세션이라 "프로젝트 저장"이 위치를 묻는다.
+  vi.mocked(saveDialog).mockResolvedValue("/proj/새작업.bwproj");
+
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+
+  deadCallback?.({ stderrTail: [] });
+  await waitFor(() => expect(screen.getByRole("button", { name: "재시작" })).toBeTruthy());
+  click(screen.getByRole("button", { name: "재시작" }));
+  await waitFor(() => expect(screen.queryAllByText("열림")).toHaveLength(0));
+
+  click(screen.getByRole("button", { name: "프로젝트 저장" }));
+  await waitFor(() => expect(screen.getByText(/레이어 정보가 지금 없습니다/)).toBeTruthy());
+  expect(saveProjectTo).not.toHaveBeenCalled();
+  // 메시지에 납품 경로가 있으면 안 된다 — 개수만 말한다.
+  expect(screen.queryByText(new RegExp(PATHS[0]))).toBeNull();
+});
+
+/**
+ * 정정 5. 로드 큐의 processPath가 priorRestoredMtime을 `await openFileEffect`
+ * **앞에서** 잡으면, 같은 경로의 열기가 진행 중일 때 restoreProject가 착지하는
+ * 순간 두 판정이 갈린다: 리듀서의 openSuccess는 새 맵을 보고 ops를 지키는데
+ * (presetApplied: true) 큐만 옛 undefined를 들고 프리셋을 걸어 그 ops를 덮는다.
+ * Task 4 재리뷰가 찾았지만 배선이 없어 재현하지 못한 자리다.
+ */
+test("a project that lands while the queue is opening that same file does not get its work overwritten", async () => {
+  vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
+  engine.applyPreset.mockResolvedValue({ matchedLayerIds: [], operations: [] });
+
+  const seeded = appReducer(initialAppState, { type: "addFiles", paths: [RESTORED] });
+  render(<App initialState={seeded} />);
+
+  // 큐가 그 파일을 여는 중이다(응답은 아직 안 왔다).
+  await waitFor(() => expect(opens).toHaveLength(1));
+  expect(opens[0].path).toBe(RESTORED);
+  await waitFor(() => expect(screen.getByText(PRESET.name)).toBeTruthy());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // 그 사이에 프로젝트가 착지한다.
+  await openProject();
+
+  // 이제 진행 중이던 열기가 끝난다. 디스크의 PSD는 그대로이므로 mtime도 그대로다.
+  opens[0].d.resolve({
+    sessionId: 1, width: 10, height: 10, colorMode: "RGB", depth: 8,
+    tree: treeOf([1, 2]), mtime: 1700,
+  });
+
+  // 복원한 병합("1장")이 남아 있어야 한다. 프리셋을 다시 걸었다면 매칭 결과([])로
+  // 덮여 entries가 비고 "라인필요"가 됐을 것이다.
+  await waitFor(() => expect(screen.getByText("1장")).toBeTruthy());
+  expect(engine.applyPreset).not.toHaveBeenCalled();
 });

@@ -27,7 +27,11 @@ function fileAt(path: string): FileEntry {
   return { path, status: "open", sessionId: 1, mtime: 1, presetApplied: true } as FileEntry;
 }
 
-function renderPanel(files: FileEntry[], entryCounts: Record<string, number>) {
+function renderPanel(
+  files: FileEntry[],
+  entryCounts: Record<string, number>,
+  staleProjectPaths: string[] = []
+) {
   return render(
     <FilePanel
       files={files}
@@ -36,6 +40,7 @@ function renderPanel(files: FileEntry[], entryCounts: Record<string, number>) {
       prefetchProgress={null}
       stopped={null}
       entryCounts={entryCounts}
+      staleProjectPaths={staleProjectPaths}
       onResizeStart={vi.fn()}
       onResizeMove={vi.fn()}
       onResizeEnd={vi.fn()}
@@ -76,6 +81,22 @@ test("the badge replaces the sheet count rather than sitting beside it", () => {
   expect(screen.getByText("라인필요")).toBeTruthy();
   // "0장"까지 같이 뜨면 같은 말을 두 번 하는 셈이다.
   expect(screen.queryByText("0장")).toBeNull();
+});
+
+/**
+ * 프로젝트를 열 때 수정시각이 달라 작업을 버린 파일. 조용히 버리면 아티스트는
+ * 자기가 한 지정이 왜 없는지 알 수 없다(설계 4절).
+ */
+test("a file whose PSD changed since the project was saved says so", () => {
+  renderPanel(
+    [fileAt("/cuts/moved.psd"), fileAt("/cuts/kept.psd")],
+    { "/cuts/moved.psd": 3, "/cuts/kept.psd": 3 },
+    ["/cuts/moved.psd"]
+  );
+
+  expect(screen.getByText("파일이 바뀜")).toBeTruthy();
+  expect(rowOf("moved.psd").classList.contains("stale")).toBe(true);
+  expect(rowOf("kept.psd").classList.contains("stale")).toBe(false);
 });
 
 test("a file with no preset applied yet is not called out", () => {

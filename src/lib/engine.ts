@@ -45,6 +45,19 @@ export async function openPsd(path: string): Promise<OpenResult> {
   return callEngine("open_psd", { path }) as Promise<OpenResult>;
 }
 
+/**
+ * 경로마다 디스크의 수정시각(초 단위 정수). **없는 파일은 키가 빠진다** — 0 같은
+ * 값으로 채우면 호출부가 "안 바뀐 파일"로 오판한다.
+ *
+ * 엔진이 하는 이유는 PSD를 여는 쪽이 원래 거기이고(open_psd가 같은 값을 돌려준다),
+ * 그래서 저장된 mtime과 지금 값이 같은 출처에서 나오기 때문이다. 다만 저장된 쪽은
+ * float이고 이쪽은 정수라, 비교는 반드시 reconcileProject(lib/project.ts)를 거쳐야
+ * 한다 — 거기서 양쪽을 다 초 단위로 자른다.
+ */
+export async function psdMtimes(paths: string[]): Promise<Record<string, number>> {
+  return callEngine("psd_mtimes", { paths }) as Promise<Record<string, number>>;
+}
+
 export interface SkippedLayer {
   id: number;
   /** 그룹 경로까지 포함한 이름. `*ART/120_BG/BOTTOM_FLOOR_WALL/NOTE FOR LINE: ...` */

@@ -11,7 +11,9 @@ import { PresetBar } from "./components/PresetBar";
 import { OpsHistory } from "./components/OpsHistory";
 import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
-import { loadPngDataUrl, pinFile, renderDocumentPreview, renderPreview, renderThumbnails } from "./lib/engine";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { loadPngDataUrl, pinFile, psdMtimes, renderDocumentPreview, renderPreview, renderThumbnails } from "./lib/engine";
+import { ProjectBar } from "./components/ProjectBar";
 import {
   BOTTOM_PANEL_HEIGHT_STORAGE_KEY,
   DEFAULT_FILE_PANEL_WIDTH,
@@ -31,11 +33,18 @@ import { DEFAULT_ROLE_TOKENS } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, toEngineError } from "./lib/preview";
 import { PreviewCache, needsPrefetch, previewRenderSpec } from "./lib/previewCache";
 import { openFailureReport, type FailedOpen } from "./lib/openReport";
-import { restorablePreviews, type ProjectEntry } from "./lib/project";
+import {
+  previewFileName,
+  reconcileProject,
+  restorablePreviews,
+  type ProjectEntry,
+  type ProjectFile,
+} from "./lib/project";
+import { loadProjectFrom, saveProjectTo } from "./lib/projectFs";
 import { undrawableReport } from "./lib/skippedReport";
 import { missingFromChunk, nextThumbnailChunk } from "./lib/thumbnailQueue";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
-import type { Preset } from "./lib/types";
+import type { EdgeLines, Preset } from "./lib/types";
 
 type BottomTab = "history" | "batch";
 
@@ -197,6 +206,23 @@ function AppShell() {
   const [exportOpen, setExportOpen] = useState(false);
   const [selectedPreset, setSelectedPreset] = useState<Preset | undefined>(undefined);
 
+  /** 열려 있는 `.bwproj` 폴더. null이면 아직 저장한 적 없다(저장은 수동, 설계 6절). */
+  const [projectDir, setProjectDir] = useState<string | null>(null);
+  /**
+   * 프로젝트를 열 때 수정시각이 달라 저장된 작업을 버린 파일. 목록이 표시한다 —
+   * 조용히 버리면 아티스트는 자기가 한 지정이 왜 없는지 알 수 없다(설계 4절).
+   */
+  const [staleProjectPaths, setStaleProjectPaths] = useState<string[]>([]);
+  const [projectSaving, setProjectSaving] = useState(false);
+  /** PresetBar에 보내는 "이 프리셋을 고르라" 요청. PresetBar의 같은 이름 prop 주석 참고. */
+  const [selectPresetRequest, setSelectPresetRequest] = useState<{ name: string } | null>(null);
+  /**
+   * 지금 열려 있는 프로젝트가 담고 있던 항목(경로 → 항목). 저장할 때 화면 상태에
+   * 없는 tree/mtime을 메우는 폴백이다 — buildProject 주석 참고. 버린 항목(stale)은
+   * 넣지 않는다: 그 작업은 일부러 버린 것이라 되살아나면 안 된다.
+   */
+  const restoredEntriesRef = useRef<Record<string, ProjectEntry>>({});
+
   // Clear a stale open dialog if its file disappears from under it (e.g. an
   // engine restart resets activePath to null) — otherwise it would spring
   // back open unprompted the next time any file is selected.
@@ -327,6 +353,11 @@ function AppShell() {
     setLoadCancel(false);
     setPrefetchCancel(false);
     prefetchFailedRef.current.clear();
+    // "파일이 바뀜"은 방금 치운 프로젝트에 대한 이야기다. 남겨두면 나중에 같은
+    // 경로를 다시 추가했을 때 근거 없는 배지가 붙는다. 저장용 폴백 항목도 같은
+    // 이유로 함께 내린다 — 목록에서 치운 파일의 옛 트리를 되살릴 이유가 없다.
+    setStaleProjectPaths([]);
+    restoredEntriesRef.current = {};
     clearFiles();
   }, [clearFiles, setLoadCancel, setPrefetchCancel]);
 
@@ -355,20 +386,6 @@ function AppShell() {
     void drainLoadQueue({
       pendingPaths: () => filesRef.current.filter((f) => f.status === "idle").map((f) => f.path),
       processPath: async (path) => {
-        // 복원된 mtime을 미리 적어둔다 — 복원한 파일인지, 그리고 그 mtime이 지금
-        // 이 파일의 것인지를 열기 *뒤에* 판정하기 위해서다. openSuccess가
-        // dispatch한 presetApplied는 리듀서 안에서 곧바로 계산되지만, 이 컴포넌트가
-        // 그것을 다시 읽으려면 재렌더와 filesRef 갱신 effect를 거쳐야 하고, 그
-        // 시점은 여기서 보장할 수 없다 — 그래서 리듀서와 같은 조건(복원된
-        // mtime === 방금 연 mtime)을 여기서도 독립적으로 계산한다.
-        //
-        // FileEntry.mtime이 아니라 restoredMtimeByPathRef를 읽는다. mtime은
-        // engineRestarted가 파일 항목을 통째로 { path, status: "idle" }로 갈아
-        // 끼우며 함께 지운다(appStore.tsx 참고) — 그때 restoredMtimeByPath는
-        // 그대로 남는데, mtime을 대리 지표로 쓰면 그 순간부터 이 판정이 리듀서의
-        // 판정과 어긋난다. 엔진이 재시작해도 디스크의 PSD는 그대로이므로 복원한
-        // 작업은 여전히 유효하고, 큐가 그 파일을 다시 여는 순간에도 지켜야 한다.
-        const priorRestoredMtime = restoredMtimeByPathRef.current[path];
         // 아직 아무것도 안 보고 있으면 첫 파일을 띄워준다. 그 뒤로는 사람이
         // 보고 있는 화면을 뺏지 않는다.
         const result = await openFileEffect(dispatch, path, {
@@ -380,7 +397,25 @@ function AppShell() {
         // 복원한 파일이고 mtime이 그대로면 openSuccess가 이미 presetApplied를
         // true로 세워 이전 세션의 편집을 지켰다(appStore.tsx의 openSuccess 주석
         // 참고) — 그 위에 자동 적용을 또 걸면 방금 지킨 체크박스·병합 편집이
-        // 프리셋 매칭 결과로 조용히 덮인다.
+        // 프리셋 매칭 결과로 조용히 덮인다. openSuccess가 dispatch한
+        // presetApplied를 이 컴포넌트가 다시 읽으려면 재렌더와 filesRef 갱신
+        // effect를 거쳐야 하고 그 시점은 여기서 보장할 수 없으므로, 리듀서와 같은
+        // 조건(복원된 mtime === 방금 연 mtime)을 여기서도 독립적으로 계산한다.
+        //
+        // FileEntry.mtime이 아니라 restoredMtimeByPathRef를 읽는다. mtime은
+        // engineRestarted가 파일 항목을 통째로 { path, status: "idle" }로 갈아
+        // 끼우며 함께 지운다(appStore.tsx 참고) — 그때 restoredMtimeByPath는
+        // 그대로 남는데, mtime을 대리 지표로 쓰면 그 순간부터 이 판정이 리듀서의
+        // 판정과 어긋난다. 엔진이 재시작해도 디스크의 PSD는 그대로이므로 복원한
+        // 작업은 여전히 유효하고, 큐가 그 파일을 다시 여는 순간에도 지켜야 한다.
+        //
+        // 읽는 **시점**도 같은 이야기다. 열기 전에 잡아두면 여는 도중에 프로젝트
+        // 열기(handleProjectOpen → restoreProject)가 착지했을 때 낡은 값을 들게
+        // 된다: 리듀서의 openSuccess는 그 dispatch 뒤에 처리되므로 새 맵을 보고
+        // ops를 지키는데(presetApplied: true), 큐만 옛 undefined를 들고 프리셋을
+        // 걸어 방금 복원한 그 ops를 덮는다. 열기 뒤에 읽으면 두 판정이 같은 맵을
+        // 본다 — 어긋날 수 있는 두 신호는 언젠가 어긋난다.
+        const priorRestoredMtime = restoredMtimeByPathRef.current[path];
         const alreadyApplied = priorRestoredMtime !== undefined && priorRestoredMtime === result?.mtime;
         // 프리셋은 파일을 연 직후에 붙인다 — 그래야 세션이 아직 엔진의 LRU 안에
         // 있어서 다시 파싱하지 않는다.
@@ -509,19 +544,233 @@ function AppShell() {
     );
   }, []);
 
-  const primeRestoredPreviews = useCallback((entries: ProjectEntry[], previews: Map<string, string>) => {
-    for (const [key, dataUrl] of restorablePreviews(
-      entries, previews,
-      presetRef.current?.lineColor ?? null,
-      presetRef.current?.edgeLines ?? null
-    )) {
-      previewCacheRef.current.set(key, dataUrl);
-      prefetchedKeysRef.current.add(key);
+  /**
+   * 복원한 항목의 PNG를 미리보기 캐시에 넣는다. 키를 다시 계산해 저장된 것과
+   * 맞을 때만 넣는 판단은 restorablePreviews가 한다(설계 5절).
+   *
+   * 색·경계선을 **인자로 받는다**. presetRef.current를 여기서 읽으면 앱을 껐다
+   * 켠 직후에는 그것이 undefined라 키가 lineColor=null/edgeLines=null로 계산돼
+   * 저장된 키와 안 맞고, 복원한 미리보기가 통째로 버려진다 — 틀린 그림이 뜨지는
+   * 않지만 "껐다 켜고 프로젝트를 연다"는 이 기능의 주 경로에서 이득이 0이 된다.
+   * 넘겨야 하는 것은 앱의 현재 선택이 아니라 **저장 시점 프로젝트의 프리셋**이다:
+   * 디스크의 PNG는 그 설정으로 그려졌고 previewKey도 그 설정으로 계산됐다.
+   */
+  const primeRestoredPreviews = useCallback(
+    (
+      entries: ProjectEntry[],
+      previews: Map<string, string>,
+      lineColor: string | null,
+      edgeLines: EdgeLines | null
+    ) => {
+      for (const [key, dataUrl] of restorablePreviews(entries, previews, lineColor, edgeLines)) {
+        previewCacheRef.current.set(key, dataUrl);
+        prefetchedKeysRef.current.add(key);
+      }
+    },
+    []
+  );
+
+  /**
+   * 지금 화면 상태로 프로젝트 하나를 만든다. 저장이 그대로 쓴다.
+   *
+   * 이 함수의 어려운 부분은 그리기가 아니라 **잃지 않기**다. 화면 상태만 보고
+   * 만들면 조용히 파일이 빠지는 길이 둘 있다.
+   *
+   * 1. 캐시 키를 previewPlanFor로 얻으면 안 된다. 그 콜백은 sessionId가 없으면
+   *    null을 주는데(화면이 지금 그릴 수 있는가를 묻는 함수라 거기서는 그게 맞다),
+   *    복원 직후의 항목에는 sessionId가 없다 — restoreProject가 { path, status,
+   *    tree, mtime }만 세우고 세션은 로드 큐가 나중에 채운다. 그대로 쓰면
+   *    **프로젝트를 열자마자 저장하는 순간** 아직 안 열린 파일 전부의
+   *    previewKey·previewFile이 null로 저장되고, previews/의 PNG가 새 저장에서
+   *    빠져 다음에 열면 그 파일들이 그림 없이 복원된다. previewRenderSpec 자체는
+   *    sessionId를 쓰지 않으므로(가드는 previewPlanFor에만 있다) 여기서는
+   *    restorablePreviews와 같은 모양으로 직접 계산한다 — 저장과 복원이 같은
+   *    함수로 같은 키를 만들어야 다음에 열 때 대조가 맞는다.
+   *
+   * 2. `engineRestarted`는 **모든** 파일 항목을 { path, status: "idle" }로
+   *    갈아치운다(appStore.tsx) — tree도 mtime도 사라지고 opsByPath만 남는다.
+   *    "tree/mtime이 없으면 건너뛴다"로 두면 엔진이 죽었다 살아난 직후 ⌘S 한 번에
+   *    **files: []인 project.json이 기존 폴더를 덮어쓴다.** 확인창도 경고도 없이
+   *    하루 작업이 사라진다. 그래서 둘을 같이 한다:
+   *     - tree/mtime은 열려 있는 프로젝트의 항목으로 **메운다**. PSD가 안 바뀐 한
+   *       그 tree는 여전히 유효하다(그게 이 기능의 전제다). 바뀌었다면 저장되는
+   *       mtime도 옛것이므로 다음에 열 때 reconcileProject가 "파일이 바뀜"으로
+   *       잡아낸다 — 조용히 지나가지 않는다.
+   *     - 그래도 못 만드는 파일은 **세어서 돌려준다**(`blocked`). 호출부가 저장을
+   *       거절한다. 새로 저장하는 세션(프로젝트를 연 적이 없다)에는 메울 원본이
+   *       없으므로 이 쪽만이 마지막 방어선이다.
+   *
+   * 세는 기준을 `ops`의 존재로 잡는 것이 요점이다. ops는 파일을 한 번이라도 연
+   * 뒤에만 생기고(openSuccess의 buildInitialOpsState, 또는 restoreProject) 엔진
+   * 재시작을 넘어 살아남는다 — 즉 "담을 작업이 있다"와 정확히 같은 뜻이다.
+   * 아직 열리는 중이거나 열기에 실패한 파일에는 ops가 없어 저장을 막지 않는다.
+   * 그것까지 막으면 폴더에 깨진 PSD가 한 장만 있어도 영영 저장할 수 없다.
+   */
+  const buildProject = useCallback((): {
+    project: ProjectFile;
+    previews: Map<string, string>;
+    /** 담을 작업은 있는데 그것을 실을 tree/mtime이 지금 없는 파일 수. */
+    blocked: number;
+  } => {
+    const previews = new Map<string, string>();
+    const files: ProjectEntry[] = [];
+    const lineColor = presetRef.current?.lineColor ?? null;
+    const edgeLines = presetRef.current?.edgeLines ?? null;
+    let blocked = 0;
+    for (const file of filesRef.current) {
+      const ops = opsByPathRef.current[file.path];
+      const fallback = restoredEntriesRef.current[file.path];
+      const tree = file.tree ?? fallback?.tree;
+      // mtime이 없으면 다음에 열 때 이 항목이 아직 맞는지 확인할 방법이 없다 —
+      // 확인할 수 없는 것은 애초에 담지 않는다(parseProject도 같은 판단이다).
+      const mtime = file.mtime ?? fallback?.mtime;
+      if (!tree || mtime === undefined || !ops) {
+        if (ops) blocked += 1;
+        continue;
+      }
+      const matchedIds = matchedIdsByPathRef.current[file.path];
+      const plan = previewRenderSpec(
+        { path: file.path, mtime },
+        tree,
+        ops.includedIds,
+        ops.previewHiddenIds,
+        ops.soloIds,
+        lineColor,
+        matchedIds,
+        edgeLines,
+        ops.edgeColourIds
+      );
+      let previewFile: string | null = null;
+      if (plan.key) {
+        const dataUrl = previewCacheRef.current.get(plan.key);
+        if (dataUrl) {
+          // 이름은 반드시 키의 해시다. 경로로 지으면 납품 파일명이 디스크에 남는다
+          // — 기밀이다(설계 7절). saveProjectTo가 한 번 더 검사한다.
+          previewFile = previewFileName(plan.key);
+          previews.set(previewFile, dataUrl);
+        }
+      }
+      files.push({
+        path: file.path,
+        mtime,
+        tree,
+        matchedIds: matchedIds ?? [],
+        ops,
+        previewKey: plan.key,
+        previewFile,
+      });
     }
+    return { project: { version: 1, preset: presetRef.current ?? null, files }, previews, blocked };
   }, []);
-  // 아직 아무도 부르지 않는다 — 프로젝트 열기 배선(다음 작업)이 붙인다.
-  // noUnusedLocals가 그때까지 미사용으로 잡으므로 여기서만 참조해 둔다.
-  void primeRestoredPreviews;
+
+  const writeProjectTo = useCallback(
+    async (dir: string) => {
+      const { project, previews, blocked } = buildProject();
+      // 잃을 것이 있으면 쓰지 않는다. 덮어쓰기는 되돌릴 수 없고, 이 폴더에는
+      // 지난 저장이 들어 있다 — 반쯤 만들어진 프로젝트로 덮느니 아무것도 안 하는
+      // 편이 낫다. 개수만 말한다: 납품 파일 경로·이름은 기밀이라 메시지에 넣지 않는다.
+      if (blocked > 0) {
+        pushError("프로젝트를 저장하지 않았습니다", {
+          message:
+            `파일 ${blocked}개의 레이어 정보가 지금 없습니다(엔진이 방금 재시작했을 수 있습니다). ` +
+            `지금 저장하면 그 파일들의 작업이 프로젝트에서 사라집니다. ` +
+            `그 파일들이 다시 열린 뒤에 저장하세요.`,
+          traceback: "",
+        });
+        return;
+      }
+      setProjectSaving(true);
+      try {
+        await saveProjectTo(dir, project, previews);
+        setProjectDir(dir);
+      } catch (e) {
+        pushError("프로젝트 저장 실패", toEngineError(e));
+      } finally {
+        setProjectSaving(false);
+      }
+    },
+    [buildProject, pushError]
+  );
+
+  const handleProjectSaveAs = useCallback(async () => {
+    try {
+      // save는 **파일** 경로를 고르게 하지만 그 경로에 폴더를 만드는 것이
+      // `.bwproj`다 — saveProjectTo가 mkdir부터 한다(설계 2.2절).
+      const dir = await saveDialog({ defaultPath: "작업.bwproj" });
+      if (!dir) return;
+      await writeProjectTo(dir);
+    } catch (e) {
+      pushError("프로젝트 저장 실패", toEngineError(e));
+    }
+  }, [writeProjectTo, pushError]);
+
+  const handleProjectSave = useCallback(() => {
+    if (!projectDir) return void handleProjectSaveAs();
+    void writeProjectTo(projectDir);
+  }, [projectDir, handleProjectSaveAs, writeProjectTo]);
+
+  const handleProjectOpen = useCallback(async () => {
+    try {
+      // recursive 같은 옵션은 넣지 않는다. 디스크 접근은 전부 Rust 커맨드를
+      // 거치므로(projectFs.ts) 다이얼로그가 열어주는 fs 스코프에 기댈 것이 없다.
+      const dir = await openDialog({ directory: true });
+      if (!dir || Array.isArray(dir)) return;
+      const { project, previews } = await loadProjectFrom(dir);
+      // 여기까지는 디스크 읽기뿐이라 엔진에 아무것도 안 간다(설계 3절).
+      const mtimes = await psdMtimes(project.files.map((f) => f.path));
+      const { fresh, stale } = reconcileProject(project, mtimes);
+      dispatch({ type: "restoreProject", entries: fresh });
+      // 바뀐 파일도 목록에는 남는다 — 작업 없이, 평범하게 열리는 파일로(설계 4절).
+      // restoreProject는 fresh만 받으므로(그게 맞다 — 복원할 것이 없다) 여기서
+      // 따로 넣어야 한다. 이걸 빼면 그 파일들은 목록에서 통째로 사라지고
+      // "파일이 바뀜" 배지는 아무 데도 안 붙는다: 아티스트는 자기 파일 셋이
+      // 어디로 갔는지 알 수 없다.
+      //
+      // 순서상 뒤로 밀리는 것은 감수한다. 앞자리는 그대로 쓸 수 있는 파일이
+      // 차지하는 편이 낫고(restoreProject가 첫 파일을 활성으로 세운다),
+      // 다시 해야 하는 파일이 배지와 함께 아래에 모이는 것이 읽기도 쉽다.
+      if (stale.length > 0) dispatch({ type: "addFiles", paths: stale });
+      // 저장할 때 화면 상태에 없는 tree/mtime을 메울 원본(buildProject 주석 참고).
+      // 살아남은 항목만 넣는다 — 버린 것이 되살아나면 안 된다.
+      restoredEntriesRef.current = Object.fromEntries(fresh.map((e) => [e.path, e]));
+      // 저장 시점 프로젝트의 프리셋으로 프라이밍한다 — 앱의 현재 선택이 아니다
+      // (primeRestoredPreviews 주석 참고).
+      primeRestoredPreviews(
+        fresh,
+        previews,
+        project.preset?.lineColor ?? null,
+        project.preset?.edgeLines ?? null
+      );
+      setStaleProjectPaths(stale);
+      // 그리고 앱의 선택도 그 프리셋으로 옮긴다. 안 옮기면 화면이 다시 그릴 때
+      // 계산하는 키가 방금 프라이밍한 것과 달라져 전부 다시 그린다.
+      if (project.preset) setSelectPresetRequest({ name: project.preset.name });
+      // 프로젝트를 여는 것은 "이제 새로 시작한다"는 뜻이다 — 이전 폴더에서 세운
+      // 중지가 남아 있으면 복원한 파일이 배경에서 열리지 않는다(handleAddFiles와
+      // 같은 판단). 실패 목록도 그 폴더의 것이라 함께 내린다.
+      setLoadCancel(false);
+      setPrefetchCancel(false);
+      prefetchFailedRef.current.clear();
+      setProjectDir(dir);
+    } catch (e) {
+      pushError("프로젝트 열기 실패", toEngineError(e));
+    }
+  }, [dispatch, primeRestoredPreviews, pushError, setLoadCancel, setPrefetchCancel]);
+
+  // ⌘S 저장 / ⌘⇧S 다른 이름으로 저장(설계 6절). App.tsx에는 기존 키 핸들러가
+  // 없어 새로 만든다. 다른 두 핸들러와는 겹치지 않는다 — PreviewCanvas의 뷰
+  // 단축키는 viewCommandFor가 metaKey/ctrlKey가 있으면 null을 주고(lib/preview.ts),
+  // LayerTree의 것은 Escape뿐이다.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "s") return;
+      e.preventDefault();
+      if (e.shiftKey) void handleProjectSaveAs();
+      else handleProjectSave();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleProjectSave, handleProjectSaveAs]);
 
   useEffect(() => {
     // loading(=loadProgress 상태)만으로는 부족하다. 로드 큐가 방금 시작한 것은
@@ -830,6 +1079,7 @@ function AppShell() {
         onSessionRefreshed={refreshSession}
         onError={pushError}
         onSelectedPresetChange={setSelectedPreset}
+        selectPresetRequest={selectPresetRequest}
       />
 
       <div className="toolbar">
@@ -839,6 +1089,16 @@ function AppShell() {
         <button type="button" onClick={() => setBottomTab("batch")}>
           배치 실행...
         </button>
+        {/* 그리드 행을 새로 만들지 않고 기존 toolbar 행에 얹는다 — .app-shell의
+            grid-template-areas(App.css)와 위쪽 인라인 gridTemplateRows를 함께
+            고쳐야 행이 늘어나고, 어긋나면 화면이 통째로 깨진다. */}
+        <ProjectBar
+          projectDir={projectDir}
+          busy={projectSaving}
+          onOpen={() => void handleProjectOpen()}
+          onSave={handleProjectSave}
+          onSaveAs={() => void handleProjectSaveAs()}
+        />
       </div>
 
       <FilePanel
@@ -848,6 +1108,7 @@ function AppShell() {
         prefetchProgress={prefetchProgress ? { ...prefetchProgress, label: "미리보기 준비 중" } : null}
         stopped={stoppedLabel}
         entryCounts={entryCounts}
+        staleProjectPaths={staleProjectPaths}
         onResizeStart={handleFileResizeStart}
         onResizeMove={handleFileResizeMove}
         onResizeEnd={handleFileResizeEnd}

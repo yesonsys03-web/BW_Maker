@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { collectPsdFiles } from "../lib/engine";
@@ -42,6 +42,12 @@ interface FilePanelProps {
    * 이상한지를 임계값으로 정해두는 것보다 낫다.
    */
   entryCounts: Record<string, number>;
+  /**
+   * 프로젝트를 열 때 수정시각이 달라 저장돼 있던 작업을 버린 파일. 조용히 버리면
+   * 아티스트는 자기가 한 지정이 왜 없는지 알 수 없다(설계 4절). 파일은 목록에
+   * 남되 작업 없이 열린다 — 사라지는 것이 아니라 "다시 해야 한다"는 표시다.
+   */
+  staleProjectPaths: string[];
   /** 오른쪽 모서리의 폭 조절 손잡이. 레이어 패널·아래 패널과 같은 방식이다. */
   onResizeStart: (e: ReactPointerEvent<HTMLDivElement>) => void;
   onResizeMove: (e: ReactPointerEvent<HTMLDivElement>) => void;
@@ -112,6 +118,7 @@ export function FilePanel({
   prefetchProgress,
   stopped,
   entryCounts,
+  staleProjectPaths,
   onResizeStart,
   onResizeMove,
   onResizeEnd,
@@ -127,6 +134,8 @@ export function FilePanel({
   const [isDragOver, setIsDragOver] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+
+  const staleSet = useMemo(() => new Set(staleProjectPaths), [staleProjectPaths]);
 
   /**
    * 사람이 직접 손댄 파일이 있는지. 프리셋 자동 적용만 걸린 파일은 여기 안 든다
@@ -324,17 +333,26 @@ export function FilePanel({
               // entryCounts는 프리셋이 걸린 파일만 담으므로(App.tsx의 같은 이름
               // 주석) 아직 안 걸린 파일에는 이 표시가 붙지 않는다.
               const needsLine = entryCounts[file.path] === 0;
+              const stale = staleSet.has(file.path);
               return (
               <li key={file.path} className="file-list-row">
                 <button
                   type="button"
-                  className={`file-list-item${file.path === activePath ? " active" : ""}${needsLine ? " needs-line" : ""}`}
+                  className={`file-list-item${file.path === activePath ? " active" : ""}${needsLine ? " needs-line" : ""}${stale ? " stale" : ""}`}
                   onClick={() => onSelectFile(file.path)}
                 >
                   <span className="file-name" title={file.path}>
                     {fileName(file.path)}
                   </span>
                   <span className={`status-badge status-${file.status}`}>{STATUS_LABEL[file.status]}</span>
+                  {stale && (
+                    <span
+                      className="status-badge status-stale"
+                      title="프로젝트를 저장한 뒤 이 PSD가 바뀌었습니다. 저장돼 있던 작업은 쓰지 않았습니다."
+                    >
+                      파일이 바뀜
+                    </span>
+                  )}
                   {needsLine ? (
                     // "0장"을 대신한다. 둘 다 두면 같은 말을 두 번 하는 셈이다.
                     <span

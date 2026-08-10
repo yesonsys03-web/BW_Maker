@@ -96,6 +96,28 @@ input[type="text"] {
   border-bottom: 1px solid var(--border);
 }
 
+/* 프로젝트 열기·저장. 그리드 행을 새로 만들지 않고 기존 .toolbar(flex 행) 안에
+   들어간다 — .app-shell은 이름 붙인 4행 그리드이고 마지막 행 높이를 App.tsx가
+   인라인으로 덮으므로, 행을 늘리려면 두 곳을 함께 고쳐야 하고 어긋나면 화면이
+   통째로 깨진다. */
+.project-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  /* 내보내기·배치 버튼과 붙어 보이지 않게 왼쪽에 구분선을 둔다. */
+  margin-left: auto;
+  padding-left: 0.75em;
+  border-left: 1px solid var(--border);
+}
+
+.project-bar-name {
+  color: var(--text-dim);
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- preset bar ---------- */
 
 .preset-bar {
@@ -316,6 +338,23 @@ input[type="text"] {
 .status-badge.status-needs-line {
   color: #f2c94c;
   border-color: #7a6a2a;
+}
+
+/* 프로젝트를 저장한 뒤 PSD가 바뀌어 저장된 작업을 버린 파일(설계 4절).
+   .needs-line 뒤에 둔다 — 둘이 겹치면 이쪽이 더 급한 소식이다("규칙이 못 잡았다"는
+   원래 그런 판일 수 있지만, "작업을 버렸다"는 반드시 봐야 한다). */
+.file-list-item.stale {
+  background: #33231a;
+}
+
+.file-list-item.stale.active {
+  background: #4a2f20;
+  border-color: var(--accent);
+}
+
+.status-badge.status-stale {
+  color: #e35d5d;
+  border-color: #6a2f2f;
 }
 
 .file-list-remove {

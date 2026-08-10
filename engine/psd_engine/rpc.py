@@ -123,7 +123,7 @@ def _emit(obj, out):
 
 class Engine:
     _ALLOWED_METHODS = {
-        "open_psd", "close_session", "pin_file", "render_thumbnails",
+        "open_psd", "psd_mtimes", "close_session", "pin_file", "render_thumbnails",
         "render_preview", "render_document_preview",
         "apply_preset", "auto_merge_operations", "auto_merge_preview",
         "export_psd", "batch_run",
@@ -167,6 +167,30 @@ class Engine:
             # 키가 실제 내용과 어긋난다.
             "mtime": s["mtime"],
         }
+
+    def psd_mtimes(self, paths):
+        """
+        경로마다 디스크의 수정시각. 프로젝트를 열 때 "이 PSD가 저장 이후에
+        바뀌었나"를 판정하는 근거다(설계 4절). PSD를 파싱하지 않으므로 세션을
+        만들지 않고, 100장을 물어도 stat 100번이다.
+
+        **없는 파일은 키 자체를 빼고 돌려준다.** 0 같은 값으로 채우면 호출부가
+        "안 바뀐 파일"로 오판할 수 있다 — 없는 것과 안 바뀐 것은 다르다.
+
+        초 단위로 자른다. open_psd가 돌려주는(그래서 프로젝트에 저장되는) mtime은
+        session.py의 os.path.getmtime 그대로라 소수점 이하가 있는 float이므로,
+        여기서 자른 값을 그대로 비교하면 안 바뀐 파일이 전부 "바뀜"이 된다.
+        실제 비교는 reconcileProject가 양쪽을 다 Math.floor로 자르는 한 곳에서만
+        한다(src/lib/project.ts) — 여기서 자르는 것은 두 곳이 같은 단위를
+        말하게 두려는 것이지, 판정을 여기로 옮기려는 것이 아니다.
+        """
+        out = {}
+        for p in paths:
+            try:
+                out[str(p)] = int(os.path.getmtime(p))
+            except OSError:
+                pass
+        return out
 
     def close_session(self, sessionId):
         self.store.close(sessionId)

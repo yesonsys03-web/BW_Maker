@@ -225,6 +225,31 @@ def test_render_dirs_do_not_accumulate_across_kinds(fixture_psd):
     assert len(list(engine.tmp.iterdir())) == 2 * rpc.RENDER_DIR_GENERATIONS
 
 
+def test_psd_mtimes_reports_what_is_there_and_skips_what_is_not(fixture_psd, tmp_path):
+    """
+    프로젝트를 열 때 "이 PSD가 저장 이후에 바뀌었나"를 판정할 근거를 준다.
+
+    **`handle`을 거쳐서 부른다(EngineProc.call).** Engine 인스턴스의 메서드를
+    직접 부르면 `_ALLOWED_METHODS` 허용목록을 건너뛰므로, 이름을 목록에 넣는 것을
+    잊어도 초록불이 뜬다 — 그때 앱에서는 "unknown method"로 전부 거절된다.
+    허용목록에서 `psd_mtimes`를 빼면 이 테스트가 빨간불이어야 한다.
+    """
+    eng = EngineProc()
+    try:
+        missing = str(tmp_path / "없는파일.psd")
+        r = eng.call("psd_mtimes", paths=[str(fixture_psd), missing])
+        assert "error" not in r, r.get("error")
+        out = r["result"]
+        assert str(fixture_psd) in out
+        # 없는 파일은 키 자체가 없다 — 0으로 채우면 "안 바뀜"으로 오판된다.
+        assert missing not in out
+        assert len(out) == 1
+        # 초 단위 정수로 준다(저장된 float mtime과의 비교 단위는 프런트가 맞춘다).
+        assert out[str(fixture_psd)] == int(os.path.getmtime(fixture_psd))
+    finally:
+        eng.close()
+
+
 def test_rpc_unknown_method_error(fixture_psd):
     eng = EngineProc()
     try:
