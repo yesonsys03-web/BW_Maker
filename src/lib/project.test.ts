@@ -238,5 +238,12 @@ test("a stored float mtime against a genuinely different second loses its work",
 
 test("a duplicate path in project.files is rejected at parse time", () => {
   const p = { version: 1 as const, preset: null, files: [entryAt("/a.psd", 1700), entryAt("/a.psd", 1800)] };
-  expect(() => parseProject(JSON.stringify(p))).toThrow(/경로가 중복됩니다/);
+  const path = "/a.psd";
+  expect(() => parseProject(JSON.stringify(p))).toThrow(/files\[\d+\].*중복된 경로/);
+  try {
+    parseProject(JSON.stringify(p));
+  } catch (e) {
+    // 에러 메시지가 기밀 파일명을 드러내지 않아야 한다.
+    expect(String(e)).not.toContain(path);
+  }
 });

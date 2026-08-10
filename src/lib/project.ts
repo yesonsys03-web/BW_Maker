@@ -130,9 +130,10 @@ export function parseProject(raw: string): ProjectFile {
   const files = p.files.map(validateEntry);
   // 중복 경로를 찾는다.
   const seen = new Set<string>();
-  for (const file of files) {
+  for (let i = 0; i < files.length; i += 1) {
+    const file = files[i];
     if (seen.has(file.path)) {
-      throw new Error(`project.json files: 경로가 중복됩니다(${file.path}).`);
+      throw new Error(`project.json files[${i}]: 중복된 경로 항목입니다.`);
     }
     seen.add(file.path);
   }
