@@ -529,7 +529,23 @@ function AppShell() {
         const file = filesRef.current.find((f) => f.path === path);
         if (!file) return;
         const plan = previewPlanFor(file);
-        if (!plan || !plan.key || plan.visibleIds.length === 0) return;
+        if (!plan || !plan.key) return;
+        // 그릴 것이 없는 파일도 **처리한 것으로 적어둔다**. 안 적으면 큐를 못
+        // 떠난다: needsPrefetch는 "캐시에 없고 이번에 만든 적도 없으면 대기"로
+        // 고르는데, 만든 것은 아래에서 키를 적고 실패한 것은 prefetchFailedRef로
+        // 빠지는 반면 이 경우만 어느 그물에도 안 걸렸다. 그러면 큐가 도는 조건에
+        // opsByPath가 들어 있으므로(이 효과의 deps), 아티스트가 눈을 하나 켜고 끌
+        // 때마다 그 파일들로 큐가 다시 서서 "미리보기 준비 중"이 끝없이 뜬다.
+        //
+        // 규칙이 아무것도 못 잡는 판이 실제로 있다 — 라인이 제외 그룹 안에 있는
+        // 경우다. 그런 판이 폴더에 여러 장이면 큐는 영원히 안 빈다.
+        //
+        // 키에 담아두는 것이 맞다: 나중에 손으로 라인을 지정하거나 눈을 켜면
+        // visibleIds가 달라져 키 자체가 바뀌므로, 그때는 정상적으로 다시 만든다.
+        if (plan.visibleIds.length === 0) {
+          prefetchedKeysRef.current.add(plan.key);
+          return;
+        }
         try {
           // 축출-재오픈이 끼면 세션 id가 바뀐다. 그림을 만든 그 id로 담아야
           // 화면 쪽이 같은 키를 만들어 찾아낸다.

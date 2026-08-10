@@ -99,12 +99,12 @@ class FakeIntersectionObserver {
 
 const PATHS = ["/cuts/a.psd", "/cuts/b.psd", "/cuts/c.psd"];
 
-function treeOf(ids: number[]) {
+function treeOf(ids: number[], visible = true) {
   return ids.map((id) => ({
     id,
     name: `line ${id}`,
     kind: "pixel",
-    visible: true,
+    visible,
     opacity: 255,
     blendMode: "normal",
     bbox: [0, 0, 10, 10] as [number, number, number, number],
@@ -182,14 +182,14 @@ function fileRow(name: string) {
 }
 
 /** 열기 하나를 성공으로 끝낸다. */
-async function finishOpen(index: number, sessionId: number, ids = [1, 2, 3]) {
+async function finishOpen(index: number, sessionId: number, ids = [1, 2, 3], visible = true) {
   opens[index].d.resolve({
     sessionId,
     width: 10,
     height: 10,
     colorMode: "RGB",
     depth: 8,
-    tree: treeOf(ids),
+    tree: treeOf(ids, visible),
     mtime: 1,
   });
   await waitFor(() => expect(screen.queryAllByText("열림").length).toBeGreaterThanOrEqual(1));
@@ -329,6 +329,59 @@ test("a remount does not leave the old preview-prefetch queue running", async ()
 
   await new Promise((r) => setTimeout(r, 50));
   expect(held).toHaveLength(1);
+});
+
+/**
+ * 그릴 것이 없는 파일은 준비 큐를 **떠나야** 한다.
+ *
+ * 큐는 대상을 needsPrefetch로 고르는데(캐시에 없고 이번에 만든 적도 없으면 대기),
+ * 만든 파일은 키를 적어 빠지고 실패한 파일은 prefetchFailedRef로 빠진다. 그런데
+ * visibleIds가 빈 파일은 렌더 없이 return이라 **어느 쪽에도 안 걸린다** — 다음
+ * 회차에 또 대기로 잡힌다. 큐가 도는 조건에 opsByPath가 들어 있으므로, 그 상태로는
+ * 아티스트가 눈을 하나 켜고 끌 때마다 "미리보기 준비 중"이 다시 선다.
+ *
+ * 규칙이 아무것도 못 잡는 판이 실제로 있다(라인이 제외 그룹 안에 있는 경우). 그런
+ * 판이 폴더에 여러 장이면 큐는 영원히 안 빈다.
+ */
+test("a file with nothing to draw leaves the prefetch queue for good", async () => {
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1, [1, 2, 3]);
+  await waitFor(() => expect(opens).toHaveLength(2));
+  // b.psd: 잎이 전부 숨겨져 있어 그릴 것이 없다. 프리셋이 없는 테스트에서는
+  // includedIds가 전체 잎이고 previewHiddenIds가 안 보이는 잎이므로 교집합이 빈다.
+  await finishOpen(1, 2, [4, 5], false);
+  await waitFor(() => expect(opens).toHaveLength(3));
+  await finishOpen(2, 3, [6, 7]);
+
+  // 준비 큐가 한 바퀴 **실제로** 도는 것을 먼저 확인한다. 라벨이 사라진 것만
+  // 보면 "아직 시작도 안 했다"와 구별되지 않아, 뒤의 단언이 무엇을 잡았는지
+  // 알 수 없다. c.psd(세션 3)가 그려졌으면 큐는 확실히 돌았다.
+  const drewSession = (sid: number) =>
+    [...engine.renderPreview.mock.calls, ...engine.renderDocumentPreview.mock.calls].some((c) => c[0] === sid);
+  await waitFor(() => expect(drewSession(3)).toBe(true), { timeout: 3000 });
+  await waitFor(() => expect(screen.queryByText(/미리보기 준비 중/)).toBeNull(), { timeout: 3000 });
+  // 누계가 아니라 **토글 이후에 새로 나간 것**만 센다. 누계로 세면 큐가 몇 바퀴를
+  // 돌았는지가 앞선 테스트들과의 타이밍에 따라 흔들려 단언이 제자리에서 깨진다.
+  const sent = () => ({
+    p: engine.renderPreview.mock.calls.length,
+    d: engine.renderDocumentPreview.mock.calls.length,
+  });
+  const before = sent();
+
+  // 활성 파일에서 눈을 하나 끈다. 이것이 바꾸는 것은 이 파일의 키뿐이고, 이
+  // 파일은 준비 큐가 애초에 건너뛴다 — 큐가 다시 설 이유가 없다.
+  click(screen.getAllByRole("button", { name: "미리보기 토글" })[0]);
+
+  await new Promise((r) => setTimeout(r, 80));
+  expect(screen.queryByText(/미리보기 준비 중/)).toBeNull();
+  // 큐가 다시 서지 않았다면 남의 파일이 다시 나간 일도 없어야 한다. 활성 파일
+  // (세션 1)은 캔버스가 그리므로 그쪽은 늘어도 정상이다.
+  const fresh = [
+    ...engine.renderPreview.mock.calls.slice(before.p),
+    ...engine.renderDocumentPreview.mock.calls.slice(before.d),
+  ];
+  expect(fresh.filter((c) => c[0] !== 1)).toEqual([]);
 });
 
 test("a remount does not leave the old thumbnail queue running", async () => {
