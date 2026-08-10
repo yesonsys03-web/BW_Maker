@@ -104,9 +104,14 @@ function finish(index: number) {
   });
 }
 
-async function startRun() {
+async function startRun(manualLineIdsByPath: Record<string, number[]> = {}) {
   render(
-    <BatchPanel files={FILES} onError={vi.fn()} onRunningChange={(r) => runningSignals.push(r)} />
+    <BatchPanel
+      files={FILES}
+      manualLineIdsByPath={manualLineIdsByPath}
+      onError={vi.fn()}
+      onRunningChange={(r) => runningSignals.push(r)}
+    />
   );
   await waitFor(() => expect(screen.getByRole("button", { name: "배치 실행" })).toBeTruthy());
   click("배치 실행");
@@ -250,4 +255,27 @@ test("a file that could not be written is still a plain failure", async () => {
   await waitFor(() => expect(hasCell("실패")).toBe(true));
   click("자세히");
   await waitFor(() => expect(screen.getByText("output already exists")).toBeTruthy());
+});
+
+/**
+ * 손으로 "라인으로 지정"한 것이 배치까지 가야 한다.
+ *
+ * 배치는 프리셋만 갖고 파일마다 처음부터 다시 매칭하므로, 이름 규칙이 닿지 않는
+ * 판(선화가 `TEMPLATE` 안의 `BORDER`인 판)은 아티스트가 화면에서 고쳐 놓아도
+ * `no layers matched`로 실패했다 — 지정이 여기까지 오지 않았기 때문이다
+ * (2026-08-10 신고).
+ */
+test("a file's manual line designation rides along to the batch", async () => {
+  await startRun({ "/cuts/b.psd": [7, 9] });
+
+  // 파일을 하나씩 돌므로 첫 호출은 a.psd다. 지정이 없는 파일에는 빈 것이 간다.
+  expect(engine.batchRun.mock.calls[0][0]).toEqual(["/cuts/a.psd"]);
+  expect(engine.batchRun.mock.calls[0][4]).toEqual({});
+
+  finish(0);
+  await waitFor(() => expect(runs.length).toBe(2));
+
+  // b.psd 차례에는 그 파일의 지정만 실린다.
+  expect(engine.batchRun.mock.calls[1][0]).toEqual(["/cuts/b.psd"]);
+  expect(engine.batchRun.mock.calls[1][4]).toEqual({ "/cuts/b.psd": [7, 9] });
 });

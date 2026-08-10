@@ -134,3 +134,63 @@ def test_batch_raster_split_verification_has_the_same_keys_as_non_split(fixture_
 
     assert set(split_result["results"][0]["verification"].keys()) == \
         set(non_split["results"][0]["verification"].keys())
+
+
+def _id_of(path, name):
+    """이름으로 레이어 id를 찾는다. 배치가 여는 것과 같은 트리에서 뽑아야 한다."""
+    from psd_engine.session import SessionStore
+    store = SessionStore(max_sessions=1)
+    sid = store.open(str(path))
+    try:
+        nodes = store.get(sid)["nodes_by_id"]
+        return next(i for i, n in nodes.items() if n["name"] == name)
+    finally:
+        store.close(sid)
+
+
+# 이름 규칙이 닿지 않는 판이 있다(선화가 제외 그룹 안의 BORDER인 판). 아티스트가
+# 화면에서 "라인으로 지정"해 고쳐도, 배치는 프리셋만 갖고 처음부터 다시 매칭하므로
+# 그 지정이 닿지 않아 no layers matched로 실패했다. 2026-08-10 신고.
+def test_batch_takes_the_manual_line_designation(fixture_psd, tmp_path):
+    preset = dict(PRESET, include={"type": "contains", "value": "zzz",
+                                   "caseSensitive": False})
+    fill_id = _id_of(fixture_psd, "fill")
+
+    r = run_batch([str(fixture_psd)], preset, output_dir=str(tmp_path),
+                  manual_line_ids={str(fixture_psd): [fill_id]})
+
+    # 규칙은 하나도 못 잡았지만 지정한 한 장으로 나간다.
+    assert r["results"][0]["ok"] is True, r["results"][0].get("error")
+    assert r["results"][0]["layerCount"] == 1
+
+
+def test_batch_manual_line_adds_to_what_the_rules_found(fixture_psd, tmp_path):
+    fill_id = _id_of(fixture_psd, "fill")
+    without = run_batch([str(fixture_psd)], PRESET, output_dir=str(tmp_path))
+    n = without["results"][0]["layerCount"]
+
+    out2 = tmp_path / "with"
+    out2.mkdir()
+    with_manual = run_batch([str(fixture_psd)], PRESET, output_dir=str(out2),
+                            manual_line_ids={str(fixture_psd): [fill_id]})
+
+    # 규칙 결과를 지우지 않고 보탠다.
+    assert with_manual["results"][0]["layerCount"] == n + 1
+
+
+# 조용히 버리면 아티스트가 고쳐둔 것이 말없이 사라진 채 파일이 나간다 — 그 산출물은
+# "라인이 빠진 정상 파일"로 보여 알아채기 어렵다. 지정한 뒤 포토샵에서 저장하면
+# 레이어 id가 달라지므로 이 경로는 실제로 밟힌다.
+def test_batch_refuses_a_manual_line_id_this_file_does_not_have(fixture_psd, tmp_path):
+    r = run_batch([str(fixture_psd)], PRESET, output_dir=str(tmp_path),
+                  manual_line_ids={str(fixture_psd): [999999]})
+    assert r["results"][0]["ok"] is False
+    assert "이 파일에 없습니다" in r["results"][0]["error"]["message"]
+
+
+def test_batch_refuses_a_manual_line_id_that_is_not_a_pixel_layer(fixture_psd, tmp_path):
+    group_id = _id_of(fixture_psd, "*ART")
+    r = run_batch([str(fixture_psd)], PRESET, output_dir=str(tmp_path),
+                  manual_line_ids={str(fixture_psd): [group_id]})
+    assert r["results"][0]["ok"] is False
+    assert "pixel 레이어가 아닙니다" in r["results"][0]["error"]["message"]

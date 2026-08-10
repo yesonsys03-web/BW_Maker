@@ -236,9 +236,22 @@ export async function batchRun(
   paths: string[],
   preset: Preset,
   outputDir: string | null,
-  overwrite: boolean
+  overwrite: boolean,
+  /**
+   * 화면에서 손으로 "라인으로 지정"한 레이어. {경로: [id]} 꼴이고, 열어둔
+   * 파일에만 있다.
+   *
+   * 배치는 프리셋만 받아 파일마다 처음부터 다시 매칭하므로, 이름 규칙이 닿지
+   * 않는 판(선화가 `TEMPLATE` 안의 `BORDER`인 판 등)은 아티스트가 화면에서
+   * 고쳐 놓아도 `no layers matched`로 실패했다. 이 값이 그 지정을 배치까지
+   * 실어 나른다 — 엔진이 규칙 결과에 합집합으로 보탠다(batch.py의
+   * `_add_manual_lines`).
+   */
+  manualLineIds: Record<string, number[]> = {}
 ): Promise<{ results: BatchItemResult[] }> {
-  return callEngine("batch_run", { paths, preset, outputDir, overwrite }) as Promise<{
+  return callEngine("batch_run", {
+    paths, preset, outputDir, overwrite, manualLineIds,
+  }) as Promise<{
     results: BatchItemResult[];
   }>;
 }

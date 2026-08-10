@@ -10,6 +10,15 @@ import type { BatchItemResult, EngineError, Preset } from "../lib/types";
 
 interface BatchPanelProps {
   files: FileEntry[];
+  /**
+   * 화면에서 손으로 "라인으로 지정"한 레이어. {경로: [id]} 꼴이고 열어둔
+   * 파일에만 있다.
+   *
+   * 배치는 프리셋만 갖고 파일마다 처음부터 다시 매칭하므로, 이름 규칙이 닿지
+   * 않는 판은 아티스트가 화면에서 고쳐 놓아도 여기까지 오지 않아
+   * `no layers matched`로 실패했다(2026-08-10 신고). 그 지정을 실어 보낸다.
+   */
+  manualLineIdsByPath: Record<string, number[]>;
   onError: (title: string, error: EngineError) => void;
   /**
    * 배치가 도는 동안 배경 큐들이 비켜설 수 있도록 알린다. 파일 사이의 틈은
@@ -67,7 +76,7 @@ interface PendingRun {
  * independent of any currently-open session, and the engine keeps going past
  * per-file failures, so this UI only ever renders the final results list.
  */
-export function BatchPanel({ files, onError, onRunningChange }: BatchPanelProps) {
+export function BatchPanel({ files, manualLineIdsByPath, onError, onRunningChange }: BatchPanelProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedPresetName, setSelectedPresetName] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set(files.map((f) => f.path)));
@@ -191,7 +200,13 @@ export function BatchPanel({ files, onError, onRunningChange }: BatchPanelProps)
           break;
         }
         setFileProgress({ done: i, total: paths.length });
-        const { results: one } = await batchRun([paths[i]], preset, dir, overwrite);
+        // 이 파일의 지정만 실어 보낸다. 전부 보내도 엔진이 경로로 골라 쓰지만,
+        // 남의 파일 id가 섞여 들어갈 여지를 아예 없앤다.
+        const manual = manualLineIdsByPath[paths[i]];
+        const { results: one } = await batchRun(
+          [paths[i]], preset, dir, overwrite,
+          manual && manual.length > 0 ? { [paths[i]]: manual } : {}
+        );
         collected.push(...one);
         // 파일마다 표를 갱신한다 — 끝까지 기다려야 아무것도 안 보이면, 무엇이
         // 실패했는지 알기까지 한 시간을 기다리게 된다.

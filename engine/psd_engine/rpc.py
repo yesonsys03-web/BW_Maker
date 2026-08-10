@@ -268,7 +268,8 @@ class Engine:
                                             source_stem=Path(s["path"]).stem),
         }
 
-    def batch_run(self, paths, preset, outputDir=None, overwrite=False):
+    def batch_run(self, paths, preset, outputDir=None, overwrite=False,
+                  manualLineIds=None):
         from .batch import run_batch
 
         def progress(path, stage, current, total):
@@ -276,7 +277,8 @@ class Engine:
                    "current": current, "total": total}, self.out)
 
         return run_batch(paths, preset, output_dir=outputDir,
-                         overwrite=overwrite, progress=progress)
+                         overwrite=overwrite, progress=progress,
+                         manual_line_ids=manualLineIds)
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
                    embedPreview=True, overwrite=False, verify=True, lineColor=None,

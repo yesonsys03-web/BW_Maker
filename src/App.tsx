@@ -602,6 +602,22 @@ function AppShell() {
   }, [loading, prefetchCancelled, batchRunning, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
 
   /**
+   * 파일별로 손으로 "라인으로 지정"한 레이어. 배치가 이걸 함께 보내야, 이름
+   * 규칙이 닿지 않는 판을 아티스트가 화면에서 고쳐둔 것이 배치에도 반영된다
+   * (BatchPanel의 같은 이름 prop 주석 참고).
+   *
+   * 빈 것은 담지 않는다 — 대부분의 파일에는 지정이 없고, 빈 배열까지 실어
+   * 보내면 엔진 쪽에서 "지정이 있는 파일"과 구별이 안 된다.
+   */
+  const manualLineIdsByPath = useMemo(() => {
+    const out: Record<string, number[]> = {};
+    for (const [path, ops] of Object.entries(state.opsByPath)) {
+      if (ops.manualLineIds.length > 0) out[path] = ops.manualLineIds;
+    }
+    return out;
+  }, [state.opsByPath]);
+
+  /**
    * 파일별 내보내기 장수. opsByPath에 이미 있는 값을 세는 것뿐이라 따로 저장하거나
    * 엔진을 부를 것이 없다. 프리셋이 아직 안 걸린 파일은 빠진다 — 그때의 entries는
    * 매칭 전의 전체 픽셀 leaf라 내보낼 장수가 아니다.
@@ -900,7 +916,12 @@ function AppShell() {
           {bottomTab === "history" ? (
             <OpsHistory ops={ops} tree={activeFile?.tree} onUndo={undoOp} />
           ) : (
-            <BatchPanel files={state.files} onError={pushError} onRunningChange={handleBatchRunningChange} />
+            <BatchPanel
+              files={state.files}
+              manualLineIdsByPath={manualLineIdsByPath}
+              onError={pushError}
+              onRunningChange={handleBatchRunningChange}
+            />
           )}
         </div>
       </div>
