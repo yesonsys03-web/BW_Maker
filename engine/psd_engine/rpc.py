@@ -40,16 +40,19 @@ from .verify_raster import verify_raster
 RENDER_DIR_GENERATIONS = 3
 
 
-#: 오버레이 캐시가 세션당 들고 있는 항목 수 상한.
+#: 오버레이 캐시가 세션당 들고 있는 항목 수 상한. **소프트 캡이다** — 지금
+#: 렌더가 쓰는 뷰들은 축출하지 않으므로, 뷰가 상한보다 많은 판에서는 그 렌더
+#: 동안 상한을 넘긴다(_cached_plan_overlays 참고).
 #:
 #: 오버레이 한 장은 그 뷰의 bbox 크기짜리 RGBA 배열이다. 컨트롤러 실측으로 뷰
 #: 박스가 최대 약 3.1 Mpx였으니 한 장이 3.1e6px * 4B(RGBA) ≈ 12.4MB를 넘을 수
-#: 있고, 실사용 파일은 뷰가 최대 7장이었다(설계 문서 9절). 8칸(여유 1칸)이면
-#: 같은 설정에서 한 파일의 모든 뷰를 동시에 캐시해 둘 수 있어, 미리보기에서
-#: 레이어 눈을 이리저리 켜고 꺼도 재계산이 없다. SessionStore는 세션을 최대
-#: 2개까지만 들고 있으므로(session.py의 max_sessions) 최악의 경우 총 메모리는
-#: 8 * 12.4MB * 2 ≈ 198MB — 예전에 레이어별 썸네일을 무한정 캐시하다 낸 OOM과
-#: 달리 이건 하드 캡이 있어 그 자리로 다시 빠지지 않는다.
+#: 있다. "실사용 파일은 뷰가 최대 7장"(설계 문서 9절)이라는 이 값의 원래 근거는
+#: 2026-08-11 실측으로 깨졌다 — 납품 캐릭터 폴더에 뷰 15개짜리 판이 있고, 그
+#: 판에서 하드 캡 LRU는 순차 삽입 때문에 매 렌더 100% 미스였다(뷰당 ~9초 ×
+#: 15뷰 = 토글마다 134초). 소프트 캡의 최악 메모리는 "한 파일의 실제 뷰 수 ×
+#: 12.4MB × 세션 2"로, 뷰 15개면 ≈ 372MB — 무한정 쌓이던 예전 썸네일 OOM과
+#: 달리 파일 구조가 묶는 값이고, 설정을 바꿔가며 쌓이는 옛 항목에는 여전히
+#: 상한이 든다.
 OVERLAY_CACHE_PER_SESSION = 8
 
 #: opts 중 실제로 그려지는 픽셀을 바꾸는 설정만 뽑아 캐시 키로 쓴다
@@ -100,6 +103,13 @@ def _cached_plan_overlays(session, views, opts):
     """
     cache = session.setdefault("_overlay_cache", OrderedDict())
     settings_key = _edge_settings_key(opts)
+    # 이번 렌더가 쓰는 뷰들의 키. 축출에서 지킨다 — 상한(8)보다 뷰가 많은 판
+    # (실측 #44: 뷰 15개)에서 순차 삽입 LRU가 매 렌더 100% 미스가 되는 것을
+    # 막는다. 캐시가 전혀 안 듣는 그 상태로 뷰당 ~9초 × 15뷰 = 토글마다 134초가
+    # 실측됐다. 지킬 것만 남으면 상한을 넘긴 채 둔다 — SessionStore._evict가
+    # 고정된 세션 하나만 남았을 때 내리는 판단과 같다: 상한 초과가 스래싱보다 낫다.
+    wanted = {(tuple(v["colourIds"]), tuple(v["lineIds"]), settings_key)
+              for v in views}
     plans = []
     for view in views:
         key = (tuple(view["colourIds"]), tuple(view["lineIds"]), settings_key)
@@ -113,7 +123,10 @@ def _cached_plan_overlays(session, views, opts):
         _perf(perf="overlay_view", s=round(time.perf_counter() - t0, 4))
         cache[key] = made
         while len(cache) > OVERLAY_CACHE_PER_SESSION:
-            cache.popitem(last=False)
+            victim = next((k for k in cache if k not in wanted), None)
+            if victim is None:
+                break
+            del cache[victim]
         plans.extend(made)
     return plans
 

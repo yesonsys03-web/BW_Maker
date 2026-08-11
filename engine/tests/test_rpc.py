@@ -659,3 +659,40 @@ def test_the_overlay_cache_evicts_the_oldest_entry_instead_of_growing_without_bo
     engine.render_preview(sid, visibleLayerIds=[front_line_id],
                           edgeLines={"enabled": True, "width": widths[0]})
     assert len(calls) == calls_before + 1, "상한에 밀려났어야 할 설정이 여전히 캐시에 남아 있다"
+
+
+def test_a_render_whose_views_exceed_the_cache_cap_does_not_thrash(tmp_path, monkeypatch):
+    # 납품 캐릭터 폴더 실측(2026-08-11): 뷰 15개짜리 판에서 상한 8의 하드 캡
+    # LRU가 순차 삽입 때문에 매 렌더 100% 미스였다 — 타일이 전부 핫이어도
+    # 토글마다 뷰 15개를 전부 재계산해 134초가 걸렸다. 이번 렌더가 쓰는 뷰는
+    # 축출하지 않아야 한다(그동안 상한은 넘어도 된다 — SessionStore._evict가
+    # 고정 세션에 내리는 판단과 같다).
+    #
+    # 상한을 1로 낮추면 픽스처의 뷰 2개가 같은 상황을 만든다: 옛 구현은 FRONT를
+    # 넣고 BACK을 넣을 때 FRONT를 밀어내, 같은 입력의 두 번째 렌더가 처음부터
+    # 다시 계산한다.
+    monkeypatch.setattr(rpc, "OVERLAY_CACHE_PER_SESSION", 1)
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    r = engine.open_psd(str(p))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+    back_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "BACK"
+    )
+
+    calls = _spy_on_plan_overlays(monkeypatch)
+
+    both = [front_line_id, back_line_id]
+    engine.render_preview(sid, visibleLayerIds=both, edgeLines={"enabled": True})
+    assert len(calls) == 2, "첫 렌더는 두 뷰를 한 번씩 계산해야 한다"
+
+    engine.render_preview(sid, visibleLayerIds=both, edgeLines={"enabled": True})
+    assert len(calls) == 2, (
+        "같은 입력의 두 번째 렌더가 다시 계산했다 — 이번 렌더의 뷰가 상한에 밀려나는 스래싱이다"
+    )
