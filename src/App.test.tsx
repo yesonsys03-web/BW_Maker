@@ -1151,7 +1151,7 @@ test("applying a preset to a restored file asks first — that work was done by 
 
   click(screen.getByRole("button", { name: "적용" }));
 
-  await waitFor(() => expect(screen.getByText("기존 편집 내용을 대체합니다")).toBeTruthy());
+  await waitFor(() => expect(screen.getByText("포함 목록을 프리셋 결과로 대체합니다")).toBeTruthy());
   // 확인창이 뜬 동안에는 아직 아무것도 덮이지 않았다.
   expect(engine.applyPreset).not.toHaveBeenCalled();
 });
@@ -1170,7 +1170,7 @@ test("applying a preset to a plainly opened file still does not ask", async () =
   click(screen.getByRole("button", { name: "적용" }));
 
   await waitFor(() => expect(engine.applyPreset).toHaveBeenCalledTimes(2));
-  expect(screen.queryByText("기존 편집 내용을 대체합니다")).toBeNull();
+  expect(screen.queryByText("포함 목록을 프리셋 결과로 대체합니다")).toBeNull();
 });
 
 /**

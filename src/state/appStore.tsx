@@ -247,10 +247,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           // edited도 같은 분기를 따라야 한다. 복원한 ops는 아티스트가 이전
           // 세션에서 **손으로** 한 편집이다(병합·이름변경·순서변경, 그리고 포함
           // 체크박스) — 그것을 "지킬 편집 없음"이라고 말하면 두 확인창이 함께
-          // 무력해진다: "적용"은 PresetBar의 "기존 편집 내용을 대체합니다"를
-          // 건너뛰고 그 ops를 applyPresetResult로 갈아치우고, "비우기"도
-          // FilePanel의 확인창 없이 지나간다. 어느 쪽이든 사라지는 것이 하필
-          // 품이 제일 많이 든 작업이다.
+          // 무력해진다: "적용"은 PresetBar의 "포함 목록을 프리셋 결과로
+          // 대체합니다"를 건너뛰고 체크박스 선택을 매칭 결과로 갈아치우고,
+          // "비우기"도 FilePanel의 확인창 없이 지나간다.
           //
           // 이 줄은 이 기능 이전에는 맞는 말이었다 — 그때 openSuccess의 ops는
           // 아래에서 트리로 갓 만든 것이라 지킬 편집이 애초에 없었다.
@@ -389,7 +388,21 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       if (!current) return state;
       try {
         const includedIds = [...action.matchedLayerIds].sort((a, b) => a - b);
-        const entries = buildEntries(includedIds, action.operations);
+        // **손으로 한 병합·이름변경은 프리셋을 걸어도 지킨다**(아티스트가 정했다,
+        // 2026-08-11). 예전에는 `action.operations`가 ops를 통째로 갈아치웠는데,
+        // 실제로 쓰는 프리셋은 전부 merge:"none"이라 preset_operations가 빈 배열을
+        // 준다(engine/psd_engine/matching.py의 mode == "none"). 즉 갈아치우기는
+        // 없애기만 하고 대신 넣어주는 것이 없었다 — 하루치 병합이 확인창 한 번에
+        // 사라지는 값이었다.
+        //
+        // entries는 (includedIds, ops)의 함수이므로 **새 포함 목록으로 다시 만든다.**
+        // 이제 매칭에서 빠진 레이어를 참조하던 병합은 buildEntries가 남은 것들로
+        // 재생한다(setIncluded 주석과 같은 규칙이다).
+        //
+        // 대가를 적어 둔다: merge가 "none"이 아닌 프리셋을 쓰면 그 자동 병합이
+        // 화면에는 안 걸린다. 배치는 엔진에서 따로 계산하므로(batch.py:63) 그때는
+        // 화면과 배치 산출물이 갈린다. 지금 쓰는 프리셋에는 해당이 없다.
+        const entries = buildEntries(includedIds, current.ops);
         const next: OpsState = {
           includedIds,
           previewHiddenIds: current.previewHiddenIds,
@@ -401,7 +414,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           // 손으로 "라인이다"라고 지정한 것도 같은 성격이다 — 프리셋을 바꿔도
           // 그 판에서 그 레이어가 선화라는 사실은 변하지 않는다.
           manualLineIds: current.manualLineIds,
-          ops: action.operations,
+          ops: current.ops,
           entries,
         };
         return {
@@ -411,9 +424,14 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           // 파일의 목록이 남의 id로 바뀐다(AppState.matchedIdsByPath 주석 참고).
           matchedIdsByPath: { ...state.matchedIdsByPath, [action.path]: action.matchedLayerIds },
           // presetApplied: 사람이 "적용"을 먼저 눌렀다면 자동 적용이 그 위에 또
-          // 걸릴 이유가 없다. edited: 여기서 만들어진 ops는 프리셋의 산물이지
-          // 사람의 편집이 아니므로, 지금 상태에는 지킬 편집이 없다.
-          files: updateFile(state.files, action.path, { presetApplied: true, edited: false }),
+          // 걸릴 이유가 없다.
+          //
+          // **edited는 건드리지 않는다.** 예전에는 여기서 false로 내렸고 그때는
+          // 그것이 참이었다 — ops가 통째로 프리셋의 산물로 바뀌었으니 지킬 편집이
+          // 남아 있지 않았다. 이제 손 병합이 그대로 살아남으므로 false로 내리면
+          // 거짓이 되고, 다음 "적용"에서 확인창이 안 떠 체크박스 편집이 조용히
+          // 대체된다(같은 종류의 결함을 이 기능에서 이미 한 번 겪었다).
+          files: updateFile(state.files, action.path, { presetApplied: true }),
           opsByPath: { ...state.opsByPath, [action.path]: next },
         };
       } catch (e) {

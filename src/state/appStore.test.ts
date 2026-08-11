@@ -243,38 +243,61 @@ describe("ops actions delegate to the active file's OpsState", () => {
     expect(s.opsByPath["/a.psd"].entries.map((e) => e.entryId)).toEqual([1, 2, 5]);
   });
 
-  test("applyPresetResult replaces includedIds/ops/entries with the engine's result and sets matchedIds", () => {
-    const s0 = opened();
-    const s = appReducer(s0, {
-      type: "applyPresetResult",
-      path: "/a.psd",
-      matchedLayerIds: [5, 1],
-      operations: [{ op: "merge", layerIds: [1, 5], name: "M" }],
+  // 프리셋 적용은 **포함 목록**을 매칭 결과로 바꾼다. 손으로 한 병합·이름변경은
+  // 그대로 둔다(2026-08-11, 아티스트가 정했다). 예전에는 ops를 통째로 갈아치웠는데,
+  // 실제로 쓰는 프리셋은 전부 merge:"none"이라 엔진이 빈 배열을 준다 — 없애기만 하고
+  // 대신 넣어주는 것이 없는 거래였다.
+  test("applyPresetResult takes the match as the inclusion list but keeps the merges the artist made", () => {
+    const merged = appReducer(opened(), {
+      type: "pushOp", path: "/a.psd", op: { op: "merge", layerIds: [1, 2], name: "M" },
     });
-    expect(s.matchedIdsByPath["/a.psd"]).toEqual([5, 1]);
-    expect(s.opsByPath["/a.psd"].includedIds).toEqual([1, 5]);
-    expect(s.opsByPath["/a.psd"].ops).toEqual([{ op: "merge", layerIds: [1, 5], name: "M" }]);
-    expect(s.opsByPath["/a.psd"].entries.map((e) => e.entryId)).toEqual([-1]);
-    // previewHiddenIds carries over unchanged from the prior OpsState.
-    expect(s.opsByPath["/a.psd"].previewHiddenIds).toEqual(s0.opsByPath["/a.psd"].previewHiddenIds);
+
+    const s = appReducer(merged, {
+      type: "applyPresetResult", path: "/a.psd", matchedLayerIds: [5, 1, 2], operations: [],
+    });
+
+    expect(s.matchedIdsByPath["/a.psd"]).toEqual([5, 1, 2]);
+    expect(s.opsByPath["/a.psd"].includedIds).toEqual([1, 2, 5]);
+    expect(s.opsByPath["/a.psd"].ops).toEqual([{ op: "merge", layerIds: [1, 2], name: "M" }]);
+    // entries는 (includedIds, ops)로 다시 만들어진다 — 병합 하나 + 남은 잎 하나.
+    const entries = s.opsByPath["/a.psd"].entries;
+    expect(entries).toHaveLength(2);
+    expect(entries.some((e) => e.sourceIds.join(",") === "1,2")).toBe(true);
+    expect(s.opsByPath["/a.psd"].previewHiddenIds).toEqual(merged.opsByPath["/a.psd"].previewHiddenIds);
     expect(s.errors).toHaveLength(0);
   });
 
-  test("applyPresetResult applies the match even when an operation names a layer outside it", () => {
-    const s0 = opened();
-    let s: AppState | undefined;
-    expect(() => {
-      s = appReducer(s0, {
-        type: "applyPresetResult",
-        path: "/a.psd",
-        matchedLayerIds: [1],
-        operations: [{ op: "rename", layerId: 999, name: "x" }], // 999 isn't in matchedLayerIds
-      });
-    }).not.toThrow();
-    expect(s!.errors).toHaveLength(0);
-    // 매칭 결과는 반영되고, 대상이 없는 작업만 아무 일도 하지 않는다.
-    expect(s!.matchedIdsByPath["/a.psd"]).toEqual([1]);
-    expect(s!.opsByPath["/a.psd"].entries).toEqual([{ entryId: 1, sourceIds: [1], name: null }]);
+  // merge가 "none"이 아닌 프리셋을 골라도 화면의 병합을 밀어내지 않는다.
+  // (대가: 그런 프리셋의 자동 병합은 화면에 안 걸린다. 배치는 엔진에서 따로
+  // 계산하므로 그때는 화면과 배치가 갈린다 — appStore.tsx의 주석 참고.)
+  test("applyPresetResult does not let the preset's own operations replace the artist's", () => {
+    const merged = appReducer(opened(), {
+      type: "pushOp", path: "/a.psd", op: { op: "merge", layerIds: [1, 2], name: "M" },
+    });
+
+    const s = appReducer(merged, {
+      type: "applyPresetResult", path: "/a.psd", matchedLayerIds: [1, 2, 5],
+      operations: [{ op: "merge", layerIds: [1, 5], name: "PRESET" }],
+    });
+
+    expect(s.opsByPath["/a.psd"].ops).toEqual([{ op: "merge", layerIds: [1, 2], name: "M" }]);
+    expect(s.errors).toHaveLength(0);
+  });
+
+  // 매칭이 좁아지면 병합에 쓰인 레이어가 포함에서 빠질 수 있다. buildEntries가
+  // 남은 것으로 재생해야 하고, 던져서 "프리셋 적용 실패"가 되면 안 된다.
+  test("applyPresetResult regenerates a merge whose layer fell out of the match", () => {
+    const merged = appReducer(opened(), {
+      type: "pushOp", path: "/a.psd", op: { op: "merge", layerIds: [1, 2], name: "M" },
+    });
+
+    const s = appReducer(merged, {
+      type: "applyPresetResult", path: "/a.psd", matchedLayerIds: [1], operations: [],
+    });
+
+    expect(s.errors).toHaveLength(0);
+    expect(s.opsByPath["/a.psd"].includedIds).toEqual([1]);
+    expect(s.opsByPath["/a.psd"].entries.flatMap((e) => e.sourceIds)).toEqual([1]);
   });
 
   // 로드 큐는 목록의 파일을 배경에서 차례로 열고 프리셋까지 붙인다. 레이어 id는
@@ -510,7 +533,7 @@ describe("presetApplied (자동 적용 래치)", () => {
   });
 });
 
-// "적용"의 "기존 편집 내용을 대체합니다" 확인창이 이 플래그로 뜬다. ops가 비어
+// "적용"의 "포함 목록을 프리셋 결과로 대체합니다" 확인창이 이 플래그로 뜬다. ops가 비어
 // 있는지로 보지 않는 이유가 핵심이다: 프리셋 적용 자체가 ops를 만들기 때문에,
 // 자동 적용이 들어간 뒤로는 파일을 열기만 해도 ops가 차 있다.
 describe("edited (수동 편집 표시)", () => {
@@ -534,8 +557,9 @@ describe("edited (수동 편집 표시)", () => {
       matchedLayerIds: [1, 5],
       operations: [{ op: "merge", layerIds: [1, 5], name: "M" }],
     });
-    // 이것이 회귀 방지의 요점: ops는 찼지만 지울 사람의 편집은 없다.
-    expect(s.opsByPath["/a.psd"].ops).toHaveLength(1);
+    // 이것이 회귀 방지의 요점: 자동 적용은 사람의 편집이 아니다. 그리고 이제
+    // 프리셋의 작업은 ops에 들어가지도 않는다 — 손으로 한 것만 거기 남는다.
+    expect(s.opsByPath["/a.psd"].ops).toEqual([]);
     expect(s.files[0].edited).toBe(false);
   });
 
@@ -549,14 +573,12 @@ describe("edited (수동 편집 표시)", () => {
     expect(s.files[0].edited).toBe(true);
   });
 
-  test("undoOp marks it — undoing a preset's merge is a human decision too", () => {
-    const applied = appReducer(opened(), {
-      type: "applyPresetResult",
-      path: "/a.psd",
-      matchedLayerIds: [1, 5],
-      operations: [{ op: "merge", layerIds: [1, 5], name: "M" }],
+  test("undoOp marks it — taking a merge back is a human decision too", () => {
+    const merged = appReducer(opened(), {
+      type: "pushOp", path: "/a.psd", op: { op: "merge", layerIds: [1, 5], name: "M" },
     });
-    const s = appReducer(applied, { type: "undoOp", path: "/a.psd" });
+    const s = appReducer(merged, { type: "undoOp", path: "/a.psd" });
+    expect(s.opsByPath["/a.psd"].ops).toEqual([]);
     expect(s.files[0].edited).toBe(true);
   });
 
@@ -574,7 +596,10 @@ describe("edited (수동 편집 표시)", () => {
     expect(s.files[0].edited).toBe(true);
   });
 
-  test("re-applying a preset clears it — the edits are gone, so nothing is left to protect", () => {
+  // 2026-08-11에 뒤집힌 규칙이다. 적용이 손 병합을 지키게 된 뒤로는, 적용했다고
+  // 해서 지킬 것이 없어지지 않는다 — 병합은 그대로 남아 있고 다음 "적용"이
+  // 체크박스 선택을 또 대체하므로 확인창은 계속 떠야 한다.
+  test("re-applying a preset does not clear it — the merges survived, so there is still something to protect", () => {
     const edited = appReducer(opened(), {
       type: "pushOp",
       path: "/a.psd",
@@ -586,7 +611,8 @@ describe("edited (수동 편집 표시)", () => {
       matchedLayerIds: [1],
       operations: [],
     });
-    expect(s.files[0].edited).toBe(false);
+    expect(s.opsByPath["/a.psd"].ops).toHaveLength(1);
+    expect(s.files[0].edited).toBe(true);
   });
 });
 

@@ -228,9 +228,9 @@ export function PresetBar({
       {confirmApply && (
         <div className="modal-overlay" onClick={() => setConfirmApply(false)}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <h3>기존 편집 내용을 대체합니다</h3>
+            <h3>포함 목록을 프리셋 결과로 대체합니다</h3>
             <p>
-              현재 레이어 편집(병합/이름변경 등) 내역이 모두 사라지고, 프리셋의 매칭 결과로 대체됩니다. 계속하시겠습니까?
+              지금 체크된 레이어 목록이 프리셋의 매칭 결과로 대체됩니다. 손으로 한 병합·이름변경은 그대로 유지됩니다. 계속하시겠습니까?
             </p>
             <div className="modal-actions">
               <button type="button" onClick={() => setConfirmApply(false)}>
