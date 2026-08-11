@@ -114,31 +114,39 @@ function collectTogglableLeafIds(node: TreeNode, out: number[] = []): number[] {
 }
 
 /**
- * shift-범위 선택의 기준이 되는 화면 순서. **그룹 행도 들어간다** — 그룹이
- * 선택되는 행이 된 뒤로는 그것도 화면의 한 줄이고, 빼두면 그룹을 지나는 범위
- * 선택이 그 줄만 건너뛴다.
- */
-/**
- * 필터를 통과한 잎만 남긴 트리. 살아남은 잎이 하나도 없는 그룹은 통째로 빠진다.
+ * 필터를 통과한 잎을 **그것을 직접 담고 있는 그룹** 아래로 모은다. 조상 그룹은
+ * 줄을 만들지 않고 이름에 접힌다(`REFS / PLACEMENT / CROWD / MG`).
  *
- * "라인만"을 평면 목록으로 그리던 때는 `01`~`05`가 그룹마다 되풀이되어 어느
- * 그룹의 것인지 이름만으로 구별할 수 없었다(군중 판이 정확히 그 모양이다).
- * 조상 경로를 옆에 붙여도 부족했다 — 아티스트가 원한 것은 **일반 보기와 같은
- * 구조**다. 그래서 필터는 화면 구조를 바꾸지 않고 안 맞는 것을 걷어내기만 한다.
+ * 두 번의 요청이 이 모양을 만들었다. 먼저 평면 목록으로 그리던 때는 `01`~`05`가
+ * 그룹마다 되풀이되어 어느 그룹의 것인지 알 수 없었다(군중 판이 그 모양이다).
+ * 그래서 구조를 그대로 살렸더니 이번엔 **조상이 다섯 줄 쌓였다** — MG 하나를
+ * 지정했는데 REFS·PLACEMENT·CROWD·CROWD까지 체크된 줄로 보이니, 아티스트는 그
+ * 그룹들도 내보내기에 들어간 것으로 읽는다.
+ *
+ * 실제로 들어가는 것은 잎(pixel)뿐이고 그룹은 늘 표시였다. 그래도 화면이 그렇게
+ * 말하면 안 되므로, 줄은 라인을 직접 가진 그룹에만 준다.
  */
-function pruneTree(nodes: TreeNode[], keep: Set<number>): TreeNode[] {
-  const out: TreeNode[] = [];
+function pruneTree(nodes: TreeNode[], keep: Set<number>, ancestry: string[] = [], out: TreeNode[] = []): TreeNode[] {
   for (const node of nodes) {
-    if (isGroup(node)) {
-      const children = pruneTree(node.children ?? [], keep);
-      if (children.length > 0) out.push({ ...node, children });
-    } else if (keep.has(node.id)) {
-      out.push(node);
+    if (!isGroup(node)) {
+      // 그룹 밖(최상위)에 있는 잎은 그대로 한 줄이다.
+      if (keep.has(node.id) && ancestry.length === 0) out.push(node);
+      continue;
     }
+    const path = [...ancestry, node.name];
+    const own = (node.children ?? []).filter((child) => !isGroup(child) && keep.has(child.id));
+    // **직접** 담고 있을 때만 줄을 만든다. 조상은 이름에 접어 넣는다.
+    if (own.length > 0) out.push({ ...node, name: path.join(" / "), children: own });
+    pruneTree(node.children ?? [], keep, path, out);
   }
   return out;
 }
 
+/**
+ * shift-범위 선택의 기준이 되는 화면 순서. **그룹 행도 들어간다** — 그룹이
+ * 선택되는 행이 된 뒤로는 그것도 화면의 한 줄이고, 빼두면 그룹을 지나는 범위
+ * 선택이 그 줄만 건너뛴다.
+ */
 function collectVisibleRowOrder(nodes: TreeNode[], collapsedIds: Set<number>, out: number[] = []): number[] {
   for (const node of nodes) {
     out.push(node.id);

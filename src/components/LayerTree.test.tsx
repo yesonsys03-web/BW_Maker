@@ -801,3 +801,46 @@ test("a group in the line-only view acts on the lines it shows, not the ones it 
   // 보이는 것은 01 하나뿐이므로 그것만 해제된다 — halo glow는 건드리지 않는다.
   expect(designated(onSetManualLine)).toEqual([[1], false]);
 });
+
+test("the line-only view shows one row for the group that holds the lines, not the whole chain", () => {
+  // 화면에서 나온 모양 그대로: 라인은 다섯 겹 안쪽에 있다. 조상까지 줄로 세우면
+  // MG 하나를 지정했는데 REFS·PLACEMENT·CROWD가 전부 체크된 줄로 보이고,
+  // 아티스트는 그 그룹들도 내보내기에 들어간 것으로 읽는다.
+  renderTree(
+    [
+      group(10, "REFS", [
+        group(11, "PLACEMENT", [
+          group(12, "CROWD", [group(13, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel")])]),
+        ]),
+      ]),
+    ],
+    [1, 2],
+    { manualLineIds: [1, 2] }
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "라인만" }));
+
+  const names = groupRows().map((r) => r.querySelector(".node-name")?.textContent);
+  expect(names).toEqual(["REFS / PLACEMENT / CROWD / MG"]);
+  expect(leafCheckboxes()).toHaveLength(2);
+});
+
+test("a group that only holds other groups gets no row of its own", () => {
+  // 라인을 **직접** 가진 그룹에만 줄을 준다. 중간 그룹이 줄을 얻으면 그 체크박스가
+  // 무엇을 켜는지 화면만 봐서는 알 수 없다.
+  renderTree(
+    [
+      group(10, "CROWD", [
+        group(11, "MID", [leaf(1, "01", "pixel")]),
+        group(12, "FRONT", [leaf(2, "01", "pixel")]),
+      ]),
+    ],
+    [1, 2],
+    { manualLineIds: [1, 2] }
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "라인만" }));
+
+  const names = groupRows().map((r) => r.querySelector(".node-name")?.textContent);
+  expect(names).toEqual(["CROWD / MID", "CROWD / FRONT"]);
+});
