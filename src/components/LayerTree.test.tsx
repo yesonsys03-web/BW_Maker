@@ -100,6 +100,7 @@ function Harness(props: {
   tree: TreeNode[];
   initialOps: OpsState;
   onSetManualLine: (ids: number[], on: boolean) => void;
+  onSetIncluded?: (ids: number[]) => void;
 }) {
   const [ops, dispatch] = useReducer(opsReducer, props.initialOps);
   const spy = useRef(props.onSetManualLine);
@@ -107,6 +108,15 @@ function Harness(props: {
   const setManualLine = useCallback((ids: number[], on: boolean) => {
     spy.current(ids, on);
     dispatch({ type: "setManualLine", layerIds: ids, on });
+  }, []);
+  // 체크도 같은 이유로 왕복시킨다(위 주석 참고). 고정 prop으로 두면 그룹 체크를
+  // 눌러도 화면의 체크 상태가 그대로라, 두 번째 클릭이 첫 번째와 같은 방향으로
+  // 가는지("전부 켜짐"에서 눌렀을 때 꺼지는지)를 어느 테스트도 볼 수 없다.
+  const includeSpy = useRef(props.onSetIncluded);
+  includeSpy.current = props.onSetIncluded;
+  const setIncluded = useCallback((ids: number[]) => {
+    includeSpy.current?.(ids);
+    dispatch({ type: "setIncluded", includedIds: ids });
   }, []);
   return (
     <LayerTree
@@ -118,7 +128,7 @@ function Harness(props: {
       ops={ops}
       matchedIds={[]}
       thumbs={{}}
-      onSetIncluded={vi.fn()}
+      onSetIncluded={setIncluded}
       onTogglePreview={vi.fn()}
       onSetPreviewHidden={vi.fn()}
       onToggleSolo={vi.fn()}
@@ -135,10 +145,16 @@ function Harness(props: {
 /** 마운트만 한다 — 포인터는 아직 패널 밖이다(앱을 막 띄운 상태). */
 function mountTree(tree: TreeNode[], includedIds: number[], extraOps: Partial<OpsState> = {}) {
   const onSetManualLine = vi.fn();
+  const onSetIncluded = vi.fn();
   render(
-    <Harness tree={tree} initialOps={{ ...opsOf(includedIds), ...extraOps }} onSetManualLine={onSetManualLine} />
+    <Harness
+      tree={tree}
+      initialOps={{ ...opsOf(includedIds), ...extraOps }}
+      onSetManualLine={onSetManualLine}
+      onSetIncluded={onSetIncluded}
+    />
   );
-  return { onSetManualLine };
+  return { onSetManualLine, onSetIncluded };
 }
 
 function renderTree(tree: TreeNode[], includedIds: number[], extraOps: Partial<OpsState> = {}) {
@@ -554,4 +570,96 @@ test("a second KeyL releases what the first one designated", () => {
 
   expect(designated(onSetManualLine, 0)).toEqual([[1, 2], true]);
   expect(designated(onSetManualLine, 1)).toEqual([[1, 2], false]);
+});
+
+/**
+ * 그룹 체크박스.
+ *
+ * 프리셋이 아무것도 못 잡는 파일(군중 판이 그렇다)은 아티스트가 손으로 체크하는데,
+ * 그전에는 그룹 행에 체크박스 자리만 비어 있어서 `01`~`05` 형제를 한 장씩 눌러야
+ * 했다. 그룹 하나로 그 안을 전부 켜고 끈다.
+ */
+function groupCheckbox(index = 0): HTMLInputElement {
+  return screen.getAllByRole("checkbox", { name: "그룹 내보내기 토글" })[index] as HTMLInputElement;
+}
+
+/** 잎 행의 체크박스만. 그룹 것과 섞이지 않게 행 클래스로 좁힌다. */
+function leafCheckboxes(): HTMLInputElement[] {
+  return Array.from(document.querySelectorAll(".tree-row-leaf input.include-checkbox"));
+}
+
+test("the group checkbox includes every layer inside it at once", () => {
+  const { onSetIncluded } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel"), leaf(3, "03", "pixel")])],
+    []
+  );
+
+  fireEvent.click(groupCheckbox());
+
+  expect(onSetIncluded).toHaveBeenCalledWith([1, 2, 3]);
+  expect(leafCheckboxes().map((c) => c.checked)).toEqual([true, true, true]);
+  expect(groupCheckbox().checked).toBe(true);
+});
+
+test("the group checkbox releases them all when they are already on", () => {
+  // 방향을 지금 상태에서 정하는지 본다. 고정 prop 하네스였다면 이 두 번째 클릭이
+  // 첫 번째와 같은 방향으로 가도 아무도 못 잡는다.
+  const { onSetIncluded } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel")])],
+    [1, 2]
+  );
+
+  fireEvent.click(groupCheckbox());
+
+  expect(onSetIncluded).toHaveBeenCalledWith([]);
+  expect(leafCheckboxes().map((c) => c.checked)).toEqual([false, false]);
+});
+
+test("a half-checked group shows it, and one click fills the rest", () => {
+  // 표시가 없으면 "다섯 중 셋"이 "하나도 안 켜짐"과 똑같이 보인다.
+  const { onSetIncluded } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel"), leaf(3, "03", "pixel")])],
+    [2]
+  );
+
+  expect(groupCheckbox().checked).toBe(false);
+  expect(groupCheckbox().indeterminate).toBe(true);
+
+  fireEvent.click(groupCheckbox());
+
+  expect(onSetIncluded).toHaveBeenCalledWith([1, 2, 3]);
+  expect(groupCheckbox().indeterminate).toBe(false);
+});
+
+test("the group checkbox skips layers that cannot be exported", () => {
+  // 잎 행이 체크박스를 안 내주는 종류(텍스트)를 그룹이 몰래 켜면, 화면에 체크가
+  // 안 보이는 그 id가 includedIds를 타고 그대로 내보내기 인자가 된다.
+  const { onSetIncluded } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "메모", "type")])],
+    []
+  );
+
+  fireEvent.click(groupCheckbox());
+
+  expect(onSetIncluded).toHaveBeenCalledWith([1]);
+  // 그리고 그 그룹은 "전부 켜짐"이다 — 못 켜는 것을 기다리느라 영영 반쯤 켜진
+  // 상태로 남으면, 다음 클릭이 끄지 않고 다시 켜기만 한다.
+  expect(groupCheckbox().checked).toBe(true);
+});
+
+test("a group with nothing exportable has its checkbox disabled", () => {
+  renderTree([group(10, "NOTES", [leaf(1, "메모", "type")])], []);
+
+  expect(groupCheckbox().disabled).toBe(true);
+});
+
+test("the group checkbox reaches through nested groups", () => {
+  const { onSetIncluded } = renderTree(
+    [group(10, "CROWD", [group(11, "MID", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel")]), leaf(3, "base", "pixel")])],
+    []
+  );
+
+  fireEvent.click(groupCheckbox());
+
+  expect(onSetIncluded).toHaveBeenCalledWith([1, 2, 3]);
 });

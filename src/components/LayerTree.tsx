@@ -98,6 +98,21 @@ function collectLeafIds(node: TreeNode, out: number[] = []): number[] {
   return out;
 }
 
+/**
+ * 그룹 아래에서 **체크할 수 있는** 잎만. 잎 행이 체크박스를 내주는 조건과 같아야
+ * 한다(그쪽 `disabledCheckbox`는 `kind !== "pixel"`) — 여기서 텍스트나 그릴 것이
+ * 없는 종류까지 담으면, 그룹 체크가 화면에 체크박스도 없는 행을 켠 것처럼 굴고
+ * 그 id는 includedIds를 타고 그대로 내보내기 인자가 된다.
+ */
+function collectTogglableLeafIds(node: TreeNode, out: number[] = []): number[] {
+  if (isGroup(node)) {
+    for (const child of node.children ?? []) collectTogglableLeafIds(child, out);
+  } else if (node.kind === "pixel") {
+    out.push(node.id);
+  }
+  return out;
+}
+
 function collectVisibleLeafOrder(nodes: TreeNode[], collapsedIds: Set<number>, out: number[] = []): number[] {
   for (const node of nodes) {
     if (isGroup(node)) {
@@ -642,6 +657,22 @@ export function LayerTree({
     for (const op of mergeIntoOps(planEntries, targets, dest)) onPushOp(op);
   }
 
+  /**
+   * 그룹 체크 하나로 그 안의 잎을 전부 켜고 끈다.
+   *
+   * 군중 판처럼 프리셋이 아무것도 못 잡는 파일은 아티스트가 손으로 체크하는데,
+   * 그때 `01`~`05` 같은 형제 잎을 한 장씩 누르고 있었다. 그룹 행에는 체크박스
+   * 자리만 비어 있었다.
+   *
+   * 일부만 켜져 있으면 **전부 켠다**(체크박스 관례). 전부 켜져 있을 때만 끈다.
+   */
+  function handleGroupInclude(node: TreeNode) {
+    const targets = collectTogglableLeafIds(node);
+    if (targets.length === 0) return;
+    const allIncluded = targets.every((id) => includedSet.has(id));
+    onSetIncluded(applyBulkInclude(ops.includedIds, targets, !allIncluded));
+  }
+
   function handleBulkInclude(include: boolean) {
     const targets = bulkTogglableIds(filteredLeaves);
     if (targets.length === 0) return;
@@ -671,6 +702,9 @@ export function LayerTree({
       // 실제로 켜는 목록과 같아야, 이 표시가 버튼을 눌렀을 때 벌어질 일과 어긋나지 않는다.
       const soloIds = groupSoloIds([node]);
       const allSoloed = soloIds.length > 0 && soloIds.every((id) => soloSet.has(id));
+      const includeTargets = collectTogglableLeafIds(node);
+      const allIncluded = includeTargets.length > 0 && includeTargets.every((id) => includedSet.has(id));
+      const someIncluded = includeTargets.some((id) => includedSet.has(id));
       return (
         <div key={node.id}>
           <div
@@ -682,7 +716,28 @@ export function LayerTree({
             <button type="button" className="fold-toggle" onClick={() => toggleCollapse(node.id)}>
               {collapsed ? "▶" : "▼"}
             </button>
-            <span className="checkbox-slot" />
+            <input
+              type="checkbox"
+              className="include-checkbox"
+              checked={allIncluded}
+              // 일부만 켜진 상태를 화면에 보인다. React에 prop이 없어 ref로 건다 —
+              // 없으면 "다섯 중 셋 켜짐"이 "하나도 안 켜짐"과 똑같이 보인다.
+              ref={(el) => {
+                if (el) el.indeterminate = someIncluded && !allIncluded;
+              }}
+              // 켤 수 있는 잎이 없으면 누를 것이 없다(그룹 solo 버튼과 같은 판단).
+              disabled={includeTargets.length === 0}
+              aria-label="그룹 내보내기 토글"
+              title={
+                includeTargets.length === 0
+                  ? "이 그룹에는 내보내기에 포함할 수 있는 레이어가 없습니다"
+                  : allIncluded
+                    ? `이 그룹 ${includeTargets.length}장을 전부 해제`
+                    : `이 그룹 ${includeTargets.length}장을 전부 포함`
+              }
+              onClick={(e) => e.stopPropagation()}
+              onChange={() => handleGroupInclude(node)}
+            />
             <button
               type="button"
               className={`solo-toggle${allSoloed ? " solo-on" : ""}`}
