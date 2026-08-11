@@ -190,6 +190,28 @@ export async function renderDocumentPreview(
 }
 
 /**
+ * 잎 타일 워밍업(엔진 warm_preview_tiles). 유휴 시간에 아직 안 데운 잎을 미리
+ * 디코드해, 첫 토글도 핫 토글(0.04~0.1초)과 같게 만든다 — 콜드면 그 잎의 원본
+ * 해상도 디코드 0.7~50초가 토글에 그대로 얹힌다(2026-08-11 납품 판 실측).
+ *
+ * 엔진이 요청당 시간 예산으로 잘게 자르고 나머지를 remaining으로 돌려준다 —
+ * 호출자는 remaining이 빌 때까지 반복 호출한다(lib/warmupQueue.ts). maxSize는
+ * renderPreview와 같아야 한다: 배율이 타일 캐시 키에 들어가므로, 다르면 다른
+ * 타일을 데워 놓고 정작 렌더는 콜드로 돈다.
+ */
+export async function warmPreviewTiles(
+  sessionId: number,
+  layerIds: number[],
+  maxSize: number
+): Promise<{ warmed: number[]; skipped: number[]; remaining: number[] }> {
+  return callEngine("warm_preview_tiles", { sessionId, layerIds, maxSize }) as Promise<{
+    warmed: number[];
+    skipped: number[];
+    remaining: number[];
+  }>;
+}
+
+/**
  * Renders thumbnail images for layers.
  */
 export async function renderThumbnails(

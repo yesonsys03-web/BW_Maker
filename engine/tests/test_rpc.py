@@ -696,3 +696,65 @@ def test_a_render_whose_views_exceed_the_cache_cap_does_not_thrash(tmp_path, mon
     assert len(calls) == 2, (
         "같은 입력의 두 번째 렌더가 다시 계산했다 — 이번 렌더의 뷰가 상한에 밀려나는 스래싱이다"
     )
+
+
+def _open_leaves(engine, fixture_psd):
+    r = engine.open_psd(str(fixture_psd))
+    sid = r["sessionId"]
+    s = engine.store.get(sid)
+    leaf_ids = [lid for lid, l in s["layers_by_id"].items() if not l.is_group()]
+    return sid, leaf_ids
+
+
+def test_warm_preview_tiles_makes_the_first_toggle_hot(fixture_psd, monkeypatch):
+    # 실측(2026-08-11, 납품 BG 판): 토글 지연은 새로 켠 잎의 콜드 디코드가
+    # 전부다(0.7~4.7초; 핫이면 0.04~0.1초). 워밍업이 지나간 잎은 다음
+    # render_preview가 디코드 없이 캐시만 합성해야 한다.
+    from psd_engine import render as render_mod
+
+    engine = rpc.Engine(out=io.StringIO())
+    sid, leaf_ids = _open_leaves(engine, fixture_psd)
+
+    res = engine.warm_preview_tiles(sid, layerIds=leaf_ids)
+    assert res["remaining"] == [] and res["skipped"] == []
+    assert sorted(res["warmed"]) == sorted(leaf_ids)
+
+    calls = []
+    real = render_mod.extract_rgba
+    monkeypatch.setattr(render_mod, "extract_rgba",
+                        lambda layer: calls.append(layer) or real(layer))
+    engine.render_preview(sid, visibleLayerIds=leaf_ids)
+    assert calls == [], f"워밍업이 지나갔는데 렌더가 {len(calls)}장을 다시 디코드했다"
+
+
+def test_warm_preview_tiles_makes_progress_even_with_no_budget(fixture_psd):
+    # 예산이 0이어도 호출당 최소 한 장은 데워야 remaining 반복 호출이 끝난다 —
+    # 아니면 프런트의 워밍업 루프가 같은 목록으로 영원히 돈다.
+    engine = rpc.Engine(out=io.StringIO())
+    sid, leaf_ids = _open_leaves(engine, fixture_psd)
+
+    pending = list(leaf_ids)
+    rounds = 0
+    while pending:
+        res = engine.warm_preview_tiles(sid, layerIds=pending, budgetMs=0)
+        assert len(res["warmed"]) >= 1, "예산 0 호출이 아무것도 데우지 않았다"
+        pending = res["remaining"]
+        rounds += 1
+        assert rounds <= len(leaf_ids), "반복 호출이 수렴하지 않는다"
+
+
+def test_warm_preview_tiles_skips_a_leaf_predicted_too_slow(fixture_psd, monkeypatch):
+    # stdin이 직렬이라 워밍업 요청이 도는 동안 사용자 렌더가 뒤에서 기다린다.
+    # 예산 확인은 잎 사이에서만 가능하므로, 잎 하나의 예상 시간이 상한을 넘으면
+    # 시작하지 않고 skipped로 알려야 한다. 상한을 0으로 낮추면 픽셀이 있는 모든
+    # 잎이 "너무 느림"이 된다.
+    from psd_engine import render as render_mod
+
+    monkeypatch.setattr(render_mod, "WARM_MAX_PREDICTED_S", 0.0)
+    engine = rpc.Engine(out=io.StringIO())
+    sid, leaf_ids = _open_leaves(engine, fixture_psd)
+
+    res = engine.warm_preview_tiles(sid, layerIds=leaf_ids)
+    assert res["warmed"] == [], "상한 0인데도 디코드를 시작했다"
+    assert res["remaining"] == []
+    assert sorted(res["skipped"]) == sorted(leaf_ids)

@@ -1038,6 +1038,89 @@ def _preview_tile(session, layer_id, scale):
     return entry
 
 
+#: warm_preview_tiles가 쓰는 예상 디코드 속도(Mpx/s). 2026-08-11 납품 판 실측
+#: (.superpowers/sdd/render-time)에서 느린 쪽으로 잡은 값이다: 무마스크 topil은
+#: 내용(RLE 압축률)에 따라 17~58Mpx/s를 오갔고(50.4Mpx 0.87s, 81.8Mpx 4.62s),
+#: 마스크 빠른 경로는 24Mpx 2.82s(~8.5Mpx/s), 가드에 막힌 composite 경로는
+#: ~4Mpx/s다. 정확한 예측이 목적이 아니다 — 도는 **순서**와 "이 잎은 시작하면
+#: 안 된다"는 판단에만 쓰므로, 빗나가도 순서가 조금 바뀔 뿐이다.
+#:
+#: **예측은 자릿수 도구다.** 같은 날 캐릭터 판 하나(#44)의 무마스크 59.9Mpx 잎이
+#: 49.7초(~1.2Mpx/s)로 예측의 12배가 나왔다 — 예측 4초라 상한(10초)을 통과해
+#: 워밍업이 시작하고, 그동안 온 사용자 렌더는 그 뒤에서 기다린다. 그래도 잎을
+#: 작은 것부터 돌므로 이런 잎은 마지막에 오고, 워밍업이 없으면 그 50초를
+#: 사용자가 토글 순간에 그대로 내는 것이라 순손해는 아니다. 채널 데이터의
+#: 압축 바이트 수로 추정을 바꾸면 나아질 수 있다 — 아직 안 쟀다.
+WARM_RATE_MPX_S = {"unmasked": 15.0, "masked_fast": 8.0, "masked_slow": 4.0}
+
+#: 예상 시간이 이 값(초)을 넘는 잎은 워밍업이 건너뛴다. stdin이 직렬이라 워밍업
+#: 요청이 도는 동안 사용자 렌더가 뒤에서 기다리는데, 예산 확인은 잎 사이에서만
+#: 할 수 있다 — 잎 하나가 오래 걸릴 것 같으면 아예 시작하지 않는 것이 차단
+#: 시간의 상한을 지키는 유일한 방법이다. 건너뛴 잎의 첫 토글은 예전처럼 느리다
+#: (실측 최악 예상 53s, 213Mpx 가드 막힌 마스크 잎).
+WARM_MAX_PREDICTED_S = 10.0
+
+
+def _warm_cost(layer):
+    """잎 하나의 예상 디코드 시간(초). 워밍업의 순서와 건너뛰기 판단에 쓴다."""
+    mpx = layer.width * layer.height / 1e6
+    if layer.mask is not None and not layer.mask.disabled:
+        kind = "masked_fast" if _mask_fast_ok(layer) else "masked_slow"
+    else:
+        kind = "unmasked"
+    return mpx / WARM_RATE_MPX_S[kind]
+
+
+def warm_preview_tiles(session, layer_ids, max_size, budget_s):
+    """
+    토글이 켤 수 있는 잎들의 미리보기 타일을 유휴 시간에 미리 디코드한다.
+
+    실측(2026-08-11, 납품 BG 판): 타일이 핫이면 토글이 0.04~0.1초, 콜드면 그 잎
+    하나의 원본 해상도 디코드가 0.7~4.7초다. 프리페치는 라인 조합 한 장만
+    만들므로 라인이 아닌 잎은 전부 콜드로 남는다 — 엔진이 놀 때 데워 두면
+    첫 토글도 핫 토글과 같아진다.
+
+    예상 비용 오름차순으로 돌고, 예산이 차면 나머지를 remaining으로 돌려준다.
+    호출자는 remaining이 빌 때까지 다시 부른다 — 한 번에 다 데우지 않는 것은
+    stdin이 직렬이라 긴 워밍업 뒤에 사용자 렌더가 줄을 서기 때문이다. 예산과
+    무관하게 호출당 최소 한 장은 데운다(예산 0으로 불러도 전진해야 끝이 난다).
+    그룹·모르는 id는 조용히 버린다 — remaining에 안 남으므로 다시 오지 않는다.
+    """
+    scale = preview_scale(session["psd"], max_size)
+    cache = session.setdefault("preview_tiles", OrderedDict())
+    warmed, skipped, todo = [], [], []
+    for lid in layer_ids:
+        layer = session["layers_by_id"].get(lid)
+        if layer is None or layer.is_group():
+            continue
+        if (lid, round(scale, 6)) in cache:
+            warmed.append(lid)
+            continue
+        # 빈 잎(0x0)은 _preview_tile이 None을 캐시한다 — 비용 0으로 데운다.
+        cost = 0.0 if layer.width <= 0 or layer.height <= 0 else _warm_cost(layer)
+        todo.append((cost, lid))
+    todo.sort()
+
+    t0 = time.perf_counter()
+    remaining = []
+    did_work = False
+    for i, (cost, lid) in enumerate(todo):
+        if cost > WARM_MAX_PREDICTED_S:
+            skipped.append(lid)
+            continue
+        if did_work and time.perf_counter() - t0 >= budget_s:
+            remaining.extend(l for _, l in todo[i:])
+            break
+        _preview_tile(session, lid, scale)
+        warmed.append(lid)
+        did_work = True
+    # 예산에 걸려 남은 것 중 상한 초과분은 다음 호출에서도 skipped가 될 뿐이니
+    # 그대로 remaining에 둔다 — 분류를 여기서 미리 하면 코드만 두 벌이 된다.
+    _perf(perf="warm", warmed=len(warmed), skipped=len(skipped),
+          remaining=len(remaining), s=round(time.perf_counter() - t0, 4))
+    return {"warmed": warmed, "skipped": skipped, "remaining": remaining}
+
+
 def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=None,
                    line_color_ids=None, edge_overlays=None):
     """

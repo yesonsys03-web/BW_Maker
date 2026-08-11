@@ -28,6 +28,7 @@ const engine = vi.hoisted(() => ({
   onEngineDead: vi.fn(),
   callEngine: vi.fn(),
   psdMtimes: vi.fn(),
+  warmPreviewTiles: vi.fn(),
 }));
 
 vi.mock("./lib/engine", () => ({
@@ -187,6 +188,9 @@ beforeEach(() => {
   engine.onEngineDead.mockResolvedValue(() => {});
   engine.onEngineEvent.mockResolvedValue(() => {});
   engine.collectPsdFiles.mockResolvedValue({ files: PATHS, truncated: false, skippedDirs: 0 });
+  // 기본은 "전부 한 번에 데워짐" — 워밍업 큐가 한 번 부르고 끝난다. 워밍업의
+  // 반복·양보 규약 자체는 lib/warmupQueue.test.ts가 잠근다.
+  engine.warmPreviewTiles.mockResolvedValue({ warmed: [], skipped: [], remaining: [] });
   vi.mocked(openDialog).mockResolvedValue(PATHS as never);
 });
 
@@ -1540,4 +1544,23 @@ test("opening a project keeps the files whose PSD changed in the list, with the 
   // 목록에 남아 있고, 왜 작업이 없는지가 그 자리에 적혀 있다.
   await waitFor(() => expect(fileRow("moved.psd")).toBeTruthy());
   expect(fileRow("moved.psd").textContent).toContain("파일이 바뀜");
+});
+
+/**
+ * 토글 워밍업 배선. 큐 자체의 규약(반복·양보·취소)은 lib/warmupQueue.test.ts가
+ * 잠그므로, 여기서는 App이 그 큐를 실제로 출발시키는지만 본다 — 효과를 통째로
+ * 지우면 이 테스트만 빨간불이 된다(변이 확인).
+ */
+test("after the queues settle, the active file's leaf tiles are warmed", async () => {
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+  await finishOpen(1, 2);
+  await finishOpen(2, 3);
+
+  await waitFor(() => expect(engine.warmPreviewTiles).toHaveBeenCalled());
+  const [sid, ids] = engine.warmPreviewTiles.mock.calls[0];
+  // 활성 파일(첫 파일, 세션 1)의 픽셀 잎 전부.
+  expect(sid).toBe(1);
+  expect(ids).toEqual([1, 2, 3]);
 });

@@ -21,7 +21,7 @@ from .ops import build_export_plan, finalize_names
 from .raster import export_raster as _export_raster
 from .raster import export_raster_split as _export_raster_split
 from .render import (_perf, assign_line_color, render_document_preview,
-                     render_preview, render_thumbnails)
+                     render_preview, render_thumbnails, warm_preview_tiles)
 from .session import SessionStore
 from .verify import verify_export
 from .verify_raster import verify_raster
@@ -139,7 +139,7 @@ def _emit(obj, out):
 class Engine:
     _ALLOWED_METHODS = {
         "open_psd", "psd_mtimes", "close_session", "pin_file", "render_thumbnails",
-        "render_preview", "render_document_preview",
+        "render_preview", "render_document_preview", "warm_preview_tiles",
         "apply_preset", "auto_merge_operations", "auto_merge_preview",
         "export_psd", "batch_run",
     }
@@ -225,6 +225,15 @@ class Engine:
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("thumbnails")
         return {"thumbs": render_thumbnails(s, layerIds, maxSize, out_dir)}
+
+    def warm_preview_tiles(self, sessionId, layerIds, maxSize=1500, budgetMs=2000):
+        """
+        미리보기 타일 워밍업. 프런트가 유휴 시간에 잘게 나눠 부른다 —
+        maxSize는 render_preview와 같아야 같은 배율의 타일이 데워진다
+        (배율이 키에 들어간다, render._preview_tile 참고).
+        """
+        s = self.store.get(sessionId)
+        return warm_preview_tiles(s, layerIds, maxSize, budgetMs / 1000.0)
 
     def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None,
                        lineColorIds=None, edgeLines=None, includedIds=None):
