@@ -385,22 +385,23 @@ export function PreviewCanvas({
     // 상태에서 새로 만드므로, 비웠다가 잃는 것은 없다.
     pendingRef.current = null;
     if (!path) return;
-    // 큐가 끝나면 paused가 false로 바뀌면서 이 효과가 다시 돌아 그때 그린다.
-    if (paused) return;
-    if (visibleIds.length === 0) {
-      requestIdRef.current += 1; // invalidate any in-flight render from a prior toggle
-      showImage(null);
-      setLoading(false);
-      return;
-    }
 
     // 이미 렌더해 본 조합이면 엔진에 가지 않는다. 파일을 오갈 때 위의 [path]
     // 효과가 화면의 이미지를 버리기 때문에, 이게 없으면 돌아올 때마다 같은
-    // 합성을 처음부터 다시 시킨다. 키에 sessionId가 들어 있으므로(previewCache
-    // 참조) 살아 있는 바로 그 세션이 만든 그림만 재사용된다.
-    const cacheKey = previewCacheKey(
-      { path, mtime }, documentView, visibleIds, lineColor, matchedIds, edgeLines, edgeColourIds, includedIds
-    );
+    // 합성을 처음부터 다시 시킨다. 키는 경로+수정시각으로 만들어지므로
+    // (previewCache 참조) 앱을 껐다 켜도 같은 그림이면 같은 키다 — 프로젝트가
+    // 담아둔 PNG가 재사용되는 근거가 그것이다.
+    //
+    // **이 조회가 paused·sessionId보다 앞이다.** 프로젝트를 열면 저장해둔 PNG가
+    // 이미 캐시에 올라와 있는데(App.tsx의 primeRestoredPreviews), 로드 중이라고
+    // 먼저 빠지면 파일 열기 큐가 89장을 다 여는 동안 화면이 비어 있는다 — 그릴
+    // 것이 손에 있는데도. 캐시 적중은 엔진에 가지 않으니 큐와 다툴 일도 없다.
+    const cacheKey =
+      visibleIds.length === 0
+        ? null
+        : previewCacheKey(
+            { path, mtime }, documentView, visibleIds, lineColor, matchedIds, edgeLines, edgeColourIds, includedIds
+          );
     if (cacheKey) {
       const cached = cache.get(cacheKey);
       if (cached !== undefined) {
@@ -410,6 +411,15 @@ export function PreviewCanvas({
         setLoading(false);
         return;
       }
+    }
+
+    // 큐가 끝나면 paused가 false로 바뀌면서 이 효과가 다시 돌아 그때 그린다.
+    if (paused) return;
+    if (visibleIds.length === 0) {
+      requestIdRef.current += 1; // invalidate any in-flight render from a prior toggle
+      showImage(null);
+      setLoading(false);
+      return;
     }
 
     const spec: RenderSpec = {
@@ -586,24 +596,31 @@ export function PreviewCanvas({
     }
   }
 
-  if (status === "processing") {
-    return <div className="preview-canvas preview-empty">여는 중...</div>;
-  }
+  // 아래 안내들은 전부 "아직 보여줄 그림이 없다"는 뜻이다. 그래서 **그림을 들고
+  // 있으면 하나도 해당하지 않는다** — 프로젝트를 열어 복원한 PNG가 캐시에서 바로
+  // 올라온 경우가 정확히 그 경우다(세션은 아직 없고 파일 열기 큐도 안 끝났다).
+  // 예전에는 `!sessionId`가 그림보다 먼저 서 있어서, 담아둔 미리보기가 손에
+  // 있는데도 89장이 다 열릴 때까지 "왼쪽에서 파일을 선택하세요."가 떠 있었다.
+  if (!imgSrc) {
+    if (status === "processing") {
+      return <div className="preview-canvas preview-empty">여는 중...</div>;
+    }
 
-  if (!sessionId) {
-    return <div className="preview-canvas preview-empty">왼쪽에서 파일을 선택하세요.</div>;
-  }
+    if (!sessionId) {
+      return <div className="preview-canvas preview-empty">왼쪽에서 파일을 선택하세요.</div>;
+    }
 
-  if (paused && !imgSrc) {
-    return (
-      <div className="preview-canvas preview-empty">
-        파일을 불러오는 중입니다. 지금 보려면 파일 패널의 "중지"를 누르세요.
-      </div>
-    );
-  }
+    if (paused) {
+      return (
+        <div className="preview-canvas preview-empty">
+          파일을 불러오는 중입니다. 지금 보려면 파일 패널의 "중지"를 누르세요.
+        </div>
+      );
+    }
 
-  if (visibleIds.length === 0) {
-    return <div className="preview-canvas preview-empty">표시할 레이어 없음</div>;
+    if (visibleIds.length === 0) {
+      return <div className="preview-canvas preview-empty">표시할 레이어 없음</div>;
+    }
   }
 
   return (

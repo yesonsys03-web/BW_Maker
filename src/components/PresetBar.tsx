@@ -21,21 +21,36 @@ interface PresetBarProps {
   onError: (title: string, error: EngineError) => void;
   onSelectedPresetChange: (preset: Preset | undefined) => void;
   /**
-   * "지금 이 프리셋을 고르라"는 요청. 프로젝트를 열 때 그 프로젝트가 담고 있던
+   * "이 프리셋으로 맞추라"는 요청. 프로젝트를 열 때 그 프로젝트가 담고 있던
    * 프리셋으로 맞추기 위한 것이다 — 안 맞추면 복원해둔 미리보기의 캐시 키가
    * 지금 선택과 달라져 화면이 전부 다시 그린다(설계 5·7절).
+   *
+   * **이름이 아니라 프리셋 객체를 들고 온다.** 이름으로 목록에서 찾으면, 저장
+   * 이후 아티스트가 그 프리셋을 편집한 순간(라인색 하나만 꺼도) 이름은 같고
+   * 내용은 다른 것이 올라온다. 그러면 복원한 미리보기의 키가 **전부** 어긋나
+   * 담아둔 PNG를 한 장도 못 쓴다. 아티스트가 정한 규칙이 "되살리는 것은 화면
+   * 그대로 전부"이므로, 프로젝트를 열 때는 저장 시점 프리셋이 이긴다. 목록의
+   * 편집본을 쓰려면 드롭다운에서 그것을 고르면 된다.
    *
    * **초기값 prop이 아니라 사건이다.** 목록은 마운트 때 한 번 읽혀 loaded[0]을
    * 고르는데 프로젝트는 그보다 한참 뒤에 열리므로, 초기값으로 내려보내면 아무
    * 효과가 없다. 그래서 열 때마다 **새 객체**로 오고, 이 컴포넌트는 그 객체
    * 하나당 딱 한 번만 선택을 바꾼다.
    *
-   * 한 번만 반응하는 것이 핵심이다. 이름을 값으로 보고 목록과 함께 다시 맞추면,
-   * 그 뒤 아티스트가 다른 프리셋을 골라도 프리셋을 편집·저장해 목록 배열이 새로
+   * 한 번만 반응하는 것이 핵심이다. 값으로 보고 목록과 함께 다시 맞추면, 그 뒤
+   * 아티스트가 다른 프리셋을 골라도 프리셋을 편집·저장해 목록 배열이 새로
    * 만들어지는 순간 프로젝트의 것으로 되돌아간다.
    */
-  selectPresetRequest: { name: string } | null;
+  selectPresetRequest: { name: string; preset: Preset } | null;
 }
+
+/**
+ * 프로젝트에서 올라온 프리셋을 고르는 `<option>`의 값. 목록의 어떤 이름과도
+ * 겹치지 않아야 한다 — 같은 이름의 편집본이 목록에 따로 있는 것이 정확히 이
+ * 기능이 다루는 경우이고, 둘을 같은 값으로 두면 드롭다운에서 편집본으로
+ * 되돌아갈 방법이 없어진다(같은 값은 change 사건을 안 만든다).
+ */
+const PROJECT_PRESET_VALUE = "\u0000project";
 
 type DialogState = { mode: Extract<PresetDialogMode, "edit">; index: number } | { mode: Extract<PresetDialogMode, "saveAs"> };
 
@@ -58,6 +73,13 @@ export function PresetBar({
 }: PresetBarProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  /**
+   * 프로젝트를 열면서 올라온 저장 시점 프리셋. 목록(`presets`)에는 넣지 않는다 —
+   * 넣으면 같은 이름의 편집본을 밀어내고, `presets.json`에 저장까지 하게 되는
+   * 순간 아티스트의 편집이 조용히 사라진다. 목록과 별개로 들고 있다가 드롭다운에
+   * 항목 하나로만 보여주고, 아티스트가 목록의 것을 고르면 내려놓는다.
+   */
+  const [projectPreset, setProjectPreset] = useState<Preset | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [confirmApply, setConfirmApply] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -92,20 +114,25 @@ export function PresetBar({
 
   // 요청 하나당 한 번만. StrictMode의 정리-재설치로 같은 effect가 두 번 돌아도
   // (그 사이 사람이 선택을 바꿨을 수 있다) 두 번째는 그냥 지나간다.
-  const appliedRequestRef = useRef<{ name: string } | null>(null);
+  const appliedRequestRef = useRef<{ name: string; preset: Preset } | null>(null);
   useEffect(() => {
     if (!selectPresetRequest) return;
     if (appliedRequestRef.current === selectPresetRequest) return;
     appliedRequestRef.current = selectPresetRequest;
-    // 목록에 그 이름이 없으면(지웠거나 이름이 바뀐 경우) 지금 선택을 유지한다.
-    // 그때는 캐시 키가 안 맞아 복원한 미리보기가 버려지는데, 저장 시점과 다른
-    // 설정의 그림을 붙이는 것보다 그편이 맞다(설계 5절).
-    if (!presetsRef.current.some((p) => p.name === selectPresetRequest.name)) return;
-    setSelectedName(selectPresetRequest.name);
+    // 프로젝트가 담고 있는 객체를 그대로 세운다. 목록에 그 이름이 있든 없든
+    // 상관없다 — 지웠거나 이름을 바꿨어도 저장 시점 설정으로 열 수 있어야 한다.
+    setProjectPreset(selectPresetRequest.preset);
+    // 목록에 같은 이름이 있으면 그쪽 선택도 맞춰둔다. 아티스트가 프로젝트 항목을
+    // 버리고 목록으로 돌아갈 때 무엇이 골라질지가 이 값이다.
+    if (presetsRef.current.some((p) => p.name === selectPresetRequest.preset.name)) {
+      setSelectedName(selectPresetRequest.preset.name);
+    }
   }, [selectPresetRequest]);
 
   const selectedIndex = presets.findIndex((p) => p.name === selectedName);
-  const selectedPreset = selectedIndex === -1 ? undefined : presets[selectedIndex];
+  const listPreset = selectedIndex === -1 ? undefined : presets[selectedIndex];
+  // 프로젝트에서 올라온 것이 있으면 그것이 이긴다(selectPresetRequest 주석 참고).
+  const selectedPreset = projectPreset ?? listPreset;
 
   // Reports the currently-selected preset up to App so ExportDialog can
   // initialize naming/outputSuffix/embedPreview from it (single-file export
@@ -154,7 +181,10 @@ export function PresetBar({
   }
 
   function handleEditClick() {
-    if (selectedIndex === -1) return;
+    // 프로젝트에서 올라온 판을 보고 있는 동안에는 편집을 막는다. 여기서 목록의
+    // 같은 이름 항목을 열면, 화면이 보여주는 설정과 다른 것을 고치게 된다.
+    // 고치려면 드롭다운에서 목록의 그 프리셋을 먼저 고른다.
+    if (projectPreset || selectedIndex === -1) return;
     setDialog({ mode: "edit", index: selectedIndex });
   }
 
@@ -199,11 +229,22 @@ export function PresetBar({
       <label className="preset-bar-select-label">
         <span>프리셋</span>
         <select
-          value={selectedName ?? ""}
-          onChange={(e) => setSelectedName(e.currentTarget.value)}
-          disabled={presets.length === 0}
+          value={projectPreset ? PROJECT_PRESET_VALUE : selectedName ?? ""}
+          onChange={(e) => {
+            const value = e.currentTarget.value;
+            if (value === PROJECT_PRESET_VALUE) return;
+            // 목록의 것을 고르는 순간 프로젝트에서 온 판은 내려놓는다.
+            setProjectPreset(null);
+            setSelectedName(value);
+          }}
+          disabled={presets.length === 0 && !projectPreset}
         >
-          {presets.length === 0 && <option value="">불러오는 중...</option>}
+          {presets.length === 0 && !projectPreset && <option value="">불러오는 중...</option>}
+          {/* 이름 뒤에 (프로젝트)를 붙여 목록의 같은 이름과 구분한다. 둘이 같아
+              보이면 아티스트는 자기가 방금 고친 설정이 안 먹는다고 읽게 된다. */}
+          {projectPreset && (
+            <option value={PROJECT_PRESET_VALUE}>{projectPreset.name} (프로젝트)</option>
+          )}
           {presets.map((p) => (
             <option key={p.name} value={p.name}>
               {p.name}
@@ -215,7 +256,12 @@ export function PresetBar({
       <button type="button" onClick={handleApplyClick} disabled={!sessionId || !selectedPreset || applying}>
         {applying ? "적용 중..." : "적용"}
       </button>
-      <button type="button" onClick={handleEditClick} disabled={!selectedPreset}>
+      <button
+        type="button"
+        onClick={handleEditClick}
+        disabled={!selectedPreset || projectPreset !== null}
+        title={projectPreset ? "프로젝트가 담고 있는 설정입니다. 고치려면 목록의 프리셋을 고르세요." : undefined}
+      >
         편집...
       </button>
       <button type="button" onClick={handleSaveClick} disabled={presets.length === 0 || saving}>

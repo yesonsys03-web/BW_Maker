@@ -54,15 +54,23 @@ function presetNamed(name: string): Preset {
   } as Preset;
 }
 
+/**
+ * 프로젝트가 담고 있던 "B 프리셋". 목록에 있는 같은 이름과 **설정이 다르다** —
+ * 저장한 뒤 아티스트가 라인색을 끈 경우가 정확히 이 모양이고, 이 차이가 미리보기
+ * 캐시 키를 통째로 가른다. 이름만 맞추는 구현은 이 값을 못 지킨다.
+ */
+const PROJECT_B: Preset = { ...presetNamed("B 프리셋"), lineColor: "#000000" };
+const PROJECT_GONE: Preset = { ...presetNamed("지워진 프리셋"), lineColor: "#123456" };
+
 /** 프로젝트를 여는 쪽(App)이 하는 일만 흉내내는 껍데기. 요청을 밖에서 던진다. */
 function Harness({ onSelected }: { onSelected: (p: Preset | undefined) => void }) {
-  const [request, setRequest] = useState<{ name: string } | null>(null);
+  const [request, setRequest] = useState<{ name: string; preset: Preset } | null>(null);
   return (
     <>
-      <button type="button" onClick={() => setRequest({ name: "B 프리셋" })}>
+      <button type="button" onClick={() => setRequest({ name: PROJECT_B.name, preset: PROJECT_B })}>
         프로젝트 열기
       </button>
-      <button type="button" onClick={() => setRequest({ name: "지워진 프리셋" })}>
+      <button type="button" onClick={() => setRequest({ name: PROJECT_GONE.name, preset: PROJECT_GONE })}>
         사라진 프리셋으로 열기
       </button>
       <PresetBar
@@ -89,7 +97,7 @@ function selectEl() {
   return screen.getByRole("combobox") as HTMLSelectElement;
 }
 
-test("opening a project switches the selection to that project's preset", async () => {
+test("opening a project uses that project's own preset, not the list's same-named one", async () => {
   vi.mocked(loadPresets).mockResolvedValue([presetNamed("A 프리셋"), presetNamed("B 프리셋")]);
   const onSelected = vi.fn();
   render(<Harness onSelected={onSelected} />);
@@ -98,21 +106,51 @@ test("opening a project switches the selection to that project's preset", async 
   await waitFor(() => expect(selectEl().value).toBe("A 프리셋"));
 
   click("프로젝트 열기");
-  await waitFor(() => expect(selectEl().value).toBe("B 프리셋"));
-  expect(onSelected).toHaveBeenLastCalledWith(expect.objectContaining({ name: "B 프리셋" }));
+  // **이름이 아니라 값으로 잠근다.** 이름만 맞추는 구현도 "B 프리셋"까지는
+  // 통과하지만, 그 경우 올라오는 것은 lineColor가 null인 목록의 편집본이라
+  // 복원한 미리보기 키가 전부 어긋난다.
+  await waitFor(() =>
+    expect(onSelected).toHaveBeenLastCalledWith(expect.objectContaining({ name: "B 프리셋", lineColor: "#000000" }))
+  );
+  // 목록의 같은 이름과 구분되게 보여야 한다.
+  expect(selectEl().selectedOptions[0].textContent).toBe("B 프리셋 (프로젝트)");
 });
 
-test("a project preset that is no longer in the list leaves the choice alone", async () => {
+test("a project preset that is no longer in the list still opens with the saved settings", async () => {
   vi.mocked(loadPresets).mockResolvedValue([presetNamed("A 프리셋"), presetNamed("B 프리셋")]);
-  render(<Harness onSelected={vi.fn()} />);
+  const onSelected = vi.fn();
+  render(<Harness onSelected={onSelected} />);
   await waitFor(() => expect(selectEl().value).toBe("A 프리셋"));
 
-  // 프리셋을 지웠거나 이름을 바꾼 경우. 없는 이름으로 비우면 화면이 프리셋 없는
-  // 상태가 된다 — 지금 선택을 유지하는 것이 맞고, 복원한 미리보기가 버려지는
-  // 것도 그때는 맞는 동작이다(설계 5절).
+  // 프리셋을 지웠거나 이름을 바꾼 경우. 프로젝트가 설정을 통째로 들고 있으므로
+  // 목록에 없어도 저장한 모습 그대로 열 수 있다 — 예전에는 여기서 지금 선택을
+  // 유지했고, 그러면 복원한 미리보기가 한 장도 안 맞았다.
   click("사라진 프리셋으로 열기");
-  await new Promise((r) => setTimeout(r, 20));
-  expect(selectEl().value).toBe("A 프리셋");
+  await waitFor(() =>
+    expect(onSelected).toHaveBeenLastCalledWith(expect.objectContaining({ name: "지워진 프리셋", lineColor: "#123456" }))
+  );
+  expect(selectEl().selectedOptions[0].textContent).toBe("지워진 프리셋 (프로젝트)");
+});
+
+test("picking the list's own preset drops the project's copy", async () => {
+  vi.mocked(loadPresets).mockResolvedValue([presetNamed("A 프리셋"), presetNamed("B 프리셋")]);
+  const onSelected = vi.fn();
+  render(<Harness onSelected={onSelected} />);
+  await waitFor(() => expect(selectEl().value).toBe("A 프리셋"));
+
+  click("프로젝트 열기");
+  await waitFor(() => expect(selectEl().selectedOptions[0].textContent).toBe("B 프리셋 (프로젝트)"));
+
+  // 아티스트가 목록의 같은 이름을 고른다 — 자기가 방금 편집한 판으로 가겠다는 뜻.
+  // 값이 달라야 고를 수 있다: 같은 값으로 두면 change 사건이 아예 안 난다.
+  const el = selectEl();
+  el.value = "B 프리셋";
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+
+  await waitFor(() =>
+    expect(onSelected).toHaveBeenLastCalledWith(expect.objectContaining({ name: "B 프리셋", lineColor: null }))
+  );
+  expect(selectEl().selectedOptions[0].textContent).toBe("B 프리셋");
 });
 
 test("the artist's own choice survives a preset edit that rebuilds the list", async () => {
@@ -121,7 +159,7 @@ test("the artist's own choice survives a preset edit that rebuilds the list", as
   await waitFor(() => expect(selectEl().value).toBe("A 프리셋"));
 
   click("프로젝트 열기");
-  await waitFor(() => expect(selectEl().value).toBe("B 프리셋"));
+  await waitFor(() => expect(selectEl().selectedOptions[0].textContent).toBe("B 프리셋 (프로젝트)"));
 
   // 아티스트가 다른 프리셋으로 바꾼다.
   const el = selectEl();

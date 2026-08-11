@@ -793,8 +793,17 @@ test("the hand-off to a latched render never reports the engine idle", async () 
  */
 const RESTORED = "/cuts/restored.psd";
 
-/** 저장된 프로젝트 항목 하나. previewKey는 실제 키 함수로 만든다(대조가 맞아야 한다). */
-function projectWithOnePreview(): { project: ProjectFile; previews: Map<string, string>; key: string; previewFile: string } {
+/**
+ * 저장된 프로젝트 항목 하나. previewKey는 실제 키 함수로 만든다(대조가 맞아야 한다).
+ *
+ * `preset`을 주면 그 프리셋의 색·경계선으로 키를 만들고 프로젝트에도 담는다 —
+ * 저장 시점 설정으로 그린 그림이 그 프로젝트에 들어 있는 상태다. 앱의 선택은
+ * 프로젝트를 연 **뒤에** 그 프리셋으로 옮겨지므로, 복원 직후 첫 계산은 색 없이
+ * 어긋나고 프리셋이 도착했을 때는 이미 파일 열기 큐가 돌고 있다.
+ */
+function projectWithOnePreview(
+  preset: (Omit<typeof PRESET, "lineColor"> & { lineColor: string | null }) | null = null
+): { project: ProjectFile; previews: Map<string, string>; key: string; previewFile: string } {
   const tree = treeOf([1, 2]);
   const ops = {
     includedIds: [1, 2], previewHiddenIds: [], soloIds: [], edgeColourIds: [],
@@ -803,10 +812,12 @@ function projectWithOnePreview(): { project: ProjectFile; previews: Map<string, 
     // 곧 복원한 편집이 살아남았다는 증거다.
     entries: [{ entryId: -1, sourceIds: [1, 2], name: "MERGED" }],
   };
-  // 앱에는 선택된 프리셋이 없으므로(loadPresets가 []) 색·경계선은 양쪽 다 null이다.
+  // 프리셋을 안 주면 앱에도 선택된 프리셋이 없으므로(loadPresets가 []) 색·경계선은
+  // 양쪽 다 null이라 첫 계산부터 키가 맞는다.
   const plan = previewRenderSpec(
     { path: RESTORED, mtime: 1700 }, tree as never,
-    ops.includedIds, ops.previewHiddenIds, ops.soloIds, null, [1, 2], null, ops.edgeColourIds
+    ops.includedIds, ops.previewHiddenIds, ops.soloIds,
+    preset?.lineColor ?? null, [1, 2], preset?.edgeLines ?? null, ops.edgeColourIds
   );
   const key = plan.key!;
   const previewFile = previewFileName(key);
@@ -815,7 +826,7 @@ function projectWithOnePreview(): { project: ProjectFile; previews: Map<string, 
     ops: ops as never, previewKey: key, previewFile,
   };
   return {
-    project: { version: 1, preset: null, files: [entry] },
+    project: { version: 1, preset: preset as never, files: [entry] },
     previews: new Map([[previewFile, "data:image/png;base64,RESTORED"]]),
     key,
     previewFile,
@@ -836,7 +847,11 @@ function pressSave(options: { shift?: boolean } = {}) {
 /** "프로젝트 열기..."를 눌러 위 프로젝트를 연 상태까지 간다. */
 async function openProject(fixture = projectWithOnePreview()) {
   vi.mocked(loadProjectFrom).mockResolvedValue({ project: fixture.project, previews: fixture.previews });
-  engine.psdMtimes.mockResolvedValue({ [RESTORED]: 1700 });
+  // 픽스처가 담은 항목 전부를 "안 바뀐 파일"로 돌려준다. 하나만 적어두면 항목이
+  // 둘인 픽스처에서 나머지가 stale로 떨어져, 테스트가 재려던 경로를 아예 안 탄다.
+  engine.psdMtimes.mockResolvedValue(
+    Object.fromEntries(fixture.project.files.map((f) => [f.path, f.mtime]))
+  );
   vi.mocked(openDialog).mockResolvedValue("/proj/작업.bwproj" as never);
 
   click(screen.getByRole("button", { name: "프로젝트 열기..." }));
@@ -844,6 +859,163 @@ async function openProject(fixture = projectWithOnePreview()) {
   await waitFor(() => expect(screen.getByText("작업.bwproj")).toBeTruthy());
   return fixture;
 }
+
+/**
+ * 프로젝트를 열면 **파일이 열리기 전에** 담아둔 미리보기가 화면에 뜬다.
+ *
+ * 예전에는 안 떴다. PreviewCanvas가 `sessionId`가 없으면 그림보다 먼저 안내
+ * 문구로 빠졌고, 로드 중(`paused`)이면 캐시를 보기도 전에 물러났다. 그래서
+ * 아티스트는 파일 89장이 전부 열릴 때까지 빈 화면을 봤다 — 그릴 것이 이미 캐시에
+ * 올라와 있는데도. 세션은 그림을 띄우는 데 필요하지 않다. 다시 그릴 때만 든다.
+ */
+test("a restored preview shows before the file is open", async () => {
+  render(<App />);
+  await openProject();
+
+  // 아직 아무 파일도 안 열렸다 — openPsd는 붙잡혀 있다.
+  expect(screen.queryAllByText("열림")).toHaveLength(0);
+  await waitFor(() => expect(screen.getByAltText("미리보기")).toBeTruthy());
+  expect((screen.getByAltText("미리보기") as HTMLImageElement).src).toContain("RESTORED");
+  // 그리고 엔진에는 가지 않았다 — 캐시에서 그대로 온 그림이다.
+  expect(engine.renderPreview).not.toHaveBeenCalled();
+});
+
+/**
+ * 프리셋을 고치는 동안에는 준비 큐가 출발하지 않는다.
+ *
+ * 라인색·경계선은 미리보기 키에 그대로 들어가므로, 프리셋을 한 번 고치면 목록에
+ * 있는 파일 **전부**의 키가 동시에 갈리고 큐는 처음부터 다시 만들기 시작한다.
+ * 그런데 프리셋 편집은 원래 연타로 하는 일이라 그렇게 만든 배치는 다음 수정에서
+ * 통째로 버려진다. 엔진은 요청을 하나씩만 처리하므로(rpc.py의 main 루프) 그
+ * 낭비는 노는 CPU가 아니라 **아티스트가 지금 보려는 그림의 대기 시간**이다.
+ *
+ * **여기서 잠그는 것은 앞쪽 절반뿐이다 — "세운다"까지.** 뒤쪽("손을 멈추면 다시
+ * 돈다")은 넣었다가 뺐다: 단독으로는 통과하는데 이 파일을 통째로 돌리면 재개가
+ * 4초 안에 안 잡혀 제자리에서 깨졌다(프리셋이 있어 파일마다 적용까지 도는 판이라
+ * 큐가 느리다).
+ *
+ * **그래서 재개는 지금 어떤 테스트도 잠그지 않는다.** 확인까지 했다 — 타이머가
+ * `setPrefetchHold(false)`를 안 부르게 바꿔도 이 파일 38개가 전부 초록불이었다.
+ * 프리셋을 바꾸는 테스트가 여기 하나뿐이라 다른 테스트는 이 표시를 아예 안 밟는다.
+ * 재개가 죽으면 증상은 "미리보기가 영영 준비되지 않는다"이고, 조용히 느려지는
+ * 쪽이라 눈에 안 띈다. 이 줄이 그 빈자리의 표식이다.
+ */
+test("changing the preset holds the prefetch queue until the artist stops", async () => {
+  // 두 번째 프리셋은 **라인색이 다르다**. 이름만 다르고 설정이 같으면 키가 하나도
+  // 안 갈려 큐가 애초에 할 일이 없고, 그러면 이 테스트는 아무것도 재지 못한다.
+  vi.mocked(loadPresets).mockResolvedValueOnce([
+    PRESET as never,
+    { ...PRESET, name: "다른 프리셋", lineColor: "#000000" } as never,
+  ]);
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1, [1, 2, 3]);
+  await waitFor(() => expect(opens).toHaveLength(2));
+  await finishOpen(1, 2, [4, 5]);
+  await waitFor(() => expect(opens).toHaveLength(3));
+  await finishOpen(2, 3, [6, 7]);
+
+  // 큐가 한 바퀴 도는 것을 먼저 본다 — 그래야 아래 "안 돈다"가 "아직 시작도 안
+  // 했다"와 구별된다. 라벨 문구로는 못 잰다: FilePanel이 "…{done}/{total}"로 쪼개
+  // 그리므로 정규식 매칭이 안 붙는다(그래서 이 파일의 다른 곳에 있는
+  // `queryByText(/미리보기 준비 중/)`는 늘 null이다). 실제로 나간 렌더로 센다.
+  //
+  // 특정 세션을 기다리지 않고 **조용해질 때까지** 기다린다. 파일 하나를 콕 집어
+  // 기다리면 이 파일을 통째로 돌릴 때(프리셋이 있어 파일마다 적용까지 도는 판)
+  // 3초 안에 그 차례가 안 와 제자리에서 깨진다.
+  //
+  // 활성 파일(세션 1)은 캔버스가 그리므로 늘어도 정상이다. 큐가 도는지는 **남의
+  // 파일**이 나갔는지로만 판정한다.
+  const others = () =>
+    [...engine.renderPreview.mock.calls, ...engine.renderDocumentPreview.mock.calls].filter((c) => c[0] !== 1).length;
+  let quiet = 0;
+  let last = -1;
+  for (let i = 0; i < 30 && quiet < 4; i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+    const now = others();
+    quiet = now === last ? quiet + 1 : 0;
+    last = now;
+  }
+  // 큐가 실제로 한 번은 돌았다는 증거. 이게 0이면 아래 단언은 아무것도 못 잰다.
+  expect(others()).toBeGreaterThan(0);
+  const before = others();
+
+  // 프리셋을 바꾸고 **적용까지** 누른다. 아티스트가 하는 조작이 그것이고, 큐를
+  // 다시 세우는 것도 그것이다 — 드롭다운만 바꾸면 준비 큐는 애초에 안 깨어난다
+  // (효과의 의존성이 ops·파일 목록이라, 적용이 ops를 갈아야 다시 돈다).
+  const select = screen.getByRole("combobox") as HTMLSelectElement;
+  select.value = "다른 프리셋";
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  click(screen.getByRole("button", { name: "적용" }));
+
+  // 세워둔 동안에는 **한 번도** 안 나간다. 한 번에 크게 건너뛰면 안 된다 — 그러면
+  // 중간의 약속들이 정리될 틈이 없어 가드를 지워도 통과하는 가짜 초록불이 된다
+  // (실제로 그랬다: 500ms 한 번에 건너뛰는 판은 변이가 살아남았다).
+  for (let t = 0; t < 1_200; t += 100) {
+    await new Promise((r) => setTimeout(r, 100));
+    expect(others()).toBe(before);
+  }
+
+  // 이 테스트는 실제 시간을 쓴다(가짜 시계로는 준비 큐의 200ms 양보 루프가 안
+  // 풀린다). 조용해질 때까지 최대 3초 + 정지 확인 1.2초라 기본 5초로는 모자란다.
+}, 15_000);
+
+/**
+ * 그리고 **파일 열기 큐가 도는 중에도** 뜬다.
+ *
+ * 이쪽이 실제 순서다: 프로젝트의 프리셋은 PresetBar를 한 바퀴 돌아 한 틱 뒤에
+ * 올라오므로, 복원 직후의 첫 계산은 색이 없어 키가 어긋난다. 그 사이 파일 열기
+ * 큐가 출발해 `paused`가 서고, 캐시 조회가 그 뒤에 있으면 큐가 89장을 다 열
+ * 때까지 화면이 비어 있는다 — 손에 그림을 들고서. 캐시 적중은 엔진에 가지
+ * 않으므로 큐를 기다릴 이유가 없다.
+ */
+test("a restored preview shows while the file list is still loading", async () => {
+  // 저장 시점 프리셋이 라인색을 켠 상태 = 지금 앱의 선택(없음)과 다른 상태.
+  const fixture = projectWithOnePreview({ ...PRESET, lineColor: "#000000" });
+
+  render(<App />);
+  await openProject(fixture);
+
+  // 큐가 실제로 돌고 있어야 이 테스트가 재려는 것을 잰다 — 진행 바의 "중지"가
+  // 그 증거다(FilePanel은 loadProgress가 있을 때만 그린다). 큐는 프로젝트를 연
+  // 직후 한 틱 뒤에 출발하므로 기다린다. openPsd는 붙잡혀 있어 한 번 서면
+  // 이 테스트가 끝날 때까지 서 있다.
+  await waitFor(() => expect(screen.getByRole("button", { name: "중지" })).toBeTruthy());
+  await waitFor(() => expect(screen.getByAltText("미리보기")).toBeTruthy());
+  expect(engine.renderPreview).not.toHaveBeenCalled();
+});
+
+/**
+ * 미리보기는 **저장하는 순간 캐시에 있는 것만** 담긴다. 프리셋을 바꾼 직후에
+ * 저장하면 키가 전부 갈린 뒤라 한두 장밖에 안 담기는데, previews/에는 지난
+ * 저장이 남긴 PNG가 쌓여 있어 폴더만 보면 다 담긴 것처럼 보인다. 실제로 89개 중
+ * 1장만 담긴 프로젝트가 나왔고, 다시 열자 87장을 처음부터 다시 그렸다. 그 침묵을
+ * 없애는 것이 이 개수 표시다.
+ */
+test("saving says how many previews actually went in", async () => {
+  const fixture = projectWithOnePreview();
+  const withoutPreview: ProjectEntry = {
+    ...fixture.project.files[0],
+    path: "/cuts/no-preview.psd",
+    previewKey: null,
+    previewFile: null,
+  };
+  fixture.project.files.push(withoutPreview);
+
+  render(<App />);
+  await openProject(fixture);
+
+  click(screen.getByRole("button", { name: "프로젝트 저장" }));
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  const [, saved] = vi.mocked(saveProjectTo).mock.calls[0];
+  expect(saved.files).toHaveLength(2);
+  expect(saved.files.filter((f) => f.previewFile)).toHaveLength(1);
+  // 개수는 말한다. 그리고 **그 문구 안에는** 경로·파일명이 없어야 한다 — 기밀이다.
+  // (파일 목록에 이름이 보이는 것은 별개다. 여기서 재는 것은 메시지 하나다.)
+  await waitFor(() => expect(screen.getByText(/미리보기 1\/2장이 담겼습니다/)).toBeTruthy());
+  expect(screen.getByText(/미리보기 1\/2장이 담겼습니다/).textContent).not.toContain("no-preview");
+});
 
 /**
  * 정정 4. buildProject가 previewPlanFor를 쓰면 sessionId가 없는 복원 항목에서
@@ -1098,8 +1270,13 @@ test("opening a project moves the app's preset selection to the project's preset
   fixture.project.preset = PRESET as never;
   await openProject(fixture);
 
+  // 올라오는 것은 **프로젝트가 담고 있던 객체**다. 이름으로 목록에서 집으면
+  // 저장 이후 그 프리셋을 편집한 경우 다른 설정이 올라와 복원한 미리보기의 키가
+  // 전부 어긋난다. 그래서 드롭다운도 목록의 같은 이름과 구분해 보여준다.
   await waitFor(() =>
-    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(PRESET.name)
+    expect((screen.getByRole("combobox") as HTMLSelectElement).selectedOptions[0].textContent).toBe(
+      `${PRESET.name} (프로젝트)`
+    )
   );
 });
 

@@ -69,6 +69,13 @@ const EMPTY_IDS: ReadonlySet<number> = new Set<number>();
  */
 const PREFETCH_YIELD_MAX_MS = 60_000;
 
+/**
+ * 프리셋이 바뀐 뒤 미리보기 준비 큐가 서 있는 시간. 이 안에 다음 수정이 오면
+ * 다시 처음부터 센다 — 연타로 고치는 동안에는 큐가 한 번도 출발하지 않는다.
+ * 손을 멈추면 그때 마지막 설정 하나로만 준비가 돈다(prefetchHold 참고).
+ */
+const PREFETCH_PRESET_HOLD_MS = 2_000;
+
 function fileName(path: string): string {
   const parts = path.split(/[\\/]/);
   return parts[parts.length - 1] || path;
@@ -237,7 +244,7 @@ function AppShell() {
    */
   const clearSeqRef = useRef(0);
   /** PresetBar에 보내는 "이 프리셋을 고르라" 요청. PresetBar의 같은 이름 prop 주석 참고. */
-  const [selectPresetRequest, setSelectPresetRequest] = useState<{ name: string } | null>(null);
+  const [selectPresetRequest, setSelectPresetRequest] = useState<{ name: string; preset: Preset } | null>(null);
   /**
    * 지금 열려 있는 프로젝트가 담고 있던 항목(경로 → 항목). 저장할 때 화면 상태에
    * 없는 tree/mtime을 메우는 폴백이다 — buildProject 주석 참고. 버린 항목(stale)은
@@ -523,6 +530,39 @@ function AppShell() {
   const previewCacheRef = useRef(new PreviewCache());
   const [prefetchProgress, setPrefetchProgress] = useState<{ done: number; total: number } | null>(null);
   const prefetchingRef = useRef(false);
+  /**
+   * 프리셋이 방금 바뀌었으니 준비 큐는 잠깐 서 있으라는 표시.
+   *
+   * 라인색·경계선은 미리보기 키에 그대로 들어간다. 그래서 프리셋을 한 번 고치면
+   * 목록에 있는 파일 **전부**의 키가 동시에 갈리고, 큐는 89장을 처음부터 다시
+   * 만들기 시작한다. 그런데 프리셋 편집은 원래 연타로 하는 일이라(껐다 켜고 다시
+   * 보고) 그렇게 만든 한 배치는 다음 수정에서 통째로 버려진다 — 게다가 새로 만든
+   * 판이 캐시 예산을 밀고 들어와 되돌렸을 때 쓸 옛 판까지 밀어낸다.
+   *
+   * 엔진이 요청을 하나씩만 처리하므로(engine/psd_engine/rpc.py의 main 루프) 이건
+   * 놀고 있는 CPU를 쓰는 문제가 아니다. 큐가 잡고 있는 동안 아티스트가 누른
+   * 그림은 그 뒤에 줄을 선다. 손을 멈춘 뒤에 출발시키는 편이 훨씬 빠르다.
+   *
+   * 보고 있는 파일은 이 표시와 무관하게 곧바로 그려진다 — 그 한 장은 준비 큐가
+   * 아니라 PreviewCanvas가 그리고, 큐는 애초에 활성 파일을 건너뛴다.
+   */
+  const [prefetchHold, setPrefetchHold] = useState(false);
+  /**
+   * 직전에 쓰던 프리셋. **처음 정해지는 것은 "바뀐 것"이 아니다** — 앱이 뜨면서
+   * 목록의 첫 프리셋이 올라오는 것(undefined → 무엇)까지 세우면, 프리셋을 한 번도
+   * 안 건드린 평범한 폴더 열기에서도 준비가 3초 늦게 출발한다.
+   */
+  const lastPresetRef = useRef<Preset | undefined>(undefined);
+  // 프리셋이 바뀌면 세우고, 조용해지면 푼다. 다음 수정이 그 안에 오면 정리 함수가
+  // 타이머를 버리고 처음부터 다시 센다 — 연타로 고치는 동안에는 한 번도 안 선다.
+  useEffect(() => {
+    const previous = lastPresetRef.current;
+    lastPresetRef.current = selectedPreset;
+    if (previous === undefined || previous === selectedPreset) return;
+    setPrefetchHold(true);
+    const timer = setTimeout(() => setPrefetchHold(false), PREFETCH_PRESET_HOLD_MS);
+    return () => clearTimeout(timer);
+  }, [selectedPreset]);
   /** 미리 만들기에 실패한 파일. 다시 집으면 큐가 끝나지 않으므로 빼둔다. */
   const prefetchFailedRef = useRef<Set<string>>(new Set());
   /**
@@ -784,6 +824,13 @@ function AppShell() {
           return;
         }
         await saveProjectTo(dir, project, previews);
+        // 미리보기는 **지금 캐시에 있는 것만** 담긴다(buildProject 참고). 프리셋을
+        // 바꾼 직후에 저장하면 키가 전부 갈린 뒤라 한두 장밖에 안 담기는데,
+        // 폴더에는 지난 저장이 남긴 PNG가 그대로 쌓여 있어서 "다 담겼다"로 보인다.
+        // 실제로 그렇게 저장된 프로젝트가 있었다 — 89개 중 1장이었고, 다시 열자
+        // 87장을 처음부터 다시 그렸다. 개수를 말해주는 것이 그 침묵을 없앤다.
+        // (경로·파일명은 기밀이라 개수만 적는다.)
+        const withPreview = project.files.filter((f) => f.previewFile).length;
         // 그 사이에 "비우기"가 눌렸으면 프로젝트를 다시 열지 않는다. 여기서
         // 열면 방금 내린 projectDir가 되살아나 다음 ⌘S가 다시 그 폴더를 겨눈다.
         if (clearSeqRef.current === clearSeq) setProjectDir(dir);
@@ -794,6 +841,15 @@ function AppShell() {
             message:
               `파일 ${omitted}개가 아직 열리지 않아 이번 저장에 담기지 않았습니다. ` +
               `그 파일들이 다 열린 뒤에 다시 저장하면 함께 담깁니다.`,
+            traceback: "",
+          });
+        }
+        if (withPreview < project.files.length) {
+          pushError("미리보기는 일부만 담겼습니다", {
+            message:
+              `미리보기 ${withPreview}/${project.files.length}장이 담겼습니다. ` +
+              `담기지 않은 파일은 이 프로젝트를 다시 열 때 미리보기를 처음부터 다시 만듭니다. ` +
+              `"미리보기 준비"가 끝난 뒤에 다시 저장하면 전부 담깁니다.`,
             traceback: "",
           });
         }
@@ -868,7 +924,13 @@ function AppShell() {
       setStaleProjectPaths(stale);
       // 그리고 앱의 선택도 그 프리셋으로 옮긴다. 안 옮기면 화면이 다시 그릴 때
       // 계산하는 키가 방금 프라이밍한 것과 달라져 전부 다시 그린다.
-      if (project.preset) setSelectPresetRequest({ name: project.preset.name });
+      //
+      // **이름이 아니라 객체를 넘긴다.** 이름만 넘기면 PresetBar가 presets.json의
+      // 같은 이름을 집는데, 저장 이후 그 프리셋을 편집했으면 그것은 다른 설정이다
+      // — 그 순간 방금 프라이밍한 키가 전부 어긋나 담아둔 PNG를 한 장도 못 쓴다.
+      if (project.preset) {
+        setSelectPresetRequest({ name: project.preset.name, preset: project.preset });
+      }
       // 프로젝트를 여는 것은 "이제 새로 시작한다"는 뜻이다 — 이전 폴더에서 세운
       // 중지가 남아 있으면 복원한 파일이 배경에서 열리지 않는다(handleAddFiles와
       // 같은 판단). 실패 목록도 그 폴더의 것이라 함께 내린다.
@@ -912,6 +974,8 @@ function AppShell() {
     // 순서대로 도니, 로드 큐가 동기적으로 세워둔 ref를 여기서 보면 그 틈이 없다.
     if (loading || drainingRef.current || prefetchingRef.current || batchRunning) return;
     if (prefetchCancelled) return;
+    // 프리셋을 만지는 중이면 아직 출발하지 않는다(prefetchHold 주석 참고).
+    if (prefetchHold) return;
 
     const pending = () => {
       const cache = previewCacheRef.current;
@@ -1022,7 +1086,7 @@ function AppShell() {
       .finally(() => {
         prefetchingRef.current = false;
       });
-  }, [loading, prefetchCancelled, batchRunning, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
+  }, [loading, prefetchCancelled, prefetchHold, batchRunning, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
 
   /**
    * 파일별로 손으로 "라인으로 지정"한 레이어. 배치가 이걸 함께 보내야, 이름
