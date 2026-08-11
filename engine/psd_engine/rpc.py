@@ -20,8 +20,8 @@ from .matching import (auto_merge_operations, auto_merge_preview,
 from .ops import build_export_plan, finalize_names
 from .raster import export_raster as _export_raster
 from .raster import export_raster_split as _export_raster_split
-from .render import (assign_line_color, render_document_preview, render_preview,
-                     render_thumbnails)
+from .render import (_perf, assign_line_color, render_document_preview,
+                     render_preview, render_thumbnails)
 from .session import SessionStore
 from .verify import verify_export
 from .verify_raster import verify_raster
@@ -108,7 +108,9 @@ def _cached_plan_overlays(session, views, opts):
             cache.move_to_end(key)
             plans.extend(cached)
             continue
+        t0 = time.perf_counter()
         made = plan_overlays(session, [view], opts)
+        _perf(perf="overlay_view", s=round(time.perf_counter() - t0, 4))
         cache[key] = made
         while len(cache) > OVERLAY_CACHE_PER_SESSION:
             cache.popitem(last=False)
@@ -152,7 +154,9 @@ class Engine:
 
     # ---- RPC methods ----
     def open_psd(self, path):
+        t0 = time.perf_counter()
         sid = self.store.open(path)
+        _perf(perf="open_psd", s=round(time.perf_counter() - t0, 4))
         s = self.store.get(sid)
         psd = s["psd"]
         return {
@@ -211,6 +215,8 @@ class Engine:
 
     def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None,
                        lineColorIds=None, edgeLines=None, includedIds=None):
+        t_start = time.perf_counter()
+        overlay_s = 0.0
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
         overlays = None
@@ -254,11 +260,17 @@ class Engine:
             # 그 낭비가 뒤에 온 다른 요청까지 물고 늘어진다. 그리기 시점 필터는
             # 그대로 둔다 — 호출자가 잊을 수 없는 안전망이다.
             views = [v for v in views if set(v["lineIds"]) & visible]
+            t_overlay = time.perf_counter()
             overlays = _cached_plan_overlays(s, views, opts)
-        return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
-                                          line_color=lineColor,
-                                          line_color_ids=lineColorIds,
-                                          edge_overlays=overlays)}
+            overlay_s = time.perf_counter() - t_overlay
+        png_path = render_preview(s, visibleLayerIds, maxSize, out_dir,
+                                  line_color=lineColor,
+                                  line_color_ids=lineColorIds,
+                                  edge_overlays=overlays)
+        _perf(perf="rpc.render_preview", n=len(visibleLayerIds),
+              overlay_plan_s=round(overlay_s, 4),
+              total_s=round(time.perf_counter() - t_start, 4))
+        return {"pngPath": png_path}
 
     # 이 둘은 세션이 아니라 트리를 받는다. 이름만 보고 묶는 계산이라 픽셀도 PSD도
     # 필요 없는데, 세션을 요구하면 그것이 축출됐을 때 700MB짜리 파일을 통째로 다시

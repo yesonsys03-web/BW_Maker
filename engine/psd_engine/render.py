@@ -8,14 +8,26 @@ blend_mode=normal`로 기록하므로 **내보낸 PSD는 블렌드·클리핑·�
 평평한 스택**이고, 그 파일의 내장 미리보기도 alpha_composite 누적으로 만들어진다.
 따라서 미리보기가 재현해야 할 대상은 원본 합성이 아니라 그 평평한 알파 합성이다.
 """
+import json
 import os
 import re
+import sys
+import time
 from collections import OrderedDict
 
 import numpy as np
 from PIL import Image
 
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
+
+#: 단계별 시간 계측. 켜면(PSD_ENGINE_PERF=1) JSON 한 줄씩 stderr로 낸다 —
+#: stdout은 RPC 채널이라 쓰면 안 된다. 기본은 꺼짐이고 동작에는 영향이 없다.
+PERF = os.environ.get("PSD_ENGINE_PERF", "") not in ("", "0")
+
+
+def _perf(**kv):
+    if PERF:
+        print(json.dumps(kv), file=sys.stderr, flush=True)
 
 #: 병합 빠른 경로를 쓸지. 끄면 예전처럼 psd.composite 한 번으로 간다.
 #:
@@ -332,16 +344,26 @@ def _quantize_like_psd_tools(psd, merged):
 
 
 def extract_rgba(layer):
+    t0 = time.perf_counter()
     if layer.mask is not None and not layer.mask.disabled:
         fast = _extract_rgba_masked(layer)
         if fast is not None:
+            _perf(perf="extract", path="masked_fast",
+                  mpx=round(layer.width * layer.height / 1e6, 2),
+                  s=round(time.perf_counter() - t0, 4))
             return fast
         img = layer.composite(viewport=layer.bbox)
+        path = "masked_composite"
     else:
         img = layer.topil()
+        path = "topil"
     if img is None:
         raise ValueError(f"layer {layer.name!r} has no pixels")
-    return np.array(img.convert("RGBA"))
+    out = np.array(img.convert("RGBA"))
+    _perf(perf="extract", path=path,
+          mpx=round(layer.width * layer.height / 1e6, 2),
+          s=round(time.perf_counter() - t0, 4))
+    return out
 
 
 def _wanted_ids(psd, layers):
@@ -993,6 +1015,7 @@ def _preview_tile(session, layer_id, scale):
         cache.move_to_end(key)
         return cache[key]
 
+    t0 = time.perf_counter()
     layer = session["layers_by_id"][layer_id]
     # 그린 적 없는 빈 레이어(0x0). extract_rgba/PIL이 터지므로 렌더 대상이 아니다.
     if layer.width <= 0 or layer.height <= 0:
@@ -1011,6 +1034,7 @@ def _preview_tile(session, layer_id, scale):
 
     cache[key] = entry
     _evict_tiles(cache)
+    _perf(perf="tile_cold", lid=layer_id, s=round(time.perf_counter() - t0, 4))
     return entry
 
 
@@ -1040,6 +1064,7 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
     ph = max(1, round(psd.height * scale))
     canvas = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
 
+    t_tiles = time.perf_counter()
     for lid in visible_layer_ids:
         entry = _preview_tile(session, lid, scale)
         if entry is None:
@@ -1067,6 +1092,7 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
     # 색보다 아래인 문서에서만 드러나고, 고치려면 미리보기 합성 구조를 다시 짜야
     # 한다(내보내기는 라인 엔트리 자리에 합치는데 미리보기는 레이어를 따로따로
     # 합성하기 때문).
+    t_overlay = time.perf_counter()
     visible_ids = set(visible_layer_ids)
     for overlay in edge_overlays or []:
         # 이 뷰의 라인이 지금 화면에 없으면 그릴 게 없다 — attach_overlays가
@@ -1099,7 +1125,13 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
             img = img.crop((sx0, sy0, sx1, sy1))
         canvas.alpha_composite(img, dest=(x0 + sx0, y0 + sy0))
 
-    return _save_png(canvas, out_dir, "preview")
+    t_png = time.perf_counter()
+    path = _save_png(canvas, out_dir, "preview")
+    _perf(perf="render_preview", n=len(visible_layer_ids),
+          tiles_s=round(t_overlay - t_tiles, 4),
+          overlay_comp_s=round(t_png - t_overlay, 4),
+          png_s=round(time.perf_counter() - t_png, 4))
+    return path
 
 
 def render_document_preview(session, max_size, out_dir):
