@@ -590,16 +590,28 @@ function AppShell() {
    */
   const batchRunningRef = useRef(false);
   const [batchRunning, setBatchRunning] = useState(false);
-  const handleBatchRunningChange = useCallback((busy: boolean) => {
-    batchRunningRef.current = busy;
-    setBatchRunning(busy);
-  }, []);
-
   /** 잎 타일 워밍업이 끝난 세션 id. 같은 세션을 다시 데우지 않기 위한 것 —
    * 축출로 세션이 새로 열리면 id가 바뀌므로 자연히 다시 돈다. */
   const warmedSessionsRef = useRef<Set<number>>(new Set());
+  const handleBatchRunningChange = useCallback((busy: boolean) => {
+    batchRunningRef.current = busy;
+    setBatchRunning(busy);
+    // 배치는 파일마다 세션을 열어 LRU(2칸)를 갈아치우므로, "데워둔 세션이 아직
+    // 살아 있다"는 보장이 함께 사라진다. 완료 기록을 비워 배치 후 첫 유휴 때
+    // 다시 데운다 — 세션이 운 좋게 살아남았으면 엔진이 비용 없이 걸러 준다.
+    if (busy) warmedSessionsRef.current.clear();
+  }, []);
+
   /** 워밍업이 지금 도는 중인지. prefetchingRef와 같은 역할의 겹침 방지. */
   const warmingRef = useRef(false);
+  /**
+   * 워밍업 체인이 끝났을 때 효과를 한 번 더 깨우는 신호. 체인 도중의 상태 변화
+   * (세션 재오픈의 refreshSession 등)가 효과를 재실행시키면 warmingRef에 막혀
+   * 되돌아가는데, 그 뒤 아무도 다시 출발시키지 않으면 남은 파일이 안 데워진
+   * 채로 멈춘다 — 체인이 끝나는 자리에서 이 값을 올려 효과가 조건을 다시 보게
+   * 한다. 다 데워져 있으면 조기 반환으로 조용히 멈추므로 돌지 않는다.
+   */
+  const [warmKick, setWarmKick] = useState(0);
   /** 화면이 지금 엔진에 렌더를 걸고 있는지. 준비 큐가 그동안 비켜서기 위한 신호. */
   const canvasRenderingRef = useRef(false);
   const handleCanvasRendering = useCallback((busy: boolean) => {
@@ -1145,9 +1157,11 @@ function AppShell() {
   // 원본 해상도 디코드 0.7~50초가 토글에 그대로 얹힌다. 준비 큐는 라인 조합
   // 한 장만 만들므로 라인이 아닌 잎이 전부 콜드로 남는 것이 원인이다.
   //
-  // 활성 파일만 데운다. 토글은 보고 있는 파일에서만 일어나고, 다른 파일을
-  // 데우면 세션 두 칸을 두고 준비 큐와 같은 축출 경합이 생긴다. 활성 파일
-  // 세션은 pin되어 있어 그 경합이 없다.
+  // 활성 파일을 데운 뒤, **목록에서 그다음 열린 파일 하나**를 이어서 데운다.
+  // 지정 작업은 목록 순서로 내려가므로, 두 번째 세션 칸에 다음 파일을 미리
+  // 올려 두면 파일을 넘어간 직후의 준비 구간(~2분)이 사라진다. 딱 하나만 —
+  // 세션이 2칸뿐이라 세 번째를 데우는 순간 방금 데운 다음 파일이 도로
+  // 밀려난다. 활성 파일 세션은 pin되어 있어 어느 쪽에도 밀리지 않는다.
   //
   // 자르는 규칙(순서·요청당 예산·너무 느린 잎 건너뛰기)은 엔진에 있다
   // (warm_preview_tiles). 이 효과는 남은 목록으로 반복 호출하며 사람이 쓰는
@@ -1155,61 +1169,81 @@ function AppShell() {
   useEffect(() => {
     if (loading || prefetchProgress !== null || batchRunning || prefetchHold) return;
     if (warmingRef.current || prefetchingRef.current || drainingRef.current) return;
-    const file = filesRef.current.find((f) => f.path === activePathRef.current);
-    if (!file || file.sessionId === undefined || !file.tree) return;
-    if (warmedSessionsRef.current.has(file.sessionId)) return;
-    const leafIds = pixelLeafIds(file.tree);
-    if (leafIds.length === 0) {
-      warmedSessionsRef.current.add(file.sessionId);
-      return;
-    }
+    const files = filesRef.current;
+    const active = files.find((f) => f.path === activePathRef.current);
+    if (!active || active.sessionId === undefined || !active.tree) return;
+    const activeIndex = files.indexOf(active);
+    const next = files
+      .slice(activeIndex + 1)
+      .find((f) => f.status === "open" && f.sessionId !== undefined && f.tree !== undefined);
+    const needsWarm = (f: FileEntry | undefined) =>
+      f !== undefined && f.sessionId !== undefined && !warmedSessionsRef.current.has(f.sessionId);
+    if (!needsWarm(active) && !needsWarm(next)) return;
 
-    const path = file.path;
-    let sid = file.sessionId;
-    let reopened = false;
+    const chainPath = active.path;
     let cancelled = false;
+    const chainCancelled = () =>
+      cancelled ||
+      abandonedRef.current ||
+      prefetchCancelledRef.current ||
+      drainingRef.current ||
+      batchRunningRef.current ||
+      activePathRef.current !== chainPath;
+
+    // 파일 하나를 데운다. 취소로 중단되면 false — 체인이 다음 파일로 넘어가지
+    // 않는다. 축출-재오픈이 끼었으면 그전에 데운 타일이 새 세션에 없으므로
+    // 끝난 것으로 적지 않는다 — 체인이 끝나며 올리는 warmKick이 효과를 다시
+    // 깨워 마저 데운다(이미 핫인 잎은 엔진이 비용 없이 거른다).
+    const warmFile = async (file: FileEntry): Promise<boolean> => {
+      let sid = file.sessionId!;
+      const leafIds = pixelLeafIds(file.tree!);
+      if (leafIds.length === 0) {
+        warmedSessionsRef.current.add(sid);
+        return true;
+      }
+      let reopened = false;
+      const summary = await drainWarmupQueue({
+        leafIds,
+        request: (ids) =>
+          withEvictedSessionRetry(
+            file.path,
+            sid,
+            (s) => warmPreviewTiles(s, ids, PREVIEW_MAX_SIZE),
+            (r) => {
+              reopened = true;
+              sid = r.sessionId;
+              refreshSession(file.path, r);
+            }
+          ),
+        shouldPause: () => canvasRenderingRef.current || prefetchingRef.current,
+        cancelled: chainCancelled,
+      });
+      if (summary !== null && !reopened) warmedSessionsRef.current.add(sid);
+      return summary !== null;
+    };
+
     warmingRef.current = true;
-    void drainWarmupQueue({
-      leafIds,
-      request: (ids) =>
-        withEvictedSessionRetry(
-          path,
-          sid,
-          (s) => warmPreviewTiles(s, ids, PREVIEW_MAX_SIZE),
-          (r) => {
-            reopened = true;
-            sid = r.sessionId;
-            refreshSession(path, r);
-          }
-        ),
-      shouldPause: () => canvasRenderingRef.current || prefetchingRef.current,
-      cancelled: () =>
-        cancelled ||
-        abandonedRef.current ||
-        prefetchCancelledRef.current ||
-        drainingRef.current ||
-        batchRunningRef.current ||
-        activePathRef.current !== path,
-    })
-      .then((summary) => {
-        // 축출-재오픈이 끼었으면 그전에 데운 타일은 새 세션에 없다 — 끝난 것으로
-        // 적지 않아야 다음 유휴 때 다시 돌아 마저 데운다(이미 핫인 잎은 엔진이
-        // 비용 없이 거른다). 취소(null)도 마찬가지다.
-        if (summary !== null && !reopened) warmedSessionsRef.current.add(sid);
-      })
-      .catch(() => {
+    void (async () => {
+      try {
+        if (needsWarm(active) && !(await warmFile(active))) return true;
+        if (next !== undefined && needsWarm(next) && !chainCancelled()) await warmFile(next);
+        return true;
+      } catch {
         // 워밍업 실패는 알릴 일이 아니다 — 안 데워졌으면 그 잎의 첫 토글이
         // 예전처럼 느릴 뿐이고, 엔진이 진짜 고장이면 사람이 누른 다음 렌더가
-        // 같은 오류를 제대로 보여준다. 끝난 것으로 적지 않으므로 다음 유휴 때
-        // 다시 시도한다.
-      })
-      .finally(() => {
-        warmingRef.current = false;
-      });
+        // 같은 오류를 제대로 보여준다. 이때는 warmKick도 올리지 않는다 —
+        // 올리면 같은 오류를 향해 무한 재시도가 된다. 다음 상태 변화(파일
+        // 전환, 배치 종료 등)가 자연히 다시 시도한다.
+        return false;
+      }
+    })().then((kick) => {
+      warmingRef.current = false;
+      if (kick) setWarmKick((k) => k + 1);
+    });
     return () => {
       cancelled = true;
     };
-  }, [loading, prefetchProgress, batchRunning, prefetchHold, state.activePath, state.files, refreshSession]);
+  }, [loading, prefetchProgress, batchRunning, prefetchHold, warmKick, state.activePath, state.files, refreshSession]);
 
   /**
    * 파일별로 손으로 "라인으로 지정"한 레이어. 배치가 이걸 함께 보내야, 이름

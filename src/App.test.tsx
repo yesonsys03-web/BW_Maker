@@ -1619,3 +1619,23 @@ test("after the queues settle, the active file's leaf tiles are warmed", async (
   expect(sid).toBe(1);
   expect(ids).toEqual([1, 2, 3]);
 });
+
+test("the next file in the list is pre-warmed, and only that one", async () => {
+  // 지정 작업은 목록 순서로 내려가므로, 활성 파일을 데운 뒤 두 번째 세션 칸에
+  // 다음 파일을 미리 데워 둔다 — 파일을 넘어간 직후의 준비 구간을 없애는
+  // 장치다. 세 번째까지 데우면 안 된다: 세션이 2칸뿐이라 세 번째를 여는 순간
+  // 방금 데운 다음 파일이 도로 밀려난다.
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+  await finishOpen(1, 2);
+  await finishOpen(2, 3);
+
+  await waitFor(() => expect(engine.warmPreviewTiles.mock.calls.length).toBeGreaterThanOrEqual(2));
+  const sids = engine.warmPreviewTiles.mock.calls.map((c) => c[0]);
+  expect(sids[0]).toBe(1); // 활성 파일이 먼저
+  expect(sids).toContain(2); // 목록의 다음 파일이 이어서
+  // 체인이 다 돌고도 세 번째 파일은 데우지 않는다.
+  await new Promise((r) => setTimeout(r, 30));
+  expect(engine.warmPreviewTiles.mock.calls.map((c) => c[0])).not.toContain(3);
+});
