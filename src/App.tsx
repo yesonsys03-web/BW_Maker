@@ -701,6 +701,17 @@ function AppShell() {
      * 배지가 있는 이유와 같다).
      */
     omitted: number;
+    /**
+     * 담겼지만 **그릴 것이 없어** 미리보기가 없는 파일 수. 프리셋 규칙이 그 판에서
+     * 아무것도 못 잡으면 체크가 0장이라 합성할 것이 없다 — 실제로 89장짜리 폴더에서
+     * 12장이 그랬다(연속된 한 구간이었다).
+     *
+     * "아직 준비가 안 됐다"와 갈라야 한다. 둘을 뭉쳐 "다시 저장하면 담깁니다"라고
+     * 하면 아티스트를 기다리게 만드는데, 이쪽은 몇 번을 저장해도 안 담긴다. 봐야
+     * 하는 것은 그 파일의 프리셋이고, 미리보기가 없다는 것은 **내보내도 나올 것이
+     * 없다**는 뜻이기도 하다.
+     */
+    nothingToDraw: number;
   } => {
     const previews = new Map<string, string>();
     const files: ProjectEntry[] = [];
@@ -708,6 +719,7 @@ function AppShell() {
     const edgeLines = presetRef.current?.edgeLines ?? null;
     let blocked = 0;
     let omitted = 0;
+    let nothingToDraw = 0;
     for (const file of filesRef.current) {
       const ops = opsByPathRef.current[file.path];
       const fallback = restoredEntriesRef.current[file.path];
@@ -746,13 +758,18 @@ function AppShell() {
           previews.set(previewFile, dataUrl);
         } else if (fallback?.previewKey === plan.key && fallback.previewFile) {
           // 캐시엔 없지만 **설정이 그대로**라, 열어둔 프로젝트 폴더에 있는 그 그림이
-          // 여전히 맞다. 캐시는 예산이 있어 밀려나므로(89장이면 곧 밀린다) 이 줄이
-          // 없으면 아무것도 안 바꾸고 ⌘S만 눌러도 담긴 미리보기가 줄어든다.
-          // 바이트를 여기서 읽지는 않는다 — saveProjectTo가 원본 폴더에서 이어받고,
-          // 그 파일이 없으면 참조를 지운다(carryMissingPreviews).
+          // 여전히 맞다. 바이트를 여기서 읽지는 않는다 — saveProjectTo가 원본
+          // 폴더에서 이어받고, 그 파일이 없으면 참조를 지운다(carryMissingPreviews).
+          //
+          // 캐시가 밀리는 빈도는 처음 생각보다 낮다: 납품 선화는 한 장이 base64로
+          // ~0.1MB라(투명이 많아 PNG가 잘 눌린다) 예산 256M자에 닿으려면 수천 장이
+          // 필요하다. 코드 주석의 "1~4MB"는 색 많은 판 기준이다. 그래도 두는 이유는
+          // 다른 이름으로 저장할 때 그림을 새 폴더로 옮기는 몫이 여기서 갈리기 때문이다.
           previewFile = fallback.previewFile;
         }
       }
+      // 그릴 것이 없어서 없는 것과, 아직 안 만들어서 없는 것을 가른다(nothingToDraw 주석).
+      if (!previewFile && plan.visibleIds.length === 0) nothingToDraw += 1;
       files.push({
         path: file.path,
         mtime,
@@ -772,6 +789,7 @@ function AppShell() {
       previews,
       blocked,
       omitted,
+      nothingToDraw,
     };
   }, []);
 
@@ -812,7 +830,7 @@ function AppShell() {
       // 대조하려고 표를 떠 둔다(clearSeqRef 주석 참고).
       const clearSeq = clearSeqRef.current;
       try {
-        const { project, previews, blocked, omitted } = buildProject();
+        const { project, previews, blocked, omitted, nothingToDraw } = buildProject();
         // 잃을 것이 있으면 쓰지 않는다. 덮어쓰기는 되돌릴 수 없고, 이 폴더에는
         // 지난 저장이 들어 있다 — 반쯤 만들어진 프로젝트로 덮느니 아무것도 안 하는
         // 편이 낫다. 개수만 말한다: 납품 파일 경로·이름은 기밀이라 메시지에 넣지 않는다.
@@ -864,11 +882,19 @@ function AppShell() {
           });
         }
         if (withPreview < project.files.length) {
+          // 두 이유를 갈라서 말한다. 뭉쳐서 "다시 저장하면 담깁니다"라고 하면
+          // 그릴 것이 없는 파일까지 기다리게 만드는데, 그쪽은 몇 번을 저장해도
+          // 안 담긴다 — 봐야 하는 것은 그 파일의 프리셋이다.
+          const notReady = project.files.length - withPreview - nothingToDraw;
           pushError("미리보기는 일부만 담겼습니다", {
             message:
-              `미리보기 ${withPreview}/${project.files.length}장이 담겼습니다. ` +
-              `담기지 않은 파일은 이 프로젝트를 다시 열 때 미리보기를 처음부터 다시 만듭니다. ` +
-              `"미리보기 준비"가 끝난 뒤에 다시 저장하면 전부 담깁니다.`,
+              `미리보기 ${withPreview}/${project.files.length}장이 담겼습니다.` +
+              (nothingToDraw > 0
+                ? ` 그중 ${nothingToDraw}장은 프리셋에 걸린 레이어가 없어 그릴 것이 없습니다. 수동으로 선택하세요.`
+                : "") +
+              (notReady > 0
+                ? ` 나머지 ${notReady}장은 "미리보기 준비"가 끝난 뒤에 다시 저장하면 담깁니다.`
+                : ""),
             traceback: "",
           });
         }

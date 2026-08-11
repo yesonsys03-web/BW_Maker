@@ -1014,7 +1014,50 @@ test("saving says how many previews actually went in", async () => {
   // 개수는 말한다. 그리고 **그 문구 안에는** 경로·파일명이 없어야 한다 — 기밀이다.
   // (파일 목록에 이름이 보이는 것은 별개다. 여기서 재는 것은 메시지 하나다.)
   await waitFor(() => expect(screen.getByText(/미리보기 1\/2장이 담겼습니다/)).toBeTruthy());
-  expect(screen.getByText(/미리보기 1\/2장이 담겼습니다/).textContent).not.toContain("no-preview");
+  const notice = screen.getByText(/미리보기 1\/2장이 담겼습니다/).textContent ?? "";
+  expect(notice).not.toContain("no-preview");
+  // 이 파일은 그릴 것이 있는데 아직 안 만들어진 쪽이다 — 다시 저장하면 담긴다.
+  expect(notice).toContain("나머지 1장");
+  expect(notice).not.toContain("수동으로 선택");
+});
+
+/**
+ * "아직 안 만들어졌다"와 "그릴 것이 없다"를 갈라서 말한다.
+ *
+ * 89장짜리 폴더에서 12장이 후자였다 — 프리셋 규칙이 그 판에서 아무것도 못 잡아
+ * 체크가 0장이었고, 연속된 한 구간이었다. 그런데 안내가 "준비가 끝난 뒤 다시
+ * 저장하면 전부 담깁니다"라고만 해서, 아티스트를 몇 번을 저장해도 안 담기는 일에
+ * 기다리게 만들었다. 그쪽이 봐야 하는 것은 그 파일의 프리셋이고, 미리보기가 없다는
+ * 것은 **내보내도 나올 것이 없다**는 뜻이기도 하다.
+ */
+test("the save notice separates 'nothing matched' from 'not prepared yet'", async () => {
+  const fixture = projectWithOnePreview();
+  const emptyOps = {
+    ...(fixture.project.files[0].ops as unknown as Record<string, unknown>),
+    includedIds: [],
+    entries: [],
+  };
+  fixture.project.files.push({
+    ...fixture.project.files[0],
+    path: "/cuts/nothing-matched.psd",
+    ops: emptyOps as never,
+    matchedIds: [],
+    previewKey: null,
+    previewFile: null,
+  });
+
+  render(<App />);
+  await openProject(fixture);
+
+  click(screen.getByRole("button", { name: "프로젝트 저장" }));
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  await waitFor(() => expect(screen.getByText(/미리보기 1\/2장이 담겼습니다/)).toBeTruthy());
+  const notice = screen.getByText(/미리보기 1\/2장이 담겼습니다/).textContent ?? "";
+  expect(notice).toContain("1장은 프리셋에 걸린 레이어가 없어 그릴 것이 없습니다");
+  expect(notice).toContain("수동으로 선택하세요");
+  // 기다리라고 하지 않는다 — 기다려도 안 담긴다.
+  expect(notice).not.toContain("나머지");
 });
 
 /**
