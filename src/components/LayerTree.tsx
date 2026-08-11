@@ -332,6 +332,40 @@ export function LayerTree({
     };
   }, [contextMenu]);
 
+  /**
+   * L — 선택한 행 전체의 라인 지정을 토글한다.
+   *
+   * 진짜 병목은 한 장이 아니라 "여러 장"이다. 행 버튼은 한 장을 빨리 누르게 해줄
+   * 뿐이고, 스무 장을 고른 다음 한 번 누르는 길은 이 단축키뿐이다.
+   *
+   * `e.key`가 아니라 **`e.code`** 를 본다. 한글 입력 상태에서 L을 누르면 `key`는
+   * "ㅣ"로 와서 단축키가 조용히 안 먹는다 — preview.ts의 viewCommandFor가 같은
+   * 이유로 code를 쓴다. 수식키가 하나라도 끼면 넘긴다: ⌘L/⌃L은 OS와 앱의 몫이고,
+   * 특히 ⌘S(프로젝트 저장) 옆에서 수식키를 흘려보내면 안 된다.
+   *
+   * 입력란에 포커스가 있으면 그건 명령이 아니라 글자다(검색창에 "line"을 치는
+   * 것이 이 패널에서 제일 흔한 조작이다).
+   *
+   * Escape를 보는 위의 두 핸들러와 키가 겹치지 않으므로 서로 얽히지 않는다.
+   */
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.code !== "KeyL") return;
+      if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      // 선택이 비어 있으면 handleToggleManualLine이 대상 없음으로 되돌아온다
+      // (우클릭 경로와 같은 문). 여기서 또 한 번 막으면 두 문이 서로를 가려
+      // 어느 쪽도 시험할 수 없다.
+      handleToggleManualLine(Array.from(selectedIds));
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+    // handleToggleManualLine은 렌더마다 새로 만들어지므로, 그것이 읽는 것들을
+    // 그대로 의존성에 적는다. 빠뜨리면 오래된 지정 상태로 토글 방향을 정한다.
+  }, [selectedIds, tree, sourcesByRowId, manualLineSet, onSetManualLine]);
+
   if (status === "processing") {
     return <div className="layer-tree layer-tree-empty">여는 중...</div>;
   }
@@ -461,6 +495,22 @@ export function LayerTree({
     if (targets.length === 0) return;
     const allDesignated = targets.every((id) => manualLineSet.has(id));
     onSetManualLine(targets, !allDesignated);
+  }
+
+  /**
+   * 행 오른쪽 끝의 라인 버튼. 대상 고르기는 우클릭 메뉴와 같은 규약이다 — 누른
+   * 행이 선택 안에 있으면 선택 전체, 아니면 그 행 하나.
+   *
+   * 우클릭과 달리 선택 자체는 건드리지 않는다. 우클릭은 메뉴가 열려 있는 동안
+   * 무엇에 걸릴지 볼 시간을 주지만 이 버튼은 즉시 실행되므로, 스무 장을 골라둔
+   * 상태에서 스물한 번째 행을 누르는 것만으로 그 선택이 날아가면 되돌릴 방법이
+   * 없다.
+   */
+  function handleRowLineToggle(id: number, e: ReactMouseEvent) {
+    // 행 클릭이 선택을 바꾼다. 여기서 끊지 않으면 누르는 순간 선택이 이 행
+    // 하나로 줄고, 방금 선택 전체에 건 지정을 눈으로 확인할 수 없다.
+    e.stopPropagation();
+    handleToggleManualLine(selectedIds.has(id) ? Array.from(selectedIds) : [id]);
   }
 
   function manualLineButtonLabel(ids: number[]): string {
@@ -642,6 +692,7 @@ export function LayerTree({
     const hidden = previewHiddenSet.has(node.id);
     const soloed = soloSet.has(node.id);
     const edgeColour = edgeColourSet.has(node.id);
+    const manualLine = manualLineSet.has(node.id);
     const selected = selectedIds.has(node.id);
     const disabledCheckbox = node.kind !== "pixel";
     const flat = opts.breadcrumb !== undefined;
@@ -740,6 +791,25 @@ export function LayerTree({
           </span>
         )}
         {node.kind !== "pixel" && <span className="node-kind">{node.kind}</span>}
+        <button
+          type="button"
+          className={`line-toggle${manualLine ? " line-on" : ""}`}
+          // 체크박스·solo·눈과 같은 조건으로 막는다. 지정 경로(edgeColourTargets)가
+          // non-pixel을 이미 조용히 걸러내므로, 막지 않으면 눌리기는 하는데 아무
+          // 일도 안 일어나고 켜지지도 않는 버튼이 된다 — 눈이 그래서 고쳐졌다.
+          disabled={disabledCheckbox}
+          onClick={(e) => handleRowLineToggle(node.id, e)}
+          aria-label="라인 지정 토글"
+          title={
+            disabledCheckbox
+              ? "pixel 레이어만 라인으로 지정할 수 있습니다"
+              : manualLine
+                ? "라인 지정 해제 (선택한 행 전체, 단축키 L)"
+                : "라인으로 지정 (선택한 행 전체, 단축키 L)"
+          }
+        >
+          L
+        </button>
       </div>
     );
   }
@@ -757,6 +827,14 @@ export function LayerTree({
     // ("일부라도 있으면 보인다")이다. 지정은 소스 leaf 단위라 병합 행 자체에는
     // 별도로 붙지 않는다.
     const edgeColour = sourceIds.some((id) => edgeColourSet.has(id));
+    // 라인 버튼이 실제로 걸 대상. leaf 행과 같은 경로(expandRowIds + pixel)를
+    // 쓴다 — 버튼이 켜 보이는 것과 눌렀을 때 걸리는 것이 어긋나면 안 된다.
+    const lineTargets = edgeColourTargets([row.entryId]);
+    // 하나라도 지정돼 있으면 켜진 것으로 본다 — '라인만' 목록이 이 병합 행을
+    // 보여주는 조건과 같고, 위의 색 원본 배지도 같은 규약이다. 누를 때 전부
+    // 지정/전부 해제 중 어느 쪽으로 가는지는 title이 말한다.
+    const someLine = lineTargets.some((id) => manualLineSet.has(id));
+    const allLine = lineTargets.length > 0 && lineTargets.every((id) => manualLineSet.has(id));
     const allIncluded = sourceIds.length > 0 && sourceIds.every((id) => includedSet.has(id));
     const someIncluded = sourceIds.some((id) => includedSet.has(id));
     const hidden = sourceIds.length > 0 && sourceIds.every((id) => previewHiddenSet.has(id));
@@ -858,6 +936,23 @@ export function LayerTree({
             </span>
           </span>
         )}
+        <button
+          type="button"
+          className={`line-toggle${someLine ? " line-on" : ""}`}
+          // 소스가 전부 non-pixel이면 지정할 것이 없다 — 바로 위 solo·눈과 같은 조건.
+          disabled={lineTargets.length === 0}
+          onClick={(e) => handleRowLineToggle(row.entryId, e)}
+          aria-label="라인 지정 토글"
+          title={
+            lineTargets.length === 0
+              ? "pixel 레이어만 라인으로 지정할 수 있습니다"
+              : allLine
+                ? `라인 지정 해제 (병합 소스 ${lineTargets.length}장, 단축키 L)`
+                : `라인으로 지정 (병합 소스 ${lineTargets.length}장, 단축키 L)`
+          }
+        >
+          L
+        </button>
       </div>
     );
   }

@@ -1553,6 +1553,56 @@ input[type="text"] {
   box-shadow: inset 2px 0 0 #b18cff;
 }
 
+/* 행 오른쪽 끝의 라인 지정 버튼.
+ *
+ * 왼쪽 컨트롤 뭉치(체크박스·solo·눈)에서 떨어뜨려 여기 둔다. 그 셋은 눌러도
+ * 미리보기만 바뀌지만 라인 지정은 색 통일 대상을 바꿔 **내보내는 그림이
+ * 달라진다** — 훑으면서 옆 버튼을 잘못 누르는 사고의 값이 다르다.
+ *
+ * margin-left: auto는 이 버튼이 오른쪽 끝으로 가는 힘이다. 다만 .node-trailing이
+ * 이미 같은 auto margin을 갖고 있어, 둘 다 auto면 flexbox가 남는 공간을 반씩
+ * 나눠 가져 배지 뭉치가 행 한가운데로 밀린다(.solo-clear에서 같은 함정을 이미
+ * 밟았다). 앞에 .node-trailing이 있으면 이쪽이 auto를 내려놓고 .tree-row의
+ * gap에 기댄다. */
+.line-toggle {
+  flex-shrink: 0;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 0.4em;
+  font-size: 0.72em;
+  line-height: 1.7;
+  color: var(--text-dim);
+  /* 평소에는 숨는다. 수백 줄을 훑는 것이 이 패널에서 제일 자주 하는 일인데,
+     드물게 쓰는 버튼을 모든 행에 상시로 띄우면 그 비용을 훑기가 낸다.
+     display: none이 아니라 visibility인 것은 자리를 남겨두기 위해서다 —
+     none이면 호버할 때마다 폭이 바뀌어 행이 흔들린다. */
+  visibility: hidden;
+}
+
+.node-trailing ~ .line-toggle {
+  margin-left: 0;
+}
+
+.tree-row:hover .line-toggle {
+  visibility: visible;
+}
+
+/* 이미 지정된 행에서는 늘 보인다. 지금은 지정 여부를 '라인만' 필터로 걸러봐야
+   알 수 있어, 이 버튼이 그 표시를 겸한다. matched(노랑)·merged(금색)·색
+   원본(보라)과 겹치지 않는 색을 쓴다. */
+.line-toggle.line-on {
+  visibility: visible;
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+.line-toggle:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
 /* 병합 결과 행. 원본 레이어가 아니라 내보내기 계획의 항목이므로 구분되게 둔다. */
 .tree-row-merged {
   box-shadow: inset 2px 0 0 #f2c94c;
