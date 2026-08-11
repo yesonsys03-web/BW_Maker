@@ -290,9 +290,35 @@ export function parsePresets(raw: string): Preset[] {
 }
 
 /**
+ * 기본 프리셋(BG·CHAR)은 **어느 컴퓨터에서든** 목록에 있어야 한다.
+ *
+ * 파일이 없을 때만 기본값을 주면 그 약속이 깨진다: 앱을 새로 설치해도 appData는
+ * 지워지지 않으므로, 옛 버전이 써둔 `presets.json`이 남아 있는 컴퓨터에서는 그
+ * 옛 목록만 뜨고 BG·CHAR이 아예 안 보인다(실제로 그런 컴퓨터가 있었다 — 지금
+ * 소스에 없는 이름의 프리셋 하나만 떠 있었다). 그래서 읽어온 목록에 **없는**
+ * 기본 프리셋만 끼워 넣는다. 이름이 같은 것이 이미 있으면 손대지 않는다 —
+ * 아티스트가 고쳐 쓰는 판이 그쪽이다.
+ *
+ * **앞에 끼운다.** 새로 설치한 컴퓨터와 같은 순서로 보이게 하려는 것이다. 다만
+ * 순서는 눈에만 보이는 값이 아니다 — 배치는 자기 드롭다운의 첫 번째로 출발하므로
+ * (BatchPanel의 `defaultPresetName`), 기본값이 빠져 있던 컴퓨터에서는 배치의
+ * 출발 프리셋도 BG로 바뀐다.
+ *
+ * 디스크에는 쓰지 않는다. `presets.json`은 아티스트가 저장을 누를 때만 바뀐다.
+ * 그래서 일부러 지운 기본 프리셋도 다음 실행에 다시 보인다 — "기본은 항상
+ * 보인다"를 지키는 대가이고, 지우기가 아니라 이름을 바꿔 쓰는 것이 답이다.
+ */
+export function withDefaultPresets(list: Preset[]): Preset[] {
+  const names = new Set(list.map((p) => p.name));
+  const missing = DEFAULT_PRESETS.filter((p) => !names.has(p.name)).map((p) => ({ ...p }));
+  return missing.length === 0 ? list : [...missing, ...list];
+}
+
+/**
  * Loads presets from `appDataDir()/presets.json`. Returns DEFAULT_PRESETS
- * (BG, CHAR) when the file doesn't exist yet (first run). Malformed JSON and
- * well-formed-but-wrong-shaped JSON are NOT absorbed here — both throw and
+ * (BG, CHAR) when the file doesn't exist yet (first run), and tops up any
+ * missing default when it does exist (see withDefaultPresets). Malformed JSON
+ * and well-formed-but-wrong-shaped JSON are NOT absorbed here — both throw and
  * that rejection propagates to the caller, which must surface it (e.g. via
  * ErrorPanel).
  */
@@ -300,7 +326,7 @@ export async function loadPresets(): Promise<Preset[]> {
   const filePath = await presetsFilePath();
   if (!(await exists(filePath))) return DEFAULT_PRESETS.map((p) => ({ ...p }));
   const raw = await readTextFile(filePath);
-  return parsePresets(raw);
+  return withDefaultPresets(parsePresets(raw));
 }
 
 /**

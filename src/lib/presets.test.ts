@@ -39,6 +39,18 @@ beforeEach(() => {
   joinMock.mockImplementation(async (...parts: string[]) => parts.join("/"));
 });
 
+/**
+ * 파일에 들어 있던 그 프리셋을 집어온다. **인덱스로 집으면 안 된다** —
+ * loadPresets는 빠진 기본 프리셋을 목록 앞에 끼우므로(withDefaultPresets)
+ * `[0]`은 파일에 있던 것이 아닐 수 있다. 못 찾으면 조용히 다른 것을 검사하는
+ * 대신 여기서 터뜨린다.
+ */
+async function loadStored(name = "BG"): Promise<Preset> {
+  const found = (await loadPresets()).find((p) => p.name === name);
+  if (!found) throw new Error(`저장된 프리셋 "${name}"이 불러온 목록에 없습니다.`);
+  return found;
+}
+
 test("BG_PRESET matches the brief contract", () => {
   // 값이 임의의 초기값이 아니라 **검증된 설정**이라는 것이 이 테스트의 요점이다.
   // merge/mergeRule/naming/lineColor는 납품 BG 26장 픽셀 기준선을 뜬 그 설정이다.
@@ -105,7 +117,8 @@ test("loadPresets가 돌려준 기본 프리셋을 고쳐도 원본이 안 바�
 });
 
 test("loadPresets reads and parses existing JSON (round trip)", async () => {
-  const stored: Preset[] = [BG_PRESET, { ...BG_PRESET, name: "second" }];
+  // 기본 둘이 다 들어 있는 파일이라 채워 넣을 것이 없다 — 읽은 그대로 나와야 한다.
+  const stored: Preset[] = [BG_PRESET, CHAR_PRESET, { ...BG_PRESET, name: "second" }];
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify(stored));
 
@@ -114,6 +127,34 @@ test("loadPresets reads and parses existing JSON (round trip)", async () => {
   expect(result).toEqual(stored);
   expect(existsMock).toHaveBeenCalledWith(FILE_PATH);
   expect(readTextFileMock).toHaveBeenCalledWith(FILE_PATH);
+});
+
+// 옛 버전이 써둔 presets.json이 남아 있는 컴퓨터에서 실제로 났던 일이다: 앱을
+// 새로 설치했는데 BG·CHAR이 안 보이고 그 파일에 든 옛 프리셋 하나만 떴다.
+// appData는 재설치로 지워지지 않으므로 "파일이 없을 때만 기본값"으로는 못 막는다.
+test("loadPresets tops up defaults that a legacy presets.json never had", async () => {
+  const legacy: Preset = { ...BG_PRESET, name: "line 추출" };
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([legacy]));
+
+  const result = await loadPresets();
+
+  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR", "line 추출"]);
+  // 끼워 넣기는 메모리에서만 한다 — 저장은 아티스트가 누를 때만이다.
+  expect(writeTextFileMock).not.toHaveBeenCalled();
+});
+
+// 이름이 같은 것이 이미 있으면 손대지 않는다. 여기서 기본값으로 덮으면 아티스트가
+// 고쳐 쓰는 판이 조용히 되돌아간다 — 그건 이 기능이 막으려는 바로 그 형태다.
+test("loadPresets does not overwrite a default the artist has edited", async () => {
+  const edited: Preset = { ...CHAR_PRESET, lineColor: null };
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([edited]));
+
+  const result = await loadPresets();
+
+  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR"]);
+  expect(result.find((p) => p.name === "CHAR")?.lineColor).toBeNull();
 });
 
 test("loadPresets throws on corrupted JSON instead of absorbing the error", async () => {
@@ -173,7 +214,9 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([wellFormed]));
 
-  await expect(loadPresets()).resolves.toEqual([wellFormed]);
+  // 목록 전체와 대조하지 않는다 — 빠진 기본 프리셋이 함께 들어오기 때문이다.
+  // 이 테스트가 재는 것은 "파일에 적힌 필드가 하나도 안 변한다"이다.
+  await expect(loadStored("custom")).resolves.toEqual(wellFormed);
 });
 
 test("a preset saved before colourMode existed loads with the composite path", async () => {
@@ -187,8 +230,10 @@ test("a preset saved before colourMode existed loads with the composite path", a
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([old]));
 
-  const loaded = await loadPresets();
-  expect(loaded[0].edgeLines.colourMode).toBe("composite");
+  // 이름으로 집는다. `[0]`으로 집으면 끼워 넣은 기본 프리셋의 colourMode가
+  // 마침 "composite"이라 **파서가 고장 나도 초록불이 뜬다**.
+  const loaded = await loadStored();
+  expect(loaded.edgeLines.colourMode).toBe("composite");
 });
 
 test("a preset saved after colourMode existed but before edgeMode did loads with the region path", async () => {
@@ -243,7 +288,10 @@ test("savePresets round-trips through loadPresets via a fake in-memory file", as
   await savePresets(list);
   const loaded = await loadPresets();
 
-  expect(loaded).toEqual(list);
+  // 디스크에 적힌 것은 준 목록 그대로다 — 기본값 끼워 넣기는 읽을 때만 한다.
+  expect(JSON.parse(String(stored))).toEqual(list);
+  // 그리고 읽으면 그 항목이 필드까지 그대로 돌아온다.
+  expect(loaded.find((p) => p.name === "roundtrip")).toEqual(list[0]);
 });
 
 test("savePresets propagates write errors instead of absorbing them", async () => {
@@ -260,7 +308,7 @@ test("loadPresets reads a preset saved before lineColor existed as keep-original
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([legacy]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.lineColor).toBeNull();
 });
 
@@ -268,7 +316,7 @@ test("loadPresets keeps an explicit null lineColor", async () => {
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...BG_PRESET, lineColor: null }]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.lineColor).toBeNull();
 });
 
@@ -302,7 +350,7 @@ test("loadPresets fills in the default role tokens for a preset saved before the
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([legacy]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.roleTokens).toEqual(["UL", "OL_UL", "OL"]);
 });
 
@@ -310,7 +358,7 @@ test("loadPresets keeps a custom role token order, since it sets the stacking or
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...BG_PRESET, roleTokens: ["OL", "UL"] }]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.roleTokens).toEqual(["OL", "UL"]);
 });
 
@@ -325,7 +373,7 @@ test("loadPresets accepts the byElement merge mode", async () => {
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...BG_PRESET, merge: "byElement" }]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.merge).toBe("byElement");
 });
 
@@ -335,7 +383,7 @@ test("loadPresets migrates the short-lived byRole mode to byElement", async () =
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...BG_PRESET, merge: "byRole" }]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.merge).toBe("byElement");
 });
 
@@ -345,7 +393,7 @@ test("loadPresets reads a preset saved before splitLayers existed as one-file", 
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([legacy]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.splitLayers).toBe(false);
 });
 
@@ -353,7 +401,7 @@ test("loadPresets keeps splitLayers when it is set", async () => {
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...BG_PRESET, splitLayers: true }]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.splitLayers).toBe(true);
 });
 
@@ -370,7 +418,7 @@ test("loadPresets defaults mergeRule to role for a preset saved before it existe
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([legacy]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.mergeRule).toBe("role");
 });
 
@@ -378,7 +426,7 @@ test("loadPresets keeps a chosen mergeRule", async () => {
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...BG_PRESET, mergeRule: "plane" }]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
   expect(loaded.mergeRule).toBe("plane");
 });
 
@@ -396,7 +444,7 @@ test("presets saved before excludeTokens existed load with the default vocabular
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([withoutField]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
 
   // 어휘가 늘면 옛 프리셋도 늘어난 쪽을 받는다 — 그게 이 마이그레이션의 요점이다.
   // (2026-08-10에 키 기준선을 빼려고 "height"가 들어왔다.)
@@ -408,7 +456,7 @@ test("an empty excludeTokens list is kept, not replaced by the default", async (
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...BG_PRESET, excludeTokens: [] }]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
 
   expect(loaded.excludeTokens).toEqual([]);
 });
@@ -427,7 +475,7 @@ test("loadPresets reads a preset saved before outputFormat existed as psd", asyn
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([withoutField]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
 
   expect(loaded.outputFormat).toBe("psd");
 });
@@ -436,7 +484,7 @@ test("loadPresets keeps an explicit outputFormat", async () => {
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...BG_PRESET, outputFormat: "jpg" }]));
 
-  const [loaded] = await loadPresets();
+  const loaded = await loadStored();
 
   expect(loaded.outputFormat).toBe("jpg");
 });
