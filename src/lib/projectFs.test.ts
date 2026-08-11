@@ -44,6 +44,61 @@ beforeEach(() => {
   });
 });
 
+/** 테스트마다 새 사본. carry가 previewFile을 지울 수 있어 공유하면 서로 오염된다. */
+function projectCopy(): ProjectFile {
+  return JSON.parse(JSON.stringify(PROJECT)) as ProjectFile;
+}
+
+/** 저장된 project.json을 다시 읽어 항목을 본다. */
+function writtenProject(): ProjectFile {
+  const calls = cmd.project_write_text.mock.calls;
+  const call = calls[calls.length - 1][0] as { contents: string };
+  return JSON.parse(call.contents) as ProjectFile;
+}
+
+/**
+ * 캐시는 예산이 있어 오래된 그림부터 밀려난다. 파일이 89장쯤 되면 프로젝트를 열며
+ * 프라이밍해둔 그림도 곧 밀리는데, 그 상태에서 아무것도 안 바꾸고 ⌘S만 눌러도
+ * 예전에는 담긴 미리보기가 **줄었다** — 디스크에는 그대로 있는데 새 project.json이
+ * 이름을 안 대서 다음에 못 읽는다. 실제로 그렇게 89개 중 1개만 가리키는 프로젝트가
+ * 나왔고, 43초 전에 쓴 77장이 통째로 고아가 됐다.
+ */
+test("a re-save into the same folder keeps a preview the cache no longer holds", async () => {
+  const project = projectCopy();
+  // 캐시에 아무것도 없다 = previews 맵이 비어 있다.
+  await saveProjectTo("/p/x.bwproj", project, new Map(), "/p/x.bwproj");
+
+  expect(writtenProject().files[0].previewFile).toBe(VALID_HASH);
+  // 같은 폴더라 파일이 이미 그 자리에 있다 — 읽지도 쓰지도 않는다.
+  expect(cmd.read_file_b64).not.toHaveBeenCalled();
+  expect(cmd.project_write_b64).not.toHaveBeenCalled();
+  // 다만 있는지는 확인한다(없으면 참조를 지운다 — 아래 테스트).
+  expect(cmd.paths_exist).toHaveBeenCalledWith({ paths: [`/p/x.bwproj/previews/${VALID_HASH}`] });
+});
+
+test("saving to a new folder carries those previews across", async () => {
+  const project = projectCopy();
+  await saveProjectTo("/p/new.bwproj", project, new Map(), "/p/old.bwproj");
+
+  expect(writtenProject().files[0].previewFile).toBe(VALID_HASH);
+  // 원본에서 읽어 새 폴더에 쓴다. 참조만 옮기면 다음에 열 때 그림이 없다.
+  expect(cmd.read_file_b64).toHaveBeenCalledWith({ path: `/p/old.bwproj/previews/${VALID_HASH}` });
+  expect(cmd.project_write_b64).toHaveBeenCalledWith({
+    path: `/p/new.bwproj/previews/${VALID_HASH}`,
+    b64: "AAA=",
+  });
+});
+
+test("a preview that vanished from the source folder is dropped, not left dangling", async () => {
+  cmd.paths_exist.mockImplementation(async ({ paths }: { paths: string[] }) => paths.map(() => false));
+  const project = projectCopy();
+  await saveProjectTo("/p/x.bwproj", project, new Map(), "/p/x.bwproj");
+
+  // 끊긴 참조를 적어두면 다음에 열 때 조용히 빠져서 "그림이 없다"와 구별되지 않는다.
+  expect(writtenProject().files[0].previewFile).toBeNull();
+  expect(cmd.project_write_b64).not.toHaveBeenCalled();
+});
+
 test("saving writes project.json and every preview into previews/", async () => {
   await saveProjectTo("/p/x.bwproj", PROJECT, new Map([[VALID_HASH, "data:image/png;base64,AAA="]]));
 

@@ -1018,6 +1018,35 @@ test("saving says how many previews actually went in", async () => {
 });
 
 /**
+ * 캐시에 그 그림이 없어도 **참조는 이어받는다**.
+ *
+ * 저장은 그 순간 캐시에 있는 것만 담는데, 캐시는 예산이 있어 밀려난다. 파일이
+ * 89장이면 프로젝트를 열며 프라이밍해둔 그림도 곧 밀리므로, 아무것도 안 바꾸고
+ * ⌘S만 눌러도 담긴 미리보기가 줄어든다 — 디스크에는 그대로 있는데 새 project.json이
+ * 이름을 안 대서 다음에 못 읽는다.
+ *
+ * 여기서 재는 것은 App의 몫(설정이 그대로면 옛 참조를 그대로 적고, 원본 폴더를
+ * 넘긴다)뿐이다. 파일을 실제로 옮기고 없으면 참조를 지우는 쪽은 projectFs가 하고
+ * 그쪽 테스트에 있다 — 이 파일에서는 projectFs가 통째로 목이다.
+ */
+test("a save carries a preview reference the cache has lost", async () => {
+  const fixture = projectWithOnePreview();
+  // 프라이밍이 아무것도 못 넣은 상태 = 캐시에 그 키가 없다.
+  fixture.previews = new Map();
+
+  render(<App />);
+  await openProject(fixture);
+
+  click(screen.getByRole("button", { name: "프로젝트 저장" }));
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  const [, saved, previews, carryFrom] = vi.mocked(saveProjectTo).mock.calls[0];
+  expect(saved.files[0].previewFile).toBe(fixture.previewFile);
+  expect(previews.size).toBe(0); // 바이트는 안 들고 있다 — 이어받기는 파일 쪽 일이다
+  expect(carryFrom).toBe("/proj/작업.bwproj");
+});
+
+/**
  * 정정 4. buildProject가 previewPlanFor를 쓰면 sessionId가 없는 복원 항목에서
  * null을 받아, **프로젝트를 열고 파일이 열리기 전에 저장하는 것만으로** 모든
  * 파일의 previewKey/previewFile이 null이 된다. previews/의 PNG는 새 저장에서

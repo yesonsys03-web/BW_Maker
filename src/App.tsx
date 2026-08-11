@@ -216,6 +216,16 @@ function AppShell() {
   /** 열려 있는 `.bwproj` 폴더. null이면 아직 저장한 적 없다(저장은 수동, 설계 6절). */
   const [projectDir, setProjectDir] = useState<string | null>(null);
   /**
+   * 같은 값의 ref. 저장은 이것을 "지난번 미리보기가 들어 있는 폴더"로 쓴다
+   * (saveProjectTo의 carryFrom). 상태로 읽으면 writeProjectTo의 의존성이 되어
+   * 저장할 때마다 함수 정체가 바뀌는데, 그러면 그 함수를 붙들고 있는 키 핸들러와
+   * 버튼이 매번 다시 걸린다.
+   */
+  const projectDirRef = useRef<string | null>(null);
+  useEffect(() => {
+    projectDirRef.current = projectDir;
+  }, [projectDir]);
+  /**
    * 프로젝트를 열 때 수정시각이 달라 저장된 작업을 버린 파일. 목록이 표시한다 —
    * 조용히 버리면 아티스트는 자기가 한 지정이 왜 없는지 알 수 없다(설계 4절).
    */
@@ -734,6 +744,13 @@ function AppShell() {
           // — 기밀이다(설계 7절). saveProjectTo가 한 번 더 검사한다.
           previewFile = previewFileName(plan.key);
           previews.set(previewFile, dataUrl);
+        } else if (fallback?.previewKey === plan.key && fallback.previewFile) {
+          // 캐시엔 없지만 **설정이 그대로**라, 열어둔 프로젝트 폴더에 있는 그 그림이
+          // 여전히 맞다. 캐시는 예산이 있어 밀려나므로(89장이면 곧 밀린다) 이 줄이
+          // 없으면 아무것도 안 바꾸고 ⌘S만 눌러도 담긴 미리보기가 줄어든다.
+          // 바이트를 여기서 읽지는 않는다 — saveProjectTo가 원본 폴더에서 이어받고,
+          // 그 파일이 없으면 참조를 지운다(carryMissingPreviews).
+          previewFile = fallback.previewFile;
         }
       }
       files.push({
@@ -823,7 +840,9 @@ function AppShell() {
           });
           return;
         }
-        await saveProjectTo(dir, project, previews);
+        // 열어둔 폴더를 넘긴다 — 캐시에서 밀려난 그림을 거기서 이어받는다.
+        // 다른 이름으로 저장이면 원본에서 새 폴더로 옮겨 실린다.
+        await saveProjectTo(dir, project, previews, projectDirRef.current);
         // 미리보기는 **지금 캐시에 있는 것만** 담긴다(buildProject 참고). 프리셋을
         // 바꾼 직후에 저장하면 키가 전부 갈린 뒤라 한두 장밖에 안 담기는데,
         // 폴더에는 지난 저장이 남긴 PNG가 그대로 쌓여 있어서 "다 담겼다"로 보인다.
