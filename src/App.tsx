@@ -887,7 +887,11 @@ function AppShell() {
   // ⌘S 저장 / ⌘⇧S 다른 이름으로 저장(설계 6절). App.tsx에는 기존 키 핸들러가
   // 없어 새로 만든다. 다른 두 핸들러와는 겹치지 않는다 — PreviewCanvas의 뷰
   // 단축키는 viewCommandFor가 metaKey/ctrlKey가 있으면 null을 주고(lib/preview.ts),
-  // LayerTree의 것은 Escape뿐이다.
+  // LayerTree의 것은 Escape(메뉴/모달 닫기)와 L(라인 지정 토글)인데 L은 수식키가
+  // 하나라도 끼면 스스로 넘긴다 — ⌘S 바로 옆이라 그 문이 특히 중요하다.
+  // L은 그 위에 문이 둘 더 있다: `.modal-overlay`가 떠 있으면 넘기고, 포인터가
+  // 레이어 패널 위에 있을 때만 먹는다. 새 모달을 만들 때 그 클래스를 쓰지 않으면
+  // 모달 위에서 누른 L이 뒤의 레이어 지정을 바꾼다.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "s") return;

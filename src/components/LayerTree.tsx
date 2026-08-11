@@ -169,6 +169,14 @@ export function LayerTree({
   const menuRef = useRef<HTMLDivElement | null>(null);
   /** 스크롤되는 트리 본체. 썸네일 관측자의 기준(root)이다. */
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 포인터가 이 패널 위에 있는가. L 단축키가 자기 차례를 아는 유일한 근거다
+   * (PreviewCanvas의 뷰 단축키가 cursorRef로 하는 것과 같은 규약).
+   *
+   * CSS `:hover`가 아니라 ref다 — 의사클래스는 jsdom에서 읽을 수 없어 이 규약을
+   * 시험할 수 없고, 시험할 수 없는 안전장치는 다음 사람이 조용히 지운다.
+   */
+  const pointerInsideRef = useRef(false);
 
   const includedSet = useMemo(() => new Set(ops.includedIds), [ops.includedIds]);
   const previewHiddenSet = useMemo(() => new Set(ops.previewHiddenIds), [ops.previewHiddenIds]);
@@ -344,7 +352,22 @@ export function LayerTree({
    * 특히 ⌘S(프로젝트 저장) 옆에서 수식키를 흘려보내면 안 된다.
    *
    * 입력란에 포커스가 있으면 그건 명령이 아니라 글자다(검색창에 "line"을 치는
-   * 것이 이 패널에서 제일 흔한 조작이다).
+   * 것이 이 패널에서 제일 흔한 조작이다). `<select>`도 같다 — 목록이 열린
+   * 상태에서 글자를 누르면 그 항목으로 뛰는 것이 브라우저 기본 동작이고,
+   * 출력 포맷(ExportDialog)·프리셋(PresetBar)·배치가 전부 select다.
+   *
+   * 두 개의 문을 더 단다. 이 핸들러는 document에 걸리고 LayerTree는 늘 마운트돼
+   * 있으므로, 그냥 두면 **아무 곳에서나** 누른 L이 뒤의 레이어 지정을 바꾼다.
+   * 지정은 켜질 때 내보내기 체크까지 같이 켜는데 해제는 체크를 안 되돌리고
+   * (opsReducer의 setManualLine), manualLineIds는 ops 배열이 아니라 별도 필드라
+   * 되돌리기도 없다 — 사고로 누른 한 번이 남는다.
+   *
+   * 1. 모달이 떠 있으면 넘긴다. 모달은 전부 포털이 아니라 형제 `.modal-overlay`
+   *    div이고 포커스 트랩이 없어, 내보내기 창의 버튼에 포커스를 둔 채 L을
+   *    누르면 뒤가 바뀌었다. 클래스 이름에 기대는 것이 이 코드베이스의 실제
+   *    규약이다(7곳 전부 이 클래스 하나를 쓰고 App.css가 그것을 그린다).
+   *    새 모달을 다른 클래스로 만들면 이 문이 조용히 열린다.
+   * 2. 포인터가 이 패널 밖이면 넘긴다 — PreviewCanvas의 뷰 단축키와 같은 규약.
    *
    * Escape를 보는 위의 두 핸들러와 키가 겹치지 않으므로 서로 얽히지 않는다.
    */
@@ -354,7 +377,9 @@ export function LayerTree({
       if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) return;
+      if (document.querySelector(".modal-overlay")) return;
+      if (!pointerInsideRef.current) return;
       // 선택이 비어 있으면 handleToggleManualLine이 대상 없음으로 되돌아온다
       // (우클릭 경로와 같은 문). 여기서 또 한 번 막으면 두 문이 서로를 가려
       // 어느 쪽도 시험할 수 없다.
@@ -497,6 +522,11 @@ export function LayerTree({
     onSetManualLine(targets, !allDesignated);
   }
 
+  /** 행 버튼을 누르면 실제로 걸리는 대상. 버튼과 그 title이 같은 답을 쓴다. */
+  function manualLineClickTargets(id: number): number[] {
+    return edgeColourTargets(selectedIds.has(id) ? Array.from(selectedIds) : [id]);
+  }
+
   /**
    * 행 오른쪽 끝의 라인 버튼. 대상 고르기는 우클릭 메뉴와 같은 규약이다 — 누른
    * 행이 선택 안에 있으면 선택 전체, 아니면 그 행 하나.
@@ -511,6 +541,19 @@ export function LayerTree({
     // 하나로 줄고, 방금 선택 전체에 건 지정을 눈으로 확인할 수 없다.
     e.stopPropagation();
     handleToggleManualLine(selectedIds.has(id) ? Array.from(selectedIds) : [id]);
+  }
+
+  /**
+   * 행 버튼의 title. 방향(지정/해제)과 장수를 **누르면 실제로 걸릴 대상**으로
+   * 계산한다 — handleToggleManualLine이 쓰는 것과 같은 집합, 같은 섞임 규약이다.
+   * 장수를 적는 이유는 그 대상이 이 행 하나일 수도 선택 전체일 수도 있어서,
+   * 문구만으로는 어느 쪽인지 알 수 없기 때문이다.
+   */
+  function manualLineButtonTitle(targets: number[]): string {
+    const verb = targets.length > 0 && targets.every((id) => manualLineSet.has(id))
+      ? "라인 지정 해제"
+      : "라인으로 지정";
+    return `${verb} (${targets.length}장, 단축키 L)`;
   }
 
   function manualLineButtonLabel(ids: number[]): string {
@@ -695,6 +738,10 @@ export function LayerTree({
     const manualLine = manualLineSet.has(node.id);
     const selected = selectedIds.has(node.id);
     const disabledCheckbox = node.kind !== "pixel";
+    // 라인 버튼을 누르면 실제로 걸리는 대상. 버튼 자체가 아니라 이걸로 title을
+    // 만든다 — 이 행 하나로 계산하면 "지정된 행 + 안 된 행"을 함께 고른 상태에서
+    // 툴팁이 '해제'라고 말하고 클릭은 '지정'을 거는, 방향이 뒤집힌 거짓말이 된다.
+    const lineTargets = manualLineClickTargets(node.id);
     const flat = opts.breadcrumb !== undefined;
     const exportLabel = exportLabels.get(node.id);
 
@@ -803,9 +850,7 @@ export function LayerTree({
           title={
             disabledCheckbox
               ? "pixel 레이어만 라인으로 지정할 수 있습니다"
-              : manualLine
-                ? "라인 지정 해제 (선택한 행 전체, 단축키 L)"
-                : "라인으로 지정 (선택한 행 전체, 단축키 L)"
+              : manualLineButtonTitle(lineTargets)
           }
         >
           L
@@ -827,14 +872,17 @@ export function LayerTree({
     // ("일부라도 있으면 보인다")이다. 지정은 소스 leaf 단위라 병합 행 자체에는
     // 별도로 붙지 않는다.
     const edgeColour = sourceIds.some((id) => edgeColourSet.has(id));
-    // 라인 버튼이 실제로 걸 대상. leaf 행과 같은 경로(expandRowIds + pixel)를
-    // 쓴다 — 버튼이 켜 보이는 것과 눌렀을 때 걸리는 것이 어긋나면 안 된다.
+    // 이 행이 대표하는 지정 가능 소스. leaf 행과 같은 경로(expandRowIds + pixel)를
+    // 쓴다. 버튼이 켜 보이는지와 눌릴 수 있는지는 이 행의 소스만으로 정한다 —
+    // 배지는 "이 행에 지정된 소스가 있다"는 뜻이지 선택 상태의 뜻이 아니다.
     const lineTargets = edgeColourTargets([row.entryId]);
+    // 반면 누르면 실제로 걸리는 대상은 선택까지 포함한다(leaf 행과 같은 규약).
+    // title은 이쪽으로 계산해야 "병합 소스 2장"이라 해놓고 3장이 걸리지 않는다.
+    const lineClickTargets = manualLineClickTargets(row.entryId);
     // 하나라도 지정돼 있으면 켜진 것으로 본다 — '라인만' 목록이 이 병합 행을
     // 보여주는 조건과 같고, 위의 색 원본 배지도 같은 규약이다. 누를 때 전부
     // 지정/전부 해제 중 어느 쪽으로 가는지는 title이 말한다.
     const someLine = lineTargets.some((id) => manualLineSet.has(id));
-    const allLine = lineTargets.length > 0 && lineTargets.every((id) => manualLineSet.has(id));
     const allIncluded = sourceIds.length > 0 && sourceIds.every((id) => includedSet.has(id));
     const someIncluded = sourceIds.some((id) => includedSet.has(id));
     const hidden = sourceIds.length > 0 && sourceIds.every((id) => previewHiddenSet.has(id));
@@ -946,9 +994,7 @@ export function LayerTree({
           title={
             lineTargets.length === 0
               ? "pixel 레이어만 라인으로 지정할 수 있습니다"
-              : allLine
-                ? `라인 지정 해제 (병합 소스 ${lineTargets.length}장, 단축키 L)`
-                : `라인으로 지정 (병합 소스 ${lineTargets.length}장, 단축키 L)`
+              : manualLineButtonTitle(lineClickTargets)
           }
         >
           L
@@ -958,7 +1004,16 @@ export function LayerTree({
   }
 
   return (
-    <div className="layer-tree" ref={scrollRef}>
+    <div
+      className="layer-tree"
+      ref={scrollRef}
+      onMouseEnter={() => {
+        pointerInsideRef.current = true;
+      }}
+      onMouseLeave={() => {
+        pointerInsideRef.current = false;
+      }}
+    >
       <div className="layer-filter-bar">
         <div className="layer-filter-row">
           <input
