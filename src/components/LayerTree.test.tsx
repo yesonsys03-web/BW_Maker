@@ -663,3 +663,97 @@ test("the group checkbox reaches through nested groups", () => {
 
   expect(onSetIncluded).toHaveBeenCalledWith([1, 2, 3]);
 });
+
+/**
+ * 그룹도 잎처럼 다뤄야 내보낼 수 있다(2026-08-11 아티스트 요청).
+ *
+ * 체크만 되고 지정이 안 되면 반쪽이다 — 프리셋이 아무것도 못 잡는 파일에서
+ * 라인으로 내보내려면 수동 지정이 필요한데, 그 경로가 잎에만 있었다. 규약은
+ * 한 곳(expandRowIds)에서 편다: 그룹 행 → 그 안의 체크 가능한 잎.
+ */
+function groupRows(): HTMLElement[] {
+  return Array.from(document.querySelectorAll(".tree-row-group"));
+}
+
+test("the group's line button designates every layer inside it", () => {
+  const { onSetManualLine } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel"), leaf(3, "메모", "type")])],
+    [1, 2]
+  );
+
+  // 그룹 행의 라인 버튼은 문서 순서로 첫 번째다(그 아래가 잎들).
+  fireEvent.click(lineButtons()[0]);
+
+  // 텍스트는 빠진다 — 잎의 지정 경로와 같은 조건이다.
+  expect(designated(onSetManualLine)).toEqual([[1, 2], true]);
+});
+
+test("KeyL designates the selected group's layers", () => {
+  const { onSetManualLine } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel")])],
+    [1, 2]
+  );
+
+  fireEvent.click(groupRows()[0]);
+  fireEvent.keyDown(document.body, { code: "KeyL" });
+
+  expect(designated(onSetManualLine)).toEqual([[1, 2], true]);
+});
+
+test("right-clicking a group opens the same menu and it acts on the group's layers", () => {
+  const { onSetManualLine } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel")])],
+    [1, 2]
+  );
+
+  fireEvent.contextMenu(groupRows()[0]);
+  fireEvent.click(screen.getByRole("button", { name: "라인으로 지정" }));
+
+  expect(designated(onSetManualLine)).toEqual([[1, 2], true]);
+});
+
+test("a group already designated is released by the same click", () => {
+  // 방향은 지금 지정 상태로 정한다 — 잎과 같은 규약이다.
+  const { onSetManualLine } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel")])],
+    [1, 2],
+    { manualLineIds: [1, 2] }
+  );
+
+  fireEvent.click(lineButtons()[0]);
+
+  expect(designated(onSetManualLine)).toEqual([[1, 2], false]);
+});
+
+test("selecting a group and one of its own layers does not designate it twice", () => {
+  // 그룹과 자식을 함께 고르는 것은 흔하다. 같은 id가 두 번 실리면 받는 쪽이 세는
+  // 개수와 화면이 어긋난다.
+  const { onSetManualLine } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel")])],
+    [1, 2]
+  );
+
+  fireEvent.click(groupRows()[0]);
+  fireEvent.click(leafRows()[1], { metaKey: true });
+  fireEvent.keyDown(document.body, { code: "KeyL" });
+
+  const [ids] = onSetManualLine.mock.calls[0];
+  expect([...(ids as number[])].sort((a, b) => a - b)).toEqual([1, 2]);
+});
+
+test("the group's own buttons do not steal the selection", () => {
+  // 접기·체크·solo·눈을 누르는 것은 선택을 바꾸는 조작이 아니다. 안 끊으면
+  // 스무 장을 골라둔 상태에서 그룹을 접기만 해도 그 선택이 날아간다.
+  const { onSetManualLine } = renderTree(
+    [group(10, "MG", [leaf(1, "01", "pixel"), leaf(2, "02", "pixel")]), leaf(3, "03", "pixel")],
+    [1, 2, 3]
+  );
+  fireEvent.click(leafRows()[leafRows().length - 1]); // 03만 선택
+
+  fireEvent.click(screen.getAllByRole("checkbox", { name: "그룹 내보내기 토글" })[0]);
+  fireEvent.click(screen.getAllByRole("button", { name: "그룹 solo 토글" })[0]);
+  fireEvent.keyDown(document.body, { code: "KeyL" });
+
+  // 선택은 여전히 03 하나다.
+  expect(designated(onSetManualLine)).toEqual([[3], true]);
+});

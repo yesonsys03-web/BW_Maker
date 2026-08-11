@@ -113,12 +113,16 @@ function collectTogglableLeafIds(node: TreeNode, out: number[] = []): number[] {
   return out;
 }
 
-function collectVisibleLeafOrder(nodes: TreeNode[], collapsedIds: Set<number>, out: number[] = []): number[] {
+/**
+ * shift-범위 선택의 기준이 되는 화면 순서. **그룹 행도 들어간다** — 그룹이
+ * 선택되는 행이 된 뒤로는 그것도 화면의 한 줄이고, 빼두면 그룹을 지나는 범위
+ * 선택이 그 줄만 건너뛴다.
+ */
+function collectVisibleRowOrder(nodes: TreeNode[], collapsedIds: Set<number>, out: number[] = []): number[] {
   for (const node of nodes) {
-    if (isGroup(node)) {
-      if (!collapsedIds.has(node.id)) collectVisibleLeafOrder(node.children ?? [], collapsedIds, out);
-    } else {
-      out.push(node.id);
+    out.push(node.id);
+    if (isGroup(node) && !collapsedIds.has(node.id)) {
+      collectVisibleRowOrder(node.children ?? [], collapsedIds, out);
     }
   }
   return out;
@@ -242,8 +246,33 @@ export function LayerTree({
     return map;
   }, [flatRows]);
 
+  /**
+   * 화면의 행 id를 **실제 레이어 id**로 편다. 지정·병합·제외가 전부 이 함수를
+   * 거치므로, 여기서 펴지는 것은 곧 그 조작 전부에서 다뤄진다는 뜻이다.
+   *
+   *   병합 행 → 그 병합의 원본들
+   *   그룹 행 → 그 안에서 체크할 수 있는 잎 전부
+   *   그 밖  → 자기 자신
+   *
+   * 그룹을 여기서 펴는 것이 요점이다. 그래야 L 단축키·우클릭 메뉴·행의 라인
+   * 버튼이 **한 곳만 고쳐도** 그룹에서 똑같이 동작한다 — 규약을 세 군데 다시
+   * 적으면 언젠가 갈라진다.
+   *
+   * 중복은 여기서 없앤다. 그룹과 그 자식을 함께 고른 상태가 흔한데, 같은 id가
+   * 두 번 실려 나가면 받는 쪽(reducer)이 세는 개수와 화면이 어긋난다.
+   */
   const expandRowIds = (ids: number[]): number[] =>
-    ids.flatMap((id) => sourcesByRowId.get(id) ?? [id]);
+    Array.from(
+      new Set(
+        ids.flatMap((id) => {
+          const merged = sourcesByRowId.get(id);
+          if (merged) return merged;
+          const node = tree ? nodeById(tree, id) : undefined;
+          if (node && isGroup(node)) return collectTogglableLeafIds(node);
+          return [id];
+        })
+      )
+    );
 
   // shift-범위 선택의 기준 순서. 평면 목록일 때는 화면에 보이는 그 순서가
   // 곧 범위이고, 트리일 때는 접힌 그룹 안쪽을 건너뛴 순서다.
@@ -258,7 +287,7 @@ export function LayerTree({
               : [r.leaf.node.id]
           )
         : tree
-          ? collectVisibleLeafOrder(tree, collapsedIds)
+          ? collectVisibleRowOrder(tree, collapsedIds)
           : [],
     [filtering, flatRows, expandedMerges, tree, collapsedIds]
   );
@@ -705,15 +734,36 @@ export function LayerTree({
       const includeTargets = collectTogglableLeafIds(node);
       const allIncluded = includeTargets.length > 0 && includeTargets.every((id) => includedSet.has(id));
       const someIncluded = includeTargets.some((id) => includedSet.has(id));
+      const someLine = includeTargets.some((id) => manualLineSet.has(id));
+      const selected = selectedIds.has(node.id);
+      // 라인 버튼을 누르면 실제로 걸리는 대상. 잎과 같은 규약이다 — 이 행이 선택
+      // 안에 있으면 선택 전체, 아니면 이 그룹 하나(그리고 expandRowIds가 그것을
+      // 자식 잎으로 편다).
+      const lineClickTargets = manualLineClickTargets(node.id);
       return (
         <div key={node.id}>
           <div
-            className={`tree-row tree-row-group${isMatched ? " matched" : ""}`}
+            className={`tree-row tree-row-group${selected ? " selected" : ""}${isMatched ? " matched" : ""}`}
             style={indent}
             role="treeitem"
             aria-expanded={!collapsed}
+            aria-selected={selected}
+            // 그룹도 선택되는 행이다. 그래야 L 단축키가 이 행을 대상으로 잡고,
+            // 우클릭 메뉴가 잎과 같은 항목으로 열린다 — 내보내기에 넣으려면
+            // 지정이 필요한데 그룹만 그 경로가 없었다.
+            onClick={(e) => handleRowClick(node.id, e)}
+            onContextMenu={(e) => handleContextMenu(node.id, e)}
           >
-            <button type="button" className="fold-toggle" onClick={() => toggleCollapse(node.id)}>
+            <button
+              type="button"
+              className="fold-toggle"
+              // 접기·체크·solo·눈은 전부 행 클릭과 따로 논다. 안 끊으면 접으려고
+              // 누른 것이 선택까지 이 행 하나로 바꾼다.
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleCollapse(node.id);
+              }}
+            >
               {collapsed ? "▶" : "▼"}
             </button>
             <input
@@ -745,7 +795,10 @@ export function LayerTree({
               // 눌리기는 하는데 아무 일도 안 일어나고 켜지지도 않는 버튼이 된다
               // (soloIds가 비어 allSoloed도 영영 false다).
               disabled={soloIds.length === 0}
-              onClick={() => handleGroupSolo(node)}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleGroupSolo(node);
+              }}
               aria-label="그룹 solo 토글"
               title={soloIds.length === 0 ? "이 그룹에는 미리보기에 그릴 레이어가 없습니다" : "이 그룹만 보기"}
             >
@@ -757,7 +810,10 @@ export function LayerTree({
               // 그룹 solo와 같은 조건. 그릴 수 있는 leaf가 하나도 없는 그룹
               // (작업 메모만 든 LABELS 같은 그룹)에서는 눌러도 그림이 그대로다.
               disabled={soloIds.length === 0}
-              onClick={() => handleGroupEye(node)}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleGroupEye(node);
+              }}
               aria-label="그룹 미리보기 토글"
               title={
                 soloIds.length === 0
@@ -770,6 +826,22 @@ export function LayerTree({
             <span className="node-name" title={node.name}>
               {node.name}
             </span>
+            <button
+              type="button"
+              className={`line-toggle${someLine ? " line-on" : ""}`}
+              // 병합 행의 라인 버튼과 같은 규약이다 — 지정할 수 있는 잎이 하나도
+              // 없으면 막는다(막지 않으면 눌리기만 하고 켜지지 않는 버튼이 된다).
+              disabled={includeTargets.length === 0}
+              onClick={(e) => handleRowLineToggle(node.id, e)}
+              aria-label="라인 지정 토글"
+              title={
+                includeTargets.length === 0
+                  ? "이 그룹에는 라인으로 지정할 수 있는 레이어가 없습니다"
+                  : manualLineButtonTitle(lineClickTargets)
+              }
+            >
+              L
+            </button>
           </div>
           {!collapsed && (node.children ?? []).map((child) => renderNode(child, depth + 1))}
         </div>
@@ -1192,8 +1264,10 @@ export function LayerTree({
         <div ref={menuRef} className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
           <button
             type="button"
-            disabled={contextMenu.ids.length < 2}
-            onClick={() => openMergeModal(contextMenu.ids)}
+            // 펴고 나서 센다. 그룹 하나를 우클릭한 것은 행으로는 하나지만 실제로는
+            // 그 안의 잎 여러 장이고, 병합은 그 잎들에 걸린다.
+            disabled={expandRowIds(contextMenu.ids).length < 2}
+            onClick={() => openMergeModal(expandRowIds(contextMenu.ids))}
           >
             선택 병합...
           </button>
@@ -1227,8 +1301,10 @@ export function LayerTree({
           )}
           <button
             type="button"
-            disabled={contextMenu.ids.length !== 1}
-            onClick={() => openRenameModal(contextMenu.ids)}
+            // 이름 변경은 레이어 하나에만 건다. 그룹을 우클릭했다면 그 안에 잎이
+            // 딱 하나일 때만 열린다 — 여러 장이면 무엇의 이름인지 답이 없다.
+            disabled={expandRowIds(contextMenu.ids).length !== 1}
+            onClick={() => openRenameModal(expandRowIds(contextMenu.ids))}
           >
             이름변경...
           </button>
