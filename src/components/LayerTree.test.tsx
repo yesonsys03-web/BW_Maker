@@ -406,9 +406,10 @@ test("the merged row's button covers the whole selection, like a leaf row", () =
   fireEvent.change(screen.getByPlaceholderText("레이어 이름 / 그룹 경로 검색"), {
     target: { value: "line" },
   });
-  const rows = screen.getAllByRole("listitem");
-  fireEvent.click(rows[0]); // 병합 행
-  fireEvent.click(rows[1], { metaKey: true }); // line C
+  // 필터가 걸려도 트리는 트리다(2026-08-11). 병합 줄만 그 위에 따로 얹히므로,
+  // 병합 행은 listitem이고 안 묶인 line C는 트리의 행이다.
+  fireEvent.click(screen.getAllByRole("listitem")[0]); // 병합 행
+  fireEvent.click(leafRows()[0], { metaKey: true }); // line C
 
   fireEvent.click(lineButtons()[0]);
 
@@ -756,4 +757,47 @@ test("the group's own buttons do not steal the selection", () => {
 
   // 선택은 여전히 03 하나다.
   expect(designated(onSetManualLine)).toEqual([[3], true]);
+});
+
+/**
+ * "라인만"도 트리 구조를 그대로 지킨다(2026-08-11 아티스트 요청).
+ *
+ * 평면 목록으로 그리던 때는 `01`~`05`가 그룹마다 되풀이되어 어느 그룹의 것인지
+ * 알 수 없었다 — 군중 판이 정확히 그 모양이다. 조상 경로를 옆에 붙이는 것으로는
+ * 부족했고, 아티스트가 원한 것은 일반 보기와 **같은 구조**다.
+ */
+test("the line-only view keeps the tree structure", () => {
+  renderTree(
+    [
+      group(10, "MID", [leaf(1, "01", "pixel"), leaf(2, "halo glow", "pixel")]),
+      group(20, "FRONT", [leaf(3, "01", "pixel")]),
+      group(30, "REFS", [leaf(4, "board", "pixel")]),
+    ],
+    [1, 2, 3, 4],
+    { manualLineIds: [1, 3] }
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "라인만" }));
+
+  // 그룹 줄이 그대로 있다. 라인이 하나도 없는 REFS는 통째로 빠진다.
+  const names = groupRows().map((r) => r.querySelector(".node-name")?.textContent);
+  expect(names).toEqual(["MID", "FRONT"]);
+  // 각 그룹 안에는 라인으로 지정된 잎만 남는다(halo glow는 빠진다).
+  expect(leafCheckboxes()).toHaveLength(2);
+});
+
+test("a group in the line-only view acts on the lines it shows, not the ones it hides", () => {
+  // 화면에 없는 잎까지 걸리면 아티스트 눈에는 근거 없이 늘어난 장수다.
+  const { onSetManualLine } = renderTree(
+    [group(10, "MID", [leaf(1, "01", "pixel"), leaf(2, "halo glow", "pixel")])],
+    [1, 2],
+    { manualLineIds: [1] }
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "라인만" }));
+  fireEvent.click(groupRows()[0]);
+  fireEvent.keyDown(document.body, { code: "KeyL" });
+
+  // 보이는 것은 01 하나뿐이므로 그것만 해제된다 — halo glow는 건드리지 않는다.
+  expect(designated(onSetManualLine)).toEqual([[1], false]);
 });

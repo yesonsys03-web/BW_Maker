@@ -118,6 +118,27 @@ function collectTogglableLeafIds(node: TreeNode, out: number[] = []): number[] {
  * 선택되는 행이 된 뒤로는 그것도 화면의 한 줄이고, 빼두면 그룹을 지나는 범위
  * 선택이 그 줄만 건너뛴다.
  */
+/**
+ * 필터를 통과한 잎만 남긴 트리. 살아남은 잎이 하나도 없는 그룹은 통째로 빠진다.
+ *
+ * "라인만"을 평면 목록으로 그리던 때는 `01`~`05`가 그룹마다 되풀이되어 어느
+ * 그룹의 것인지 이름만으로 구별할 수 없었다(군중 판이 정확히 그 모양이다).
+ * 조상 경로를 옆에 붙여도 부족했다 — 아티스트가 원한 것은 **일반 보기와 같은
+ * 구조**다. 그래서 필터는 화면 구조를 바꾸지 않고 안 맞는 것을 걷어내기만 한다.
+ */
+function pruneTree(nodes: TreeNode[], keep: Set<number>): TreeNode[] {
+  const out: TreeNode[] = [];
+  for (const node of nodes) {
+    if (isGroup(node)) {
+      const children = pruneTree(node.children ?? [], keep);
+      if (children.length > 0) out.push({ ...node, children });
+    } else if (keep.has(node.id)) {
+      out.push(node);
+    }
+  }
+  return out;
+}
+
 function collectVisibleRowOrder(nodes: TreeNode[], collapsedIds: Set<number>, out: number[] = []): number[] {
   for (const node of nodes) {
     out.push(node.id);
@@ -236,6 +257,22 @@ export function LayerTree({
     [filteredLeaves, planEntries]
   );
 
+  /**
+   * 필터를 통과한 잎을 원래 구조 그대로 남긴 트리(pruneTree 주석 참고).
+   *
+   * **병합에 묶인 잎은 뺀다.** 그것은 트리 위의 접힌 병합 줄이 대표하므로, 여기
+   * 남겨두면 같은 레이어가 화면에 두 번 나온다 — 한 번은 병합 줄로, 한 번은 제
+   * 그룹 자리에. 그러면 "몇 장을 지정했는가"를 세는 눈과 손이 갈린다.
+   */
+  const filteredTree = useMemo(() => {
+    if (!tree) return [];
+    if (!filtering) return tree;
+    const keep = new Set(
+      filteredLeaves.map((l) => l.node.id).filter((id) => !mergedSourceIds.has(id))
+    );
+    return pruneTree(tree, keep);
+  }, [tree, filtering, filteredLeaves, mergedSourceIds]);
+
   // 행 id → 그 행이 대표하는 소스 레이어 id들. 병합 행의 체크박스·눈·제외는
   // 묶인 소스 전체에 적용돼야 한다.
   const sourcesByRowId = useMemo(() => {
@@ -267,29 +304,29 @@ export function LayerTree({
         ids.flatMap((id) => {
           const merged = sourcesByRowId.get(id);
           if (merged) return merged;
-          const node = tree ? nodeById(tree, id) : undefined;
+          // 필터가 걸려 있으면 **보이는 트리**에서 찾는다. 원본 트리로 펴면
+          // 그룹 하나를 눌렀을 때 화면에 없는 잎까지 함께 걸리는데, 그건 아티스트
+          // 눈에는 아무 근거 없이 늘어난 장수다(행의 체크박스는 보이는 것만
+          // 세므로 두 경로가 서로 다른 답을 내게 된다).
+          const node = nodeById(filteredTree, id);
           if (node && isGroup(node)) return collectTogglableLeafIds(node);
           return [id];
         })
       )
     );
 
-  // shift-범위 선택의 기준 순서. 평면 목록일 때는 화면에 보이는 그 순서가
-  // 곧 범위이고, 트리일 때는 접힌 그룹 안쪽을 건너뛴 순서다.
+  /**
+   * shift-범위 선택의 기준 순서 = 화면에 보이는 줄 순서. 접힌 그룹 안쪽은 건너뛴다.
+   *
+   * 필터가 걸려도 같은 함수다 — 걸러낸 트리를 그대로 그리기 때문이다. 병합 줄은
+   * 트리 위에 따로 얹히므로 그 앞에 온다.
+   */
   const visibleOrder = useMemo(
-    () =>
-      filtering
-        ? flatRows.flatMap((r) =>
-            r.kind === "merged"
-              ? expandedMerges.has(r.entryId)
-                ? [r.entryId, ...r.leaves.map((l) => l.node.id)]
-                : [r.entryId]
-              : [r.leaf.node.id]
-          )
-        : tree
-          ? collectVisibleRowOrder(tree, collapsedIds)
-          : [],
-    [filtering, flatRows, expandedMerges, tree, collapsedIds]
+    () => [
+      ...(filtering ? flatRows.filter((r) => r.kind === "merged").map((r) => (r as { entryId: number }).entryId) : []),
+      ...collectVisibleRowOrder(filteredTree, collapsedIds),
+    ],
+    [filtering, flatRows, filteredTree, collapsedIds]
   );
 
   /**
@@ -1234,29 +1271,35 @@ export function LayerTree({
         )}
       </div>
 
-      {filtering ? (
+      {/*
+        필터를 걸어도 **구조는 그대로** 트리다. 평면 목록으로 그리던 때는 `01`~`05`가
+        그룹마다 되풀이되어 어느 그룹의 것인지 알 수 없었다(아티스트 지적).
+
+        병합만은 트리에 자리가 없다 — 서로 다른 그룹의 레이어를 병합하면 그 줄을
+        어느 그룹에 둘지 답이 없기 때문이다. 그래서 접힌 병합 줄은 트리 **위에**
+        따로 얹는다. 그 줄을 없애면 내보내기 모양(무엇이 무엇으로 합쳐지는지)을
+        볼 화면이 통째로 사라진다.
+      */}
+      {filtering && flatRows.some((row) => row.kind === "merged") && (
         <div className="tree-body tree-body-flat" role="list">
-          {flatRows.length === 0 ? (
-            <p className="layer-filter-empty">조건에 맞는 레이어가 없습니다.</p>
-          ) : (
-            flatRows.map((row) =>
-              row.kind === "merged" ? (
-                <div key={`merged-${row.entryId}`}>
-                  {renderMergedRow(row)}
-                  {expandedMerges.has(row.entryId) &&
-                    row.leaves.map((l) =>
-                      renderLeaf(l.node, { indentPx: 30, breadcrumb: l.breadcrumb, nested: true })
-                    )}
-                </div>
-              ) : (
-                renderLeaf(row.leaf.node, { indentPx: 8, breadcrumb: row.leaf.breadcrumb })
-              )
-            )
+          {flatRows.map((row) =>
+            row.kind === "merged" ? (
+              <div key={`merged-${row.entryId}`}>
+                {renderMergedRow(row)}
+                {expandedMerges.has(row.entryId) &&
+                  row.leaves.map((l) =>
+                    renderLeaf(l.node, { indentPx: 30, breadcrumb: l.breadcrumb, nested: true })
+                  )}
+              </div>
+            ) : null
           )}
         </div>
+      )}
+      {filtering && filteredTree.length === 0 && !flatRows.some((row) => row.kind === "merged") ? (
+        <p className="layer-filter-empty">조건에 맞는 레이어가 없습니다.</p>
       ) : (
         <div className="tree-body" role="tree">
-          {tree.map((node) => renderNode(node, 0))}
+          {filteredTree.map((node) => renderNode(node, 0))}
         </div>
       )}
 
