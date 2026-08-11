@@ -19,7 +19,7 @@ import {
   type PreviewBackground,
   type ViewPoint,
 } from "../lib/preview";
-import { lineColorIdsFor, previewCacheKey, type PreviewCache } from "../lib/previewCache";
+import { documentPlaceholderKey, lineColorIdsFor, previewCacheKey, type PreviewCache } from "../lib/previewCache";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { FileStatus } from "../state/appStore";
 import type { EdgeLines, EngineError, OpenResult, TreeNode } from "../lib/types";
@@ -171,6 +171,17 @@ export function PreviewCanvas({
     setImgSrc(src);
     setFitReady(false);
   }, []);
+  /**
+   * 지금 화면의 그림이 무엇인지: 없음 / 자리끼움(문서 원본) / 진짜(요청한 조합).
+   * 자리끼움을 걸지 판단하는 근거이자("그림 없음"일 때만), 늦게 도착한 자리끼움이
+   * 이미 뜬 진짜 그림을 덮지 못하게 막는 문이다. ref인 이유는 비동기 응답
+   * 안에서 최신 값을 읽어야 해서다 — imgSrc state는 클로저에 갇힌다.
+   */
+  const imageKindRef = useRef<"none" | "placeholder" | "real">("none");
+  /** 배지가 "원본 (합성 중...)"을 보여줄지. imageKindRef의 화면용 거울이다. */
+  const [placeholderShown, setPlaceholderShown] = useState(false);
+  /** 자리끼움 응답이 도착했을 때 아직 같은 파일인지 확인하는 기준. */
+  const latestPathRef = useRef(path);
   const [loading, setLoading] = useState(false);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -354,6 +365,9 @@ export function PreviewCanvas({
   // the reopened render and cause a duplicate render_preview call).
   useEffect(() => {
     requestIdRef.current += 1;
+    latestPathRef.current = path;
+    imageKindRef.current = "none";
+    setPlaceholderShown(false);
     showImage(null);
     setLoading(false);
     setScale(1);
@@ -407,6 +421,8 @@ export function PreviewCanvas({
       if (cached !== undefined) {
         // 아직 안 돌아온 이전 요청이 이 그림을 덮어쓰지 못하게 무효화한다.
         requestIdRef.current += 1;
+        imageKindRef.current = "real";
+        setPlaceholderShown(false);
         showImage(cached);
         setLoading(false);
         return;
@@ -417,9 +433,54 @@ export function PreviewCanvas({
     if (paused) return;
     if (visibleIds.length === 0) {
       requestIdRef.current += 1; // invalidate any in-flight render from a prior toggle
+      imageKindRef.current = "none";
+      setPlaceholderShown(false);
       showImage(null);
       setLoading(false);
       return;
+    }
+
+    // 콜드 파일로 전환한 직후에는(화면에 아무 그림도 없다) 합성이 도착할 때까지
+    // 문서에 저장된 원본 이미지를 자리에 띄운다. 원본은 저장된 병합 이미지를
+    // 그대로 읽어 ~0.2초인데(render_document_preview), 합성 첫 렌더는 잎을 원본
+    // 해상도로 디코드해 큰 판에서 수 초가 걸린다(2026-08-11 납품 판 실측 최대
+    // 170초) — 그동안 빈 화면과 스피너만 있으면 죽은 것으로 읽힌다. 배지가
+    // 원본임을 말하고 스피너는 그대로 돈다.
+    //
+    // 토글(같은 파일에서 조합만 바뀜)에는 걸지 않는다 — 직전 합성을 들고 있는
+    // 편이 원본으로 바꿔치우는 것보다 낫다. 파일 전환은 위 [path] 효과가 그림을
+    // 비우므로 "그림 없음"이 곧 그 구분이다. 문서 보기는 본 렌더가 이미 그
+    // 원본이라 자리끼움이 무의미하다.
+    //
+    // 엔진이 stdin을 순서대로 처리하므로 여기서 먼저 낸 원본 요청은 아래(또는
+    // 밀려 있다 나가는) 합성보다 먼저 끝난다 — 원본이 합성을 덮는 역전은 일어날
+    // 수 없고, 남는 경우(그 사이 파일 전환·캐시 적중)는 적용 직전의 경로·그림
+    // 종류 확인이 막는다. 축출 복구는 일부러 안 건다: 세션이 죽어 있으면 합성
+    // dispatch의 withEvictedSessionRetry가 되살리고, 자리끼움은 이번 한 번을
+    // 조용히 거른다 — 실패를 알리지 않는 것도 같은 이유다(진짜 문제라면 합성
+    // 렌더가 같은 오류를 제대로 보여준다).
+    if (!documentView && imageKindRef.current === "none") {
+      const docKey = documentPlaceholderKey({ path, mtime });
+      const cachedDoc = docKey !== null ? cache.get(docKey) : undefined;
+      if (cachedDoc !== undefined) {
+        imageKindRef.current = "placeholder";
+        setPlaceholderShown(true);
+        showImage(cachedDoc);
+      } else {
+        const sid = sessionIdRef.current;
+        if (sid) {
+          void renderDocumentPreview(sid, PREVIEW_MAX_SIZE)
+            .then(async ({ pngPath }) => {
+              const dataUrl = await loadPngDataUrl(pngPath);
+              if (docKey !== null) cache.set(docKey, dataUrl);
+              if (latestPathRef.current !== path || imageKindRef.current === "real") return;
+              imageKindRef.current = "placeholder";
+              setPlaceholderShown(true);
+              showImage(dataUrl);
+            })
+            .catch(() => {});
+        }
+      }
     }
 
     const spec: RenderSpec = {
@@ -476,6 +537,8 @@ export function PreviewCanvas({
           // 유효하다.
           if (next.cacheKey) cache.set(next.cacheKey, dataUrl);
           if (requestIdRef.current !== requestId) return; // superseded by a newer request
+          imageKindRef.current = "real";
+          setPlaceholderShown(false);
           showImage(dataUrl);
           setLoading(false);
         } catch (e) {
@@ -661,12 +724,14 @@ export function PreviewCanvas({
       <div
         className="preview-mode-badge"
         title={
-          documentView
-            ? "저장된 원본 이미지입니다. 레이어를 고르면 내보내기 결과 미리보기로 바뀝니다."
-            : "선택한 레이어만 쌓아 올린 결과 — 내보낸 PSD가 이렇게 보입니다. 원본의 블렌드 모드·클리핑은 내보내기에서 제거되므로 여기에도 적용되지 않습니다."
+          placeholderShown
+            ? "저장된 원본 이미지입니다. 내보내기 미리보기를 합성하는 중이며, 끝나면 자동으로 바뀝니다."
+            : documentView
+              ? "저장된 원본 이미지입니다. 레이어를 고르면 내보내기 결과 미리보기로 바뀝니다."
+              : "선택한 레이어만 쌓아 올린 결과 — 내보낸 PSD가 이렇게 보입니다. 원본의 블렌드 모드·클리핑은 내보내기에서 제거되므로 여기에도 적용되지 않습니다."
         }
       >
-        {documentView ? "원본" : "내보내기 미리보기"}
+        {placeholderShown ? "원본 (합성 중...)" : documentView ? "원본" : "내보내기 미리보기"}
       </div>
       <div className="preview-bg-toggle" role="group" aria-label="미리보기 배경">
         {PREVIEW_BACKGROUNDS.map((bg) => (

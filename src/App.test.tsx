@@ -791,6 +791,61 @@ test("the hand-off to a latched render never reports the engine idle", async () 
   expect(onRenderingChange).not.toHaveBeenCalledWith(false);
 });
 
+test("a cold file shows the stored original until the composite lands", async () => {
+  // 합성 첫 렌더는 큰 판에서 수 초가 걸린다(실측 최대 170초). 그동안 빈 화면
+  // 대신 ~0.2초짜리 문서 원본을 자리에 띄우고, 합성이 도착하면 바꾼다.
+  const held = deferred<{ pngPath: string }>();
+  engine.renderPreview.mockReturnValue(held.promise);
+  engine.renderDocumentPreview.mockResolvedValue({ pngPath: "/tmp/doc.png" });
+  engine.loadPngDataUrl.mockImplementation((p: string) => Promise.resolve(`data:${p}`));
+
+  render(<PreviewCanvas {...previewCanvasProps({ previewHiddenIds: [1] })} />);
+
+  // 합성이 아직 걸려 있는 동안 원본이 먼저 뜨고, 배지가 그 사실을 말한다.
+  await waitFor(() =>
+    expect(screen.getByAltText("미리보기").getAttribute("src")).toBe("data:/tmp/doc.png")
+  );
+  expect(screen.getByText("원본 (합성 중...)")).toBeTruthy();
+
+  held.resolve({ pngPath: "/tmp/real.png" });
+  await waitFor(() =>
+    expect(screen.getByAltText("미리보기").getAttribute("src")).toBe("data:/tmp/real.png")
+  );
+  expect(screen.queryByText("원본 (합성 중...)")).toBeNull();
+});
+
+test("a toggle keeps the last composite instead of flashing the original", async () => {
+  // 자리끼움은 파일 전환(그림 없음)에만 건다 — 토글 중에는 직전 합성을 들고
+  // 있는 편이 원본으로 바꿔치우는 것보다 낫다.
+  const held: ReturnType<typeof deferred<{ pngPath: string }>>[] = [];
+  engine.renderPreview.mockImplementation(() => {
+    const d = deferred<{ pngPath: string }>();
+    held.push(d);
+    return d.promise;
+  });
+  engine.renderDocumentPreview.mockResolvedValue({ pngPath: "/tmp/doc.png" });
+  engine.loadPngDataUrl.mockImplementation((p: string) => Promise.resolve(`data:${p}`));
+
+  const { rerender } = render(<PreviewCanvas {...previewCanvasProps({ previewHiddenIds: [1] })} />);
+  await waitFor(() => expect(held).toHaveLength(1));
+  held[0].resolve({ pngPath: "/tmp/real1.png" });
+  await waitFor(() =>
+    expect(screen.getByAltText("미리보기").getAttribute("src")).toBe("data:/tmp/real1.png")
+  );
+  const docCalls = engine.renderDocumentPreview.mock.calls.length; // 첫 진입의 자리끼움
+
+  rerender(<PreviewCanvas {...previewCanvasProps({ previewHiddenIds: [2] })} />);
+  await waitFor(() => expect(held).toHaveLength(2));
+  // 옛 합성이 그대로 떠 있고, 원본 요청이 더 나가지 않았다.
+  expect(screen.getByAltText("미리보기").getAttribute("src")).toBe("data:/tmp/real1.png");
+  expect(engine.renderDocumentPreview.mock.calls.length).toBe(docCalls);
+
+  held[1].resolve({ pngPath: "/tmp/real2.png" });
+  await waitFor(() =>
+    expect(screen.getByAltText("미리보기").getAttribute("src")).toBe("data:/tmp/real2.png")
+  );
+});
+
 /**
  * 프로젝트 배선(Task 6). 여기서 잠그는 것은 전부 "테스트는 초록불인데 아티스트의
  * 작업이 조용히 사라지는" 경로다 — 이 기능에서 그런 문이 지금까지 여섯 나왔다.

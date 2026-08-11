@@ -171,6 +171,17 @@ export function previewCacheKey(
 }
 
 /**
+ * 자리끼움용 문서(원본) 미리보기의 키. 문서 이미지는 레이어 조합과 무관하게
+ * 파일당 한 장이므로, 조합이 들어간 previewCacheKey를 그대로 쓰면 조합이 바뀔
+ * 때마다 같은 그림을 다시 만든다 — 중립 인자로 고정해 파일당 하나로 만든다.
+ * (visibleIds가 빈 문서 보기는 애초에 렌더되지 않으므로 실제 키와 충돌하지
+ * 않고, mtime이 없으면 previewCacheKey처럼 null이다.)
+ */
+export function documentPlaceholderKey(file: PreviewFileId): string | null {
+  return previewCacheKey(file, true, [], null, undefined, null, [], []);
+}
+
+/**
  * data URL을 담는 LRU 캐시. 파일을 오갈 때마다 같은 그림을 다시 렌더하지 않기
  * 위한 것이다 — PreviewCanvas는 파일이 바뀌면 화면의 이미지를 버리므로, 이게
  * 없으면 돌아올 때마다 합성 렌더와 base64 왕복을 처음부터 되풀이한다.
