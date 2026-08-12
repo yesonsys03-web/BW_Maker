@@ -112,6 +112,18 @@ export interface PreviewFileId {
  * mtime을 모르면(옛 세션에서 온 파일) 키를 만들지 않는다 — 확인할 수 없는 것을
  * 재사용하느니 다시 그리는 편이 낫다.
  */
+/**
+ * 엔진 그림의 판 번호. **같은 입력이 다른 그림을 내게 되는 엔진 변경**(뷰 검출
+ * 규칙, 검출용 색 합성의 불투명도 중화 등)마다 올린다 — 키에 들어가므로 램
+ * 캐시와 프로젝트에 저장된 미리보기(previews/)가 옛 그림을 조용히 재사용하지
+ * 않는다. 올리면 저장된 미리보기가 전부 무효가 되어 한 번씩 다시 그려진다 —
+ * 캐시를 잃는 쪽이 옛 그림을 보여주는 쪽보다 낫다(아티스트가 옛 미리보기로
+ * 새 설정을 확인했다고 믿는 것이 이 캐시의 최악 고장이다). 엔진
+ * tilecache.PREVIEW_FORMAT과 같은 역할의 프런트 판이고, 숫자를 맞출 필요는
+ * 없지만 그쪽을 올릴 때 이쪽도 올려야 하는지 반드시 물을 것.
+ */
+export const PREVIEW_PICTURE_VERSION = 3;
+
 export function previewCacheKey(
   file: PreviewFileId,
   documentView: boolean,
@@ -158,6 +170,7 @@ export function previewCacheKey(
   const lineColorIds = lineColorIdsFor(visibleIds, lineColor, matchedIds);
   const edgeLinesKey = edgeLines !== null && edgeLines.enabled ? JSON.stringify(edgeLines) : "off";
   return [
+    `v${PREVIEW_PICTURE_VERSION}`,
     file.path,
     file.mtime,
     documentView ? "doc" : "composite",

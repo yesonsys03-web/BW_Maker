@@ -167,6 +167,17 @@ def warm_file(path, max_size, out, edge_lines=None, presets=None):
             seen.add(skey)
             variants.append(opts)
     views = find_views(session) if variants else []
+    if views and presets:
+        # 프리셋이 잡을 라인이 있는 뷰만 데운다 — 렌더/내보내기의 included 필터
+        # (rpc.export_psd·batch)와 같은 층이다. find_views가 잎 표식을 받으면서
+        # COLOR PALETTE류 참조 뷰(라인이 프리셋 제외라 체크될 일 없음)가 생기는데,
+        # 그걸 데우면 뷰당 9~36초를 아무도 안 읽을 캐시에 쓴다. 갓 적용 상태의
+        # included = 매칭 결과이므로 모든 프리셋의 매칭 합집합으로 거른다.
+        # 옛 프로토콜(edge_lines만)은 매칭을 모르므로 전처럼 전부 데운다.
+        matched_union = set()
+        for p in presets:
+            matched_union.update(match_preset(built["tree"], p)[0])
+        views = [v for v in views if set(v["lineIds"]) & matched_union]
     previews = [args for p in (presets or [])
                 for args in [_preset_preview_args(built["tree"], p)]
                 if args is not None]

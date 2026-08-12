@@ -839,3 +839,31 @@ def test_render_preview_recomposes_when_any_input_changes(fixture_psd, tmp_path,
     engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=256,
                           lineColor="#112233", lineColorIds=[5])
     assert len(calls) == 2
+
+
+def test_export_plans_overlays_only_for_views_with_included_lines(tmp_path, monkeypatch):
+    # 두 뷰짜리 문서에서 한 뷰의 라인만 포함하면 **계획도 그 뷰 하나만** 돈다 —
+    # find_views가 잎 표식을 받으면서 생기는 참조 뷰(COLOR PALETTE류, 라인이
+    # 프리셋 제외라 체크될 일 없음)의 계획(뷰당 0.9~11.6초)을 내보내기가 치르면
+    # 안 된다. attach_overlays의 건너뛰기는 안전망으로 남고, 이 필터는 그 판단을
+    # 계획 앞으로 당긴 것이다(render_preview의 visible 필터와 같은 층).
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    sid = engine.open_psd(str(p))["sessionId"]
+    s = engine.store.get(sid)
+    front_line = next(lid for lid, l in s["layers_by_id"].items()
+                      if l.name == "LINES" and l.parent.name == "FRONT")
+
+    planned = []
+    real = rpc.plan_overlays
+
+    def spy(session, views, opts):
+        planned.extend(v["name"] for v in views)
+        return real(session, views, opts)
+
+    monkeypatch.setattr(rpc, "plan_overlays", spy)
+    engine.export_psd(sid, includedIds=[front_line], operations=[],
+                      naming="pathPrefix",
+                      outputPath=str(tmp_path / "산출_LINE.psd"),
+                      edgeLines={"enabled": True})
+    assert planned == ["FRONT"], f"계획된 뷰: {planned}"

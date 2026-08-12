@@ -209,3 +209,62 @@ def test_find_views_keeps_a_line_leaf_whose_name_merely_contains_a_colour_word(t
     s = _session(p)
     names = {s["layers_by_id"][lid].name for lid in find_views(s)[0]["lineIds"]}
     assert names == {"colourful line"}, f"선화가 빠졌다: {names}"
+
+
+# ---- colors류 잎 표식 (2026-08-12 확장) ----
+# 같은 납품에서 COLORS가 평평한 레이어 한 장인 판이 나왔다 — 그룹 판과 같은
+# 관례의 압축판이다. 게이트 근거는 find_views docstring과 185장 census에 있다.
+
+def _leaf_view_psd(tmp_path, name, view_layers):
+    p = tmp_path / f"{name}.psd"
+    write_psd(p, [nested_layers.Group(name="ALASTOR", layers=view_layers)])
+    return _session(p)
+
+
+def test_a_flattened_colour_leaf_marks_a_view(tmp_path):
+    s = _leaf_view_psd(tmp_path, "잎표식", [
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24),
+        make_rgb_image("COLORS", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    views = find_views(s)
+    assert len(views) == 1
+    assert views[0]["name"] == "ALASTOR"
+    assert len(views[0]["colourIds"]) == 1
+    assert len(views[0]["lineIds"]) == 1
+
+
+def test_a_colour_leaf_without_line_siblings_is_not_a_view(tmp_path):
+    # 게이트 ①: COLOR PALETTE의 FILLS 같은 참조 잎이 census에서 뷰 120개를
+    # 만들었다 — 라인이 없으면 attach가 어차피 버리므로 애초에 만들지 않는다.
+    s = _leaf_view_psd(tmp_path, "라인없음", [
+        make_rgb_image("FILLS", (200, 30, 60), 0, 0, 32, 24),
+        make_rgb_image("swatch", (40, 20, 20), 0, 0, 16, 16),
+    ])
+    assert find_views(s) == []
+
+
+def test_a_colour_leaf_inside_a_line_named_group_is_not_a_view(tmp_path):
+    # 게이트 ②: LINE 그룹 안의 colour 잎은 트레이스/참조다(census 46개) —
+    # 그걸 뷰로 만들면 라인 그룹 자신 위에 획을 얹게 된다.
+    line_group = nested_layers.Group(name="LINE", layers=[
+        make_rgb_image("colour", (200, 30, 60), 0, 0, 32, 24),
+        make_rgb_image("trace", (0, 0, 0), 0, 0, 32, 24),
+    ])
+    p = tmp_path / "라인그룹안.psd"
+    write_psd(p, [nested_layers.Group(name="ALASTOR", layers=[line_group])])
+    s = _session(p)
+    assert find_views(s) == []
+
+
+def test_a_colour_leaf_next_to_a_colour_group_is_ignored(tmp_path):
+    # 게이트 ③: 색 그룹과 평평 사본이 나란히 있으면(census 5개) 그룹이 정본이다
+    # — 잎까지 뷰로 만들면 같은 라인에 계획 두 번, 획 합성 두 번이 얹힌다.
+    s = _leaf_view_psd(tmp_path, "이중표식", [
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24),
+        nested_layers.Group(name="COLORS", layers=[
+            make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)]),
+        make_rgb_image("COLORS", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    views = find_views(s)
+    assert len(views) == 1
+    assert len(views[0]["colourIds"]) == 1  # 그룹의 base 잎 하나

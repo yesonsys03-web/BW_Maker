@@ -176,7 +176,10 @@ def store(session, layer_id, scale, entry):
 #: 한다. 안 올리면 옛 그림이 디스크에서 그대로 나와, 알고리즘을 고친 사람이
 #: "차이 없음"이라는 틀린 판정을 얻는다(rpc._PIXEL_SETTINGS의 colourMode 주석과
 #: 같은 종류의 함정).
-OVERLAY_FORMAT = 1
+#:
+#: 2: 검출용 색 합성이 불투명도를 무시한다(edges._opacity_neutralised) —
+#:    반투명 색 참조 판에서 획이 0이던 것이 생성되게 바뀌었다.
+OVERLAY_FORMAT = 2
 
 
 def overlay_key(colour_ids, line_ids, settings_key):
@@ -262,7 +265,13 @@ def store_overlays(session, key, plans):
 #: 미리보기 PNG 캐시의 형식·알고리즘 판. OVERLAY_FORMAT과 같은 규칙이다 —
 #: render_preview의 합성이 바뀌어 **같은 입력에서 다른 그림**이 나오게 되면
 #: 이 값을 올려야 한다. 안 올리면 옛 그림이 디스크에서 그대로 나온다.
-PREVIEW_FORMAT = 1
+#:
+#: 2: 오버레이 쪽 형식 2와 함께 — 미리보기 PNG에 오버레이가 구워져 들어가므로
+#:    오버레이 그림이 바뀌면 이쪽도 옛 판을 버려야 한다.
+#: 3: find_views가 colors류 **잎**도 뷰 표식으로 받는다 — 같은 입력(레이어
+#:    조합·설정)에서 경계선이 새로 생기는 파일들이 있으므로 옛 미리보기를
+#:    버려야 한다. 프런트의 PREVIEW_PICTURE_VERSION도 같은 이유로 함께 올렸다.
+PREVIEW_FORMAT = 3
 
 
 def preview_key(material):

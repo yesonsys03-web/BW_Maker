@@ -81,9 +81,13 @@ def _process_one(store, path, preset, output_dir, overwrite, progress,
             # 돈다. find_views(s)만 부르지 않고 굳이 이 모양으로 맞춘 것은
             # rpc.export_psd/render_preview와 같은 합집합 코드 경로를 타게 해서,
             # 대화형 경로와 배치 경로가 갈라질 여지를 없애려는 것이다.
+            views = find_views(s) + manual_views(s, [], included)
+            # 포함된 라인이 있는 뷰만 계획한다 — rpc.export_psd의 같은 필터와
+            # 같은 이유(버릴 계획을 안 한다). attach가 안전망으로 남는다.
+            included_set = set(included)
+            views = [v for v in views if set(v["lineIds"]) & included_set]
             attach_overlays(entries, plan_overlays(
-                s, find_views(s) + manual_views(s, [], included),
-                {**EDGE_DEFAULTS, **edge}))
+                s, views, {**EDGE_DEFAULTS, **edge}))
         else:
             attach_overlays(entries, [])
         fmt = preset.get("outputFormat", "psd")

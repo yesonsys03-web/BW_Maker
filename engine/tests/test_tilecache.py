@@ -176,8 +176,10 @@ def test_overlay_key_varies_with_settings_and_format(monkeypatch):
     base = tilecache.overlay_key([1], [2], (24, 4, 0))
     assert tilecache.overlay_key([1], [2], (24, 4, 5)) != base  # 설정이 다르면
     assert tilecache.overlay_key([1], [3], (24, 4, 0)) != base  # 뷰가 다르면
-    monkeypatch.setattr(tilecache, "OVERLAY_FORMAT", 2)
-    # 알고리즘 판이 바뀌면 같은 설정이라도 옛 그림을 쓰면 안 된다.
+    # 알고리즘 판이 바뀌면 같은 설정이라도 옛 그림을 쓰면 안 된다. 지금 판이
+    # 몇이든 성립해야 하므로 +1로 민다 — 상수를 하드코딩하면 실제 판이 그 값에
+    # 도달하는 순간 no-op이 된다(OVERLAY_FORMAT 2 범프에서 실제로 그랬다).
+    monkeypatch.setattr(tilecache, "OVERLAY_FORMAT", tilecache.OVERLAY_FORMAT + 1)
     assert tilecache.overlay_key([1], [2], (24, 4, 0)) != base
 
 

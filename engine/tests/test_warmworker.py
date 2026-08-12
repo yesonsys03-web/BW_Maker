@@ -286,3 +286,20 @@ def test_worker_alternates_export_and_warm_jobs(fixture_psd, tmp_path):
     files = [e for e in events if e["event"] == "file"]
     assert [f["ok"] for f in files] == [True, True]
     assert "result" in files[0] and "result" not in files[1]
+
+
+def test_worker_skips_overlay_warming_for_views_no_preset_will_check(tmp_path):
+    # 프리셋이 라인을 못 잡는 뷰는 렌더·내보내기가 계획하지 않으므로(included
+    # 사전 필터) 워커도 데우지 않는다 — COLOR PALETTE류 참조 뷰를 데우면 뷰당
+    # 9~36초를 아무도 안 읽을 캐시에 쓴다. 매칭이 빈 프리셋이면 뷰 몫이 총량에서
+    # 통째로 빠져 잎 수와 같아야 한다.
+    from test_rpc import _two_view_psd
+    p = _two_view_psd(tmp_path)
+    blank = {**_PRESET,
+             "include": {"type": "contains", "value": "없는이름",
+                         "caseSensitive": False},
+             "edgeLines": {"enabled": True}}
+    events = _run([json.dumps({"path": str(p), "presets": [blank]}) + "\n"])
+    plain = _run([json.dumps({"path": str(p)}) + "\n"])
+    assert [e for e in events if e["event"] == "file"][0]["total"] == \
+        [e for e in plain if e["event"] == "file"][0]["total"]

@@ -449,6 +449,13 @@ class Engine:
             # 않는다 — export_psd 전체가 애초에 눈을 보지 않는다.
             views = find_views(s) + manual_views(
                 s, edgeLines.get("manualColourIds") or [], included)
+            # 포함된 라인이 있는 뷰만 계획한다. attach_overlays가 어차피 그런
+            # 뷰를 건너뛰므로 산출물은 같고, 버릴 계획(뷰당 0.9~11.6초)을 아예
+            # 안 하는 것이 목적이다 — 특히 find_views가 잎 표식을 받으면서
+            # COLOR PALETTE류 참조 그룹의 뷰(라인이 프리셋 제외라 체크될 일
+            # 없음)가 늘었다. render_preview의 visible 필터와 같은 층이다.
+            included_set = set(included)
+            views = [v for v in views if set(v["lineIds"]) & included_set]
             attach_overlays(entries, _cached_plan_overlays(s, views, opts))
         else:
             attach_overlays(entries, [])

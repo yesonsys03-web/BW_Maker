@@ -75,40 +75,72 @@ def find_views(session):
     """
     (뷰 이름, 색 레이어 id, 라인 레이어 id) 목록. 문서 순서대로.
 
-    뷰는 색 그룹의 **부모**다. 라인은 그 부모 아래에서 이름에 line이 든 형제인데,
+    뷰는 색 표식의 **부모**다. 라인은 그 부모 아래에서 이름에 line이 든 형제인데,
     **잎일 수도 그룹일 수도 있다** — 실폴더에서 `lines`가 그룹 이름으로만 130회
     나오고, 잎만 찾던 첫 규칙은 100장 중 22장밖에 걸리지 못했다.
+
+    색 표식은 그룹이 기본이고, **colors류 이름의 잎도 받는다**(2026-08-12). 같은
+    납품에서 COLORS가 평평한 레이어 한 장인 판이 나왔다 — 같은 캐릭터의 다른
+    뷰는 COLORS 그룹이라, 잎은 다른 관례가 아니라 같은 관례의 압축판이다. 이런
+    판을 수동 지정으로 보내면 파일마다 짚어야 하고, **배치에는 지정이 아예 안
+    닿아서** 경계선 없이 나간다.
+
+    잎 표식에는 게이트 셋이 붙는다. 근거는 Hazbin 캐릭터 185장 전수 census다
+    (.superpowers/sdd/opacity-neutral-colour/leaf-census.py — 게이트 없이 369개,
+    게이트 후 197개/93파일, **기존 그룹 뷰는 185/185 불변**):
+      ① 라인 형제가 있어야 한다 — 없으면 attach_overlays가 어차피 버리는데,
+        참조 잎(COLOR PALETTE의 FILLS 등)이 그런 뷰를 120개 만들었다.
+      ② 부모가 line-named이면 표식이 아니다 — LINE 그룹 **안의** colour 잎은
+        트레이스/참조다(_line_leaves가 배운 것과 같은 인구, 46개).
+      ③ 같은 부모에 색 **그룹**이 있으면 잎은 무시한다 — 평평 사본이 이중
+        뷰(이중 계획, 같은 라인에 이중 획 합성)를 만든다(5개).
+    남는 잡음은 COLOR PALETTE류 참조 그룹의 뷰들인데, 그 라인은 프리셋이
+    제외해서 체크될 일이 없으므로 산출물에는 못 들어가고, 계획(plan) 낭비는
+    호출자(rpc.export_psd/batch/render_preview/warmworker)가 "포함된 라인이
+    있는 뷰만 계획"하는 필터로 막는다.
     """
     psd = session["psd"]
     ids = {id(layer): lid for lid, layer in session["layers_by_id"].items()}
     views = []
 
-    def walk(node, name):
-        for child in node:
-            if not child.is_group():
-                continue
-            if child.name.strip().lower() in COLOUR_GROUP_NAMES:
-                colour_ids = [ids[id(l)] for l in _pixel_leaves(child) if id(l) in ids]
-                line_ids = [
-                    ids[id(l)]
-                    for sib in node if sib is not child and _is_line_named(sib)
-                    for l in _line_leaves(sib) if id(l) in ids
-                ]
-                if colour_ids:
-                    views.append({"name": name, "colourIds": colour_ids,
-                                  "lineIds": line_ids})
-            # 무조건 재귀한다 — 색 그룹 이름을 가진 그룹 **안에** 또 색 그룹 이름을
-            # 가진 그룹이 중첩되면(예: COLORS 안의 FILLS 그룹) 가짜 뷰가 하나 더
-            # 나온다는 뜻이다. 그 뷰의 colourIds는 바깥 뷰가 이미 센 것의
-            # 부분집합이고 lineIds는 대개 비어 있다. 전수 조사 100장에는 없던
-            # 모양이라 여기서 고치지 않는다 — 수동 지정(manual_views)이 대비책이다.
-            # 회귀 테스트: test_character.py의
-            # test_a_colour_group_nested_inside_a_colour_group_does_not_make_a_second_view
-            # (xfail, strict=True) — 다음에 여섯 번째 색 그룹 이름을 추가하다 이걸
-            # 고치고 싶어지면 그 테스트가 먼저 알려준다.
-            walk(child, child.name)
+    def walk(node, name, node_line_named):
+        # 게이트 ③의 근거 — 이 부모에 색 그룹 표식이 이미 있는가.
+        has_colour_group = any(
+            c.is_group() and c.name.strip().lower() in COLOUR_GROUP_NAMES
+            for c in node)
 
-    walk(psd, "(root)")
+        def sibling_line_ids(child):
+            return [ids[id(l)]
+                    for sib in node if sib is not child and _is_line_named(sib)
+                    for l in _line_leaves(sib) if id(l) in ids]
+
+        for child in node:
+            marker = child.name.strip().lower() in COLOUR_GROUP_NAMES
+            if child.is_group():
+                if marker:
+                    colour_ids = [ids[id(l)] for l in _pixel_leaves(child)
+                                  if id(l) in ids]
+                    if colour_ids:
+                        views.append({"name": name, "colourIds": colour_ids,
+                                      "lineIds": sibling_line_ids(child)})
+                # 무조건 재귀한다 — 색 그룹 이름을 가진 그룹 **안에** 또 색 그룹 이름을
+                # 가진 그룹이 중첩되면(예: COLORS 안의 FILLS 그룹) 가짜 뷰가 하나 더
+                # 나온다는 뜻이다. 그 뷰의 colourIds는 바깥 뷰가 이미 센 것의
+                # 부분집합이고 lineIds는 대개 비어 있다. 전수 조사 100장에는 없던
+                # 모양이라 여기서 고치지 않는다 — 수동 지정(manual_views)이 대비책이다.
+                # 회귀 테스트: test_character.py의
+                # test_a_colour_group_nested_inside_a_colour_group_does_not_make_a_second_view
+                # (xfail, strict=True) — 다음에 여섯 번째 색 그룹 이름을 추가하다 이걸
+                # 고치고 싶어지면 그 테스트가 먼저 알려준다.
+                walk(child, child.name, _is_line_named(child))
+            elif (marker and not node_line_named and not has_colour_group
+                  and id(child) in ids and child.bbox != (0, 0, 0, 0)):
+                line_ids = sibling_line_ids(child)
+                if line_ids:  # 게이트 ①
+                    views.append({"name": name, "colourIds": [ids[id(child)]],
+                                  "lineIds": line_ids})
+
+    walk(psd, "(root)", False)
     return views
 
 
