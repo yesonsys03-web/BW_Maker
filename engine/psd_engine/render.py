@@ -18,6 +18,8 @@ from collections import OrderedDict
 import numpy as np
 from PIL import Image
 
+from . import tilecache
+
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
 #: 단계별 시간 계측. 켜면(PSD_ENGINE_PERF=1) JSON 한 줄씩 stderr로 낸다 —
@@ -1008,6 +1010,11 @@ def _preview_tile(session, layer_id, scale):
     좌표 원점은 export.py와 동일하게 layer.left/top이고 크기는 extract_rgba가
     돌려준 배열에서 가져온다 — 미리보기가 내보내기와 어긋나지 않게 하려면 두
     경로가 같은 픽셀·같은 원점을 써야 한다.
+
+    RAM 미스면 디코드 전에 디스크 캐시를 먼저 본다(tilecache). 이 한 지점이면
+    토글·미리보기·워밍업 전부가 혜택을 본다 — 셋 다 여기로 온다. 디코드했을
+    때는 그 부산물을 디스크에 떨궈, 세션이 밀려나거나 앱을 재시작해도 이 잎의
+    디코드 비용(콜드 0.7~50초)을 다시 내지 않는다.
     """
     cache = session.setdefault("preview_tiles", OrderedDict())
     key = (layer_id, round(scale, 6))
@@ -1018,9 +1025,17 @@ def _preview_tile(session, layer_id, scale):
     t0 = time.perf_counter()
     layer = session["layers_by_id"][layer_id]
     # 그린 적 없는 빈 레이어(0x0). extract_rgba/PIL이 터지므로 렌더 대상이 아니다.
+    # 디스크에도 묻지 않는다 — 비용이 0이라 기억할 것이 없다.
     if layer.width <= 0 or layer.height <= 0:
         entry = None
     else:
+        entry = tilecache.load(session, layer_id, scale)
+        if entry is not None:
+            cache[key] = entry
+            _evict_tiles(cache)
+            _perf(perf="tile_disk", lid=layer_id,
+                  s=round(time.perf_counter() - t0, 4))
+            return entry
         rgba = extract_rgba(layer)
         h, w = rgba.shape[:2]
         left, top = layer.left, layer.top
@@ -1031,6 +1046,7 @@ def _preview_tile(session, layer_id, scale):
         if (tw, th) != img.size:
             img = img.resize((tw, th), Image.LANCZOS)
         entry = (img, x0, y0)
+        tilecache.store(session, layer_id, scale, entry)
 
     cache[key] = entry
     _evict_tiles(cache)
@@ -1097,7 +1113,15 @@ def warm_preview_tiles(session, layer_ids, max_size, budget_s):
             warmed.append(lid)
             continue
         # 빈 잎(0x0)은 _preview_tile이 None을 캐시한다 — 비용 0으로 데운다.
-        cost = 0.0 if layer.width <= 0 or layer.height <= 0 else _warm_cost(layer)
+        # 디스크 캐시에 있는 잎도 비용 0이다 — _preview_tile이 디코드 대신 디스크
+        # 읽기(수십 ms)로 끝나므로, 디코드 시간 예측(_warm_cost)으로 재면 안 된다.
+        # 특히 WARM_MAX_PREDICTED_S 스킵이 디스크에 이미 있는 큰 잎을 영영
+        # 건너뛰는 것을 이것이 막는다.
+        if layer.width <= 0 or layer.height <= 0 \
+                or tilecache.has(session, lid, scale):
+            cost = 0.0
+        else:
+            cost = _warm_cost(layer)
         todo.append((cost, lid))
     todo.sort()
 

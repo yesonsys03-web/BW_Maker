@@ -593,6 +593,16 @@ function AppShell() {
   /** 잎 타일 워밍업이 끝난 세션 id. 같은 세션을 다시 데우지 않기 위한 것 —
    * 축출로 세션이 새로 열리면 id가 바뀌므로 자연히 다시 돈다. */
   const warmedSessionsRef = useRef<Set<number>>(new Set());
+  /**
+   * 백그라운드 스윕을 끝낸 파일(path → mtime). 세션 id가 아니라 path+mtime로
+   * 기억하는 이유: 스윕의 산출물은 세션이 아니라 **디스크 캐시**이고, 디스크
+   * 캐시의 키가 정확히 path+mtime이다(엔진 tilecache.py). 스윕 도중 세션이
+   * 몇 번 축출-재오픈되어도 디스크에 쌓인 것은 그대로이므로, 같은 판을 이번
+   * 실행에서 다시 열어 훑을 이유가 없다. 포토샵 재저장은 mtime이 갈려 자연히
+   * 다시 돈다. 배치가 세션을 갈아치워도 이 기록은 지우지 않는다 —
+   * warmedSessionsRef와 달리 디스크는 배치에 밀려나지 않는다.
+   */
+  const sweptFilesRef = useRef<Map<string, number>>(new Map());
   const handleBatchRunningChange = useCallback((busy: boolean) => {
     batchRunningRef.current = busy;
     setBatchRunning(busy);
@@ -1178,7 +1188,18 @@ function AppShell() {
       .find((f) => f.status === "open" && f.sessionId !== undefined && f.tree !== undefined);
     const needsWarm = (f: FileEntry | undefined) =>
       f !== undefined && f.sessionId !== undefined && !warmedSessionsRef.current.has(f.sessionId);
-    if (!needsWarm(active) && !needsWarm(next)) return;
+    // 스윕 대상: 활성·다음을 뺀 나머지 열린 파일, 목록 순서. 활성·다음까지 끝나
+    // 엔진이 정말 놀 때, 남은 파일들을 한 바퀴 돌며 타일을 **디스크 캐시**에
+    // 쌓아 둔다(엔진 _preview_tile이 디코드 부산물을 떨군다). 세션은 LRU 2칸으로
+    // 회전하므로 RAM에 남는 것은 마지막 파일뿐이지만, 디스크는 앱 재시작을
+    // 넘어 남는다 — 어느 파일로 점프해도 준비가 디코드(잎당 0.7~50초)가 아니라
+    // 디스크 읽기(수십 ms)로 끝나는 것이 목적이다.
+    const needsSweep = (f: FileEntry) =>
+      f.status === "open" && f.sessionId !== undefined && f.tree !== undefined &&
+      f !== active && f !== next &&
+      f.mtime !== undefined && sweptFilesRef.current.get(f.path) !== f.mtime;
+    const sweep = files.filter(needsSweep);
+    if (!needsWarm(active) && !needsWarm(next) && sweep.length === 0) return;
 
     const chainPath = active.path;
     let cancelled = false;
@@ -1226,7 +1247,26 @@ function AppShell() {
     void (async () => {
       try {
         if (needsWarm(active) && !(await warmFile(active))) return true;
-        if (next !== undefined && needsWarm(next) && !chainCancelled()) await warmFile(next);
+        if (next !== undefined && needsWarm(next) && !chainCancelled()) {
+          if (!(await warmFile(next))) return true;
+        }
+        // 나머지 파일 스윕. 파일 하나가 온전히 끝났을 때만 표시한다 — 도중에
+        // 끊긴 파일은 다음 유휴 때 다시 오고, 이미 디스크에 쌓인 잎은 엔진이
+        // 비용 0으로 걸러 준다.
+        let swept = false;
+        for (const f of sweep) {
+          if (chainCancelled()) break;
+          if (!(await warmFile(f))) break;
+          sweptFilesRef.current.set(f.path, f.mtime!);
+          swept = true;
+        }
+        // 스윕이 돌았다면 그 파일들을 여느라 "다음 파일"의 세션이 LRU에 밀려
+        // 났을 수 있다. 데움 완료 표시를 지워 체인이 한 번 더 데우게 한다 —
+        // 방금 스윕이 디스크에 쌓아 둔 타일을 읽는 것이라 디코드 없이 싸게
+        // 끝나고, d825139가 약속한 "다음 파일은 RAM에 핫"이 스윕 후에도 남는다.
+        if (swept && next?.sessionId !== undefined) {
+          warmedSessionsRef.current.delete(next.sessionId);
+        }
         return true;
       } catch {
         // 워밍업 실패는 알릴 일이 아니다 — 안 데워졌으면 그 잎의 첫 토글이
