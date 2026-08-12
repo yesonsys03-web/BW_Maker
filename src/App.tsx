@@ -1656,7 +1656,18 @@ function AppShell() {
         activePath={state.activePath}
         loadProgress={loadProgress ? { ...loadProgress, label: "여는 중" } : null}
         prefetchProgress={prefetchProgress ? { ...prefetchProgress, label: "미리보기 준비 중" } : null}
-        warmProgress={warmProgress ? { ...warmProgress, label: "레이어 캐시 준비 중" } : null}
+        warmProgress={
+          warmProgress
+            ? {
+                ...warmProgress,
+                // 두 가지 다른 일이 같은 바를 쓴다: 전체 캐시(디스크에 쌓기,
+                // 오래 걸릴 수 있음)와 파일 전환 시 자동 워밍업(디스크→RAM,
+                // 초 단위). 문구가 같으면 후자가 뜰 때마다 "전체 캐시가 안
+                // 됐나"로 읽힌다 — 실제로 그렇게 읽혔다.
+                label: fullCacheOn ? "전체 캐시 만드는 중" : "레이어 불러오는 중",
+              }
+            : null
+        }
         fullCacheRunning={fullCacheOn}
         onFullCacheStart={() => handleFullCacheToggle(true)}
         onFullCacheStop={() => handleFullCacheToggle(false)}

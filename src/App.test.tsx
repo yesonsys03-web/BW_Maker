@@ -1740,8 +1740,10 @@ test("the warmup chain shows leaf-level progress while it runs", async () => {
   await finishOpen(2, 3);
 
   // 드로잉 레이어 단위 합계다: 자동 구간은 활성+다음 두 파일 × 3장 = 6. 파일
-  // 단위로 세면 큰 파일에서 몇 분씩 안 움직여 "멈췄다"로 읽힌다.
-  await waitFor(() => expect(screen.getByText(/레이어 캐시 준비 중\.\.\. 0\/6/)).toBeTruthy());
+  // 단위로 세면 큰 파일에서 몇 분씩 안 움직여 "멈췄다"로 읽힌다. 문구는 전체
+  // 캐시("전체 캐시 만드는 중")와 달라야 한다 — 같으면 파일 전환마다 뜨는 이
+  // 짧은 표시가 "전체 캐시가 안 됐다"로 읽힌다.
+  await waitFor(() => expect(screen.getByText(/레이어 불러오는 중\.\.\. 0\/6/)).toBeTruthy());
   release({ warmed: [1, 2, 3], skipped: [], remaining: [] });
-  await waitFor(() => expect(screen.queryByText(/레이어 캐시 준비 중/)).toBeNull());
+  await waitFor(() => expect(screen.queryByText(/레이어 불러오는 중/)).toBeNull());
 });
