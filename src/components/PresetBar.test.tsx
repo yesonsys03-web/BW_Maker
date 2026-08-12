@@ -62,9 +62,14 @@ function presetNamed(name: string): Preset {
 const PROJECT_B: Preset = { ...presetNamed("B 프리셋"), lineColor: "#000000" };
 const PROJECT_GONE: Preset = { ...presetNamed("지워진 프리셋"), lineColor: "#123456" };
 
-/** 프로젝트를 여는 쪽(App)이 하는 일만 흉내내는 껍데기. 요청을 밖에서 던진다. */
+/** 프로젝트를 여는 쪽(App)이 하는 일만 흉내내는 껍데기. 요청을 밖에서 던지고,
+ * 선택 상태(selectedName/projectPreset)도 App처럼 여기서 든다 — PresetBar가
+ * 리마운트돼도 선택이 살아남는 구조가 이 테스트의 잠금 대상이다. */
 function Harness({ onSelected }: { onSelected: (p: Preset | undefined) => void }) {
   const [request, setRequest] = useState<{ name: string; preset: Preset } | null>(null);
+  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [projectPreset, setProjectPreset] = useState<Preset | null>(null);
+  const [mounted, setMounted] = useState(true);
   return (
     <>
       <button type="button" onClick={() => setRequest({ name: PROJECT_B.name, preset: PROJECT_B })}>
@@ -73,16 +78,25 @@ function Harness({ onSelected }: { onSelected: (p: Preset | undefined) => void }
       <button type="button" onClick={() => setRequest({ name: PROJECT_GONE.name, preset: PROJECT_GONE })}>
         사라진 프리셋으로 열기
       </button>
-      <PresetBar
-        sessionId={1}
-        path="/cuts/a.psd"
-        hasManualEdits={false}
-        onApplied={vi.fn()}
-        onSessionRefreshed={vi.fn()}
-        onError={vi.fn()}
-        onSelectedPresetChange={onSelected}
-        selectPresetRequest={request}
-      />
+      <button type="button" onClick={() => setMounted((m) => !m)}>
+        리마운트 토글
+      </button>
+      {mounted && (
+        <PresetBar
+          sessionId={1}
+          path="/cuts/a.psd"
+          hasManualEdits={false}
+          onApplied={vi.fn()}
+          onSessionRefreshed={vi.fn()}
+          onError={vi.fn()}
+          onSelectedPresetChange={onSelected}
+          selectPresetRequest={request}
+          selectedName={selectedName}
+          onSelectedNameChange={setSelectedName}
+          projectPreset={projectPreset}
+          onProjectPresetChange={setProjectPreset}
+        />
+      )}
     </>
   );
 }
@@ -177,4 +191,27 @@ test("the artist's own choice survives a preset edit that rebuilds the list", as
 
   await new Promise((r) => setTimeout(r, 20));
   expect(selectEl().value).toBe("A 프리셋");
+});
+
+test("a remount keeps the artist's selection instead of falling back to the first preset", async () => {
+  // 선택이 이 컴포넌트의 로컬 상태이던 시절, 리마운트(개발 중 핫 리로드가 실제
+  // 사례) 한 번에 선택이 목록 첫 항목으로 떨어졌다 — CHAR로 저장한 프로젝트가
+  // 캐시 작업 중 BG로 바뀌어 보인 사고다. 선택의 원본이 밖(App)에 있으면 이
+  // 컴포넌트를 내렸다 올려도 선택은 그대로여야 한다.
+  vi.mocked(loadPresets).mockResolvedValue([presetNamed("A 프리셋"), presetNamed("B 프리셋")]);
+  render(<Harness onSelected={vi.fn()} />);
+  await waitFor(() => expect(selectEl().value).toBe("A 프리셋"));
+
+  const el = selectEl();
+  el.value = "B 프리셋";
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  await waitFor(() => expect(selectEl().value).toBe("B 프리셋"));
+
+  click("리마운트 토글");
+  click("리마운트 토글");
+  // 리마운트가 목록을 새로 읽지만, 남아 있는 선택("B 프리셋")이 목록에 있으므로
+  // 첫 항목으로 덮으면 안 된다.
+  await waitFor(() => expect(selectEl().value).toBe("B 프리셋"));
+  await new Promise((r) => setTimeout(r, 20));
+  expect(selectEl().value).toBe("B 프리셋");
 });

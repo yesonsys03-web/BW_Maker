@@ -39,6 +39,9 @@ function renderPanel(
       loadProgress={null}
       prefetchProgress={null}
       warmProgress={null}
+      fullCacheRunning={false}
+      onFullCacheStart={vi.fn()}
+      onFullCacheStop={vi.fn()}
       stopped={null}
       entryCounts={entryCounts}
       staleProjectPaths={staleProjectPaths}

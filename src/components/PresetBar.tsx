@@ -21,6 +21,19 @@ interface PresetBarProps {
   onError: (title: string, error: EngineError) => void;
   onSelectedPresetChange: (preset: Preset | undefined) => void;
   /**
+   * 드롭다운 선택의 원본 — 목록 이름과, 프로젝트에서 올라온 판. 이 컴포넌트의
+   * 로컬 상태가 아니라 App이 든다. 로컬로 들면 리마운트되는 순간(개발 중 핫
+   * 리로드가 실제로 그랬다) 선택이 목록 첫 항목으로 조용히 떨어진다 — CHAR로
+   * 저장한 프로젝트가 캐시 작업 중 BG로 바뀌어 보인 사고가 그것이다. 규칙은
+   * 하나다: **사용자가 바꾸지 않는 한 선택은 절대 저절로 바뀌지 않는다.**
+   * 이 컴포넌트가 선택을 바꿔도 되는 경우는 목록 첫 로드에서 아무 선택도 없을
+   * 때(첫 실행)와 저장된 이름이 목록에서 사라졌을 때뿐이다.
+   */
+  selectedName: string | null;
+  onSelectedNameChange: (name: string) => void;
+  projectPreset: Preset | null;
+  onProjectPresetChange: (preset: Preset | null) => void;
+  /**
    * "이 프리셋으로 맞추라"는 요청. 프로젝트를 열 때 그 프로젝트가 담고 있던
    * 프리셋으로 맞추기 위한 것이다 — 안 맞추면 복원해둔 미리보기의 캐시 키가
    * 지금 선택과 달라져 화면이 전부 다시 그린다(설계 5·7절).
@@ -70,20 +83,25 @@ export function PresetBar({
   onError,
   onSelectedPresetChange,
   selectPresetRequest,
+  selectedName,
+  onSelectedNameChange,
+  projectPreset,
+  onProjectPresetChange,
 }: PresetBarProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
-  const [selectedName, setSelectedName] = useState<string | null>(null);
-  /**
-   * 프로젝트를 열면서 올라온 저장 시점 프리셋. 목록(`presets`)에는 넣지 않는다 —
-   * 넣으면 같은 이름의 편집본을 밀어내고, `presets.json`에 저장까지 하게 되는
-   * 순간 아티스트의 편집이 조용히 사라진다. 목록과 별개로 들고 있다가 드롭다운에
-   * 항목 하나로만 보여주고, 아티스트가 목록의 것을 고르면 내려놓는다.
-   */
-  const [projectPreset, setProjectPreset] = useState<Preset | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [confirmApply, setConfirmApply] = useState(false);
   const [applying, setApplying] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // 마운트 한 번짜리 로드 effect가 "그 시점의" 선택을 읽기 위한 ref들 —
+  // 의존성에 넣으면 로드 effect가 선택 변화마다 다시 돈다.
+  const selectedNameRef = useRef(selectedName);
+  const onSelectedNameChangeRef = useRef(onSelectedNameChange);
+  useEffect(() => {
+    selectedNameRef.current = selectedName;
+    onSelectedNameChangeRef.current = onSelectedNameChange;
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -92,7 +110,13 @@ export function PresetBar({
         const loaded = await loadPresets();
         if (cancelled) return;
         setPresets(loaded);
-        setSelectedName(loaded[0]?.name ?? null);
+        // 선택은 여기서 정하지 않는다(원본은 App, 위 prop 주석의 규칙). 채워도
+        // 되는 경우는 둘뿐이다 — 아직 아무 선택도 없는 첫 실행과, 남아 있던
+        // 선택 이름이 목록에서 사라진 경우(지웠거나 이름을 바꿈).
+        const current = selectedNameRef.current;
+        if (loaded.length > 0 && (current === null || !loaded.some((p) => p.name === current))) {
+          onSelectedNameChangeRef.current(loaded[0].name);
+        }
       } catch (e) {
         if (cancelled) return;
         onError("프리셋 목록 불러오기 실패", toEngineError(e));
@@ -121,13 +145,13 @@ export function PresetBar({
     appliedRequestRef.current = selectPresetRequest;
     // 프로젝트가 담고 있는 객체를 그대로 세운다. 목록에 그 이름이 있든 없든
     // 상관없다 — 지웠거나 이름을 바꿨어도 저장 시점 설정으로 열 수 있어야 한다.
-    setProjectPreset(selectPresetRequest.preset);
+    onProjectPresetChange(selectPresetRequest.preset);
     // 목록에 같은 이름이 있으면 그쪽 선택도 맞춰둔다. 아티스트가 프로젝트 항목을
     // 버리고 목록으로 돌아갈 때 무엇이 골라질지가 이 값이다.
     if (presetsRef.current.some((p) => p.name === selectPresetRequest.preset.name)) {
-      setSelectedName(selectPresetRequest.preset.name);
+      onSelectedNameChange(selectPresetRequest.preset.name);
     }
-  }, [selectPresetRequest]);
+  }, [selectPresetRequest, onProjectPresetChange, onSelectedNameChange]);
 
   const selectedIndex = presets.findIndex((p) => p.name === selectedName);
   const listPreset = selectedIndex === -1 ? undefined : presets[selectedIndex];
@@ -209,7 +233,7 @@ export function PresetBar({
     }
     setDialog(null);
     setPresets(newList);
-    setSelectedName(edited.name);
+    onSelectedNameChange(edited.name);
     void persistList(newList);
   }
 
@@ -234,8 +258,8 @@ export function PresetBar({
             const value = e.currentTarget.value;
             if (value === PROJECT_PRESET_VALUE) return;
             // 목록의 것을 고르는 순간 프로젝트에서 온 판은 내려놓는다.
-            setProjectPreset(null);
-            setSelectedName(value);
+            onProjectPresetChange(null);
+            onSelectedNameChange(value);
           }}
           disabled={presets.length === 0 && !projectPreset}
         >

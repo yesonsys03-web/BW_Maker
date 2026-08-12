@@ -1379,6 +1379,34 @@ test("opening a project twice at once runs one restore", async () => {
   await waitFor(() => expect(screen.getByText("작업.bwproj")).toBeTruthy());
 });
 
+test("the chosen preset survives an app relaunch", async () => {
+  // 프리셋은 사용자가 바꾸지 않는 한 저절로 바뀌면 안 되고, 그 규칙은 재시작보다
+  // 위에 있다 — 켤 때마다 목록 첫 항목으로 돌아가면 그것이 "허락 없이 바뀐 것"이다.
+  const other = { ...PRESET, name: "다른 프리셋" };
+  // Once로 두 번 — 지속 구현(mockResolvedValue)으로 덮으면 clearAllMocks가
+  // 구현은 안 지우므로 뒤따르는 테스트 전부에 프리셋이 새어 들어간다(아래
+  // I3 테스트의 같은 주석 참고).
+  vi.mocked(loadPresets).mockResolvedValueOnce([other, PRESET]);
+
+  const first = render(<App />);
+  await waitFor(() =>
+    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(other.name)
+  );
+  const el = screen.getByRole("combobox") as HTMLSelectElement;
+  el.value = PRESET.name;
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  await waitFor(() =>
+    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(PRESET.name)
+  );
+  first.unmount();
+
+  vi.mocked(loadPresets).mockResolvedValueOnce([other, PRESET]);
+  render(<App />);
+  await waitFor(() =>
+    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(PRESET.name)
+  );
+});
+
 /**
  * I3. 프로젝트의 프리셋을 앱의 선택으로 올리는 **App 쪽** 배선. PresetBar의
  * 테스트는 컴포넌트만 잠그고 위 픽스처는 preset: null이라, 이 분기를 지우면
@@ -1620,27 +1648,29 @@ test("after the queues settle, the active file's leaf tiles are warmed", async (
   expect(ids).toEqual([1, 2, 3]);
 });
 
-test("after active and next, the remaining files are swept for the disk cache", async () => {
-  // 예전에는 "세 번째까지 데우면 안 된다"였다 — 세션이 2칸뿐이라 세 번째를
-  // 여는 순간 방금 데운 다음 파일이 밀려나기 때문이다. 디스크 캐시(엔진
-  // tilecache)가 그 근거를 뒤집었다: 밀려나는 것은 RAM 세션뿐이고 데운 타일은
-  // 디스크에 남으므로, 이제는 남은 파일 전부를 목록 순서로 훑어 디스크에
-  // 쌓는 것이 이득이다(어느 파일로 점프해도 디코드 대신 디스크 읽기). 순서는
-  // 활성 → 다음 → 나머지 스윕 → 그리고 스윕에 밀려났을 다음 파일을 한 번 더
-  // (방금 디스크에 쌓은 것을 읽는 것이라 싸다).
+test("the full-folder sweep waits for the artist to start it, then reports completion", async () => {
+  // 폴더 전체 스윕은 몇 시간짜리 작업이라 자동으로 돌지 않는다 — 자동은
+  // 활성·다음 파일까지만이고, 나머지는 "전체 캐시" 버튼으로 시작한다. 순서는
+  // 활성 → 다음 → 나머지 스윕 → 스윕에 밀려났을 다음 파일 재데움(방금 디스크에
+  // 쌓은 것을 읽는 것이라 싸다) → 완료 팝업.
   render(<App />);
   await addFiles({ click });
   await finishOpen(0, 1);
   await finishOpen(1, 2);
   await finishOpen(2, 3);
 
-  await waitFor(() => expect(engine.warmPreviewTiles.mock.calls.length).toBeGreaterThanOrEqual(4));
+  // 자동 구간: 활성(1)과 다음(2)만. 세 번째는 건드리지 않는다.
+  await waitFor(() => expect(engine.warmPreviewTiles.mock.calls.length).toBeGreaterThanOrEqual(2));
+  await new Promise((r) => setTimeout(r, 30));
+  expect(engine.warmPreviewTiles.mock.calls.map((c) => c[0])).not.toContain(3);
+
+  click(screen.getByRole("button", { name: "전체 캐시" }));
+  await waitFor(() => expect(screen.getByText("전체 캐시 완료")).toBeTruthy());
   const sids = engine.warmPreviewTiles.mock.calls.map((c) => c[0]);
   expect(sids.slice(0, 4)).toEqual([1, 2, 3, 2]);
-  // 스윕은 파일·판(path+mtime)당 한 번 — 체인이 다시 깨어나도 같은 파일을
-  // 도로 열어 훑지 않는다.
-  await new Promise((r) => setTimeout(r, 30));
-  expect(engine.warmPreviewTiles.mock.calls.length).toBe(4);
+
+  click(screen.getByRole("button", { name: "확인" }));
+  await waitFor(() => expect(screen.queryByText("전체 캐시 완료")).toBeNull());
 });
 
 test("the warmup chain shows leaf-level progress while it runs", async () => {
@@ -1656,9 +1686,9 @@ test("the warmup chain shows leaf-level progress while it runs", async () => {
   await finishOpen(1, 2);
   await finishOpen(2, 3);
 
-  // 잎 단위 합계다: 파일 3개 × 잎 3개 = 9. 파일 단위로 세면 큰 파일에서 몇 분씩
-  // 안 움직여 "멈췄다"로 읽힌다.
-  await waitFor(() => expect(screen.getByText(/레이어 캐시 준비 중\.\.\. 0\/9/)).toBeTruthy());
+  // 드로잉 레이어 단위 합계다: 자동 구간은 활성+다음 두 파일 × 3장 = 6. 파일
+  // 단위로 세면 큰 파일에서 몇 분씩 안 움직여 "멈췄다"로 읽힌다.
+  await waitFor(() => expect(screen.getByText(/레이어 캐시 준비 중\.\.\. 0\/6/)).toBeTruthy());
   release({ warmed: [1, 2, 3], skipped: [], remaining: [] });
   await waitFor(() => expect(screen.queryByText(/레이어 캐시 준비 중/)).toBeNull());
 });

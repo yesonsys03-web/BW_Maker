@@ -121,6 +121,13 @@ const OUTPUT_FORMATS = new Set<string>(OUTPUT_FORMAT_OPTIONS.map((o) => o.value)
 
 /** byRole 병합의 기본 역할 토큰(아래→위 순서). 엔진 DEFAULT_ROLE_TOKENS와 같다. */
 export const DEFAULT_ROLE_TOKENS = ["UL", "OL_UL", "OL"];
+
+/**
+ * 마지막으로 고른 프리셋 이름을 남기는 localStorage 키. 프리셋은 사용자가
+ * 바꾸지 않는 한 저절로 바뀌면 안 되고, 그 규칙은 리마운트·재시작보다 위에
+ * 있다 — 켤 때마다 목록 첫 항목으로 돌아가면 그 자체가 "허락 없이 바뀐 것"이다.
+ */
+export const SELECTED_PRESET_STORAGE_KEY = "bwMaker.selectedPreset";
 const NAMING_MODES = new Set(["pathPrefix", "original"]);
 
 /**

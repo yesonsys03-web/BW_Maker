@@ -33,6 +33,14 @@ interface FilePanelProps {
    */
   warmProgress: LoadBar | null;
   /**
+   * "전체 캐시"가 도는 중인지, 그리고 시작/중지. 폴더 전체의 드로잉 레이어
+   * 캐시는 몇 시간짜리 작업이라 자동으로 돌지 않는다 — 사용자가 여기서 켠다.
+   * 켜 두면 사람이 쓰는 동안은 비켜서며 돌고, 끝나면 App이 완료 팝업을 낸다.
+   */
+  fullCacheRunning: boolean;
+  onFullCacheStart: () => void;
+  onFullCacheStop: () => void;
+  /**
    * 중지된 배경 작업이 남아 있을 때 그것이 무엇인지("남은 파일 22개"). 없으면 null.
    * 진행바와 같은 자리에 재개 버튼을 띄우는 근거다 — 중지를 누른 그 자리에서
    * 되돌릴 수 있어야 한다. 이게 없으면 다시 시작하는 방법이 "이미 있는 폴더를
@@ -127,6 +135,9 @@ export function FilePanel({
   loadProgress,
   prefetchProgress,
   warmProgress,
+  fullCacheRunning,
+  onFullCacheStart,
+  onFullCacheStop,
   stopped,
   entryCounts,
   staleProjectPaths,
@@ -313,6 +324,18 @@ export function FilePanel({
             title="폴더 안의 PSD를 하위 폴더까지 모두 추가합니다"
           >
             {scanning ? "읽는 중..." : "+ 폴더"}
+          </button>
+          <button
+            type="button"
+            onClick={fullCacheRunning ? onFullCacheStop : onFullCacheStart}
+            disabled={files.length === 0}
+            title={
+              fullCacheRunning
+                ? "전체 캐시 만들기를 멈춥니다. 이미 쌓인 캐시는 그대로 남습니다."
+                : "목록의 모든 파일의 드로잉 레이어를 미리 디코드해 디스크에 쌓아 둡니다. 파일 수에 따라 오래 걸릴 수 있고, 작업하는 동안에는 알아서 비켜섭니다."
+            }
+          >
+            {fullCacheRunning ? "캐시 중지" : "전체 캐시"}
           </button>
         </div>
       </div>

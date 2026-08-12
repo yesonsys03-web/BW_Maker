@@ -29,7 +29,7 @@ import {
   parseTreePanelWidth,
 } from "./lib/layout";
 import { drainLoadQueue } from "./lib/loadQueue";
-import { DEFAULT_ROLE_TOKENS } from "./lib/presets";
+import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError } from "./lib/preview";
 import { PreviewCache, needsPrefetch, previewRenderSpec } from "./lib/previewCache";
 import { openFailureReport, type FailedOpen } from "./lib/openReport";
@@ -213,6 +213,20 @@ function AppShell() {
   const [bottomTab, setBottomTab] = useState<BottomTab>("history");
   const [exportOpen, setExportOpen] = useState(false);
   const [selectedPreset, setSelectedPreset] = useState<Preset | undefined>(undefined);
+  /**
+   * 프리셋 드롭다운 선택의 원본(PresetBar의 selectedName prop 주석 참고).
+   * PresetBar 로컬이 아니라 여기 두는 이유: 리마운트(개발 중 핫 리로드 포함)에도
+   * 선택이 살아남아야 한다 — CHAR로 저장한 프로젝트가 캐시 작업 중 BG로 바뀌어
+   * 보인 사고의 재발 방지다. 마지막 선택은 localStorage에도 남겨 재시작을 넘는다.
+   */
+  const [presetName, setPresetName] = useState<string | null>(
+    () => window.localStorage.getItem(SELECTED_PRESET_STORAGE_KEY)
+  );
+  const [projectPreset, setProjectPreset] = useState<Preset | null>(null);
+  const handlePresetNameChange = useCallback((name: string) => {
+    setPresetName(name);
+    window.localStorage.setItem(SELECTED_PRESET_STORAGE_KEY, name);
+  }, []);
 
   /** 열려 있는 `.bwproj` 폴더. null이면 아직 저장한 적 없다(저장은 수동, 설계 6절). */
   const [projectDir, setProjectDir] = useState<string | null>(null);
@@ -546,6 +560,20 @@ function AppShell() {
    * 그때마다 워밍업은 비켜서느라 더 안 끝난다 — 그래서 이 표시가 기능이다.
    */
   const [warmProgress, setWarmProgress] = useState<{ done: number; total: number } | null>(null);
+  /**
+   * "전체 캐시" 요청이 켜져 있는지. 나머지 파일 전체 스윕은 몇 시간짜리 작업이라
+   * 자동으로 돌지 않는다 — 사용자가 버튼으로 시작하고, 버튼으로 멈춘다(활성·다음
+   * 파일 워밍업은 금방 끝나므로 계속 자동이다). ref는 돌고 있는 체인이 중지를
+   * 즉시 보기 위한 것.
+   */
+  const [fullCacheOn, setFullCacheOn] = useState(false);
+  const fullCacheOnRef = useRef(false);
+  const handleFullCacheToggle = useCallback((on: boolean) => {
+    fullCacheOnRef.current = on;
+    setFullCacheOn(on);
+  }, []);
+  /** 전체 캐시가 끝났음을 알리는 팝업. 확인을 누르면 내린다. */
+  const [fullCacheDone, setFullCacheDone] = useState(false);
   const prefetchingRef = useRef(false);
   /**
    * 프리셋이 방금 바뀌었으니 준비 큐는 잠깐 서 있으라는 표시.
@@ -1194,18 +1222,32 @@ function AppShell() {
       .find((f) => f.status === "open" && f.sessionId !== undefined && f.tree !== undefined);
     const needsWarm = (f: FileEntry | undefined) =>
       f !== undefined && f.sessionId !== undefined && !warmedSessionsRef.current.has(f.sessionId);
-    // 스윕 대상: 활성·다음을 뺀 나머지 열린 파일, 목록 순서. 활성·다음까지 끝나
-    // 엔진이 정말 놀 때, 남은 파일들을 한 바퀴 돌며 타일을 **디스크 캐시**에
-    // 쌓아 둔다(엔진 _preview_tile이 디코드 부산물을 떨군다). 세션은 LRU 2칸으로
-    // 회전하므로 RAM에 남는 것은 마지막 파일뿐이지만, 디스크는 앱 재시작을
-    // 넘어 남는다 — 어느 파일로 점프해도 준비가 디코드(잎당 0.7~50초)가 아니라
-    // 디스크 읽기(수십 ms)로 끝나는 것이 목적이다.
+    // 스윕 대상: 활성·다음을 뺀 나머지 열린 파일, 목록 순서. 남은 파일들을 한
+    // 바퀴 돌며 타일을 **디스크 캐시**에 쌓는다(엔진 _preview_tile이 디코드
+    // 부산물을 떨군다). 세션은 LRU 2칸으로 회전하므로 RAM에 남는 것은 마지막
+    // 파일뿐이지만, 디스크는 앱 재시작을 넘어 남는다 — 어느 파일로 점프해도
+    // 준비가 디코드(드로잉 레이어당 0.7~50초)가 아니라 디스크 읽기(수십 ms)로
+    // 끝나는 것이 목적이다.
+    //
+    // **자동으로 돌지 않는다.** 폴더 전체 스윕은 몇 시간짜리 작업이라, 사용자가
+    // "전체 캐시" 버튼으로 켰을 때만 돈다(fullCacheOn). 활성·다음 워밍업은 금방
+    // 끝나고 지금 작업에 직접 쓰이므로 계속 자동이다.
     const needsSweep = (f: FileEntry) =>
       f.status === "open" && f.sessionId !== undefined && f.tree !== undefined &&
       f !== active && f !== next &&
       f.mtime !== undefined && sweptFilesRef.current.get(f.path) !== f.mtime;
-    const sweep = files.filter(needsSweep);
-    if (!needsWarm(active) && !needsWarm(next) && sweep.length === 0) return;
+    const sweep = fullCacheOn ? files.filter(needsSweep) : [];
+    if (!needsWarm(active) && !needsWarm(next) && sweep.length === 0) {
+      // 전체 캐시가 켜져 있는데 더 할 일이 없다 = 다 됐다. 요청을 내리고 알린다.
+      // 완료 판정을 여기 한 곳에 두는 이유: 스윕 도중 새로 열린 파일이 있으면
+      // 체인이 끝나며 올린 kick이 효과를 다시 깨우고, 그 파일까지 끝난 뒤에야
+      // 이 가지에 들어온다 — "일부만 하고 완료"가 원리적으로 안 나온다.
+      if (fullCacheOn) {
+        handleFullCacheToggle(false);
+        setFullCacheDone(true);
+      }
+      return;
+    }
 
     const chainPath = active.path;
     let cancelled = false;
@@ -1233,7 +1275,7 @@ function AppShell() {
     let doneLeaves = 0;
     if (totalLeaves > 0) setWarmProgress({ done: 0, total: totalLeaves });
 
-    const warmFile = async (file: FileEntry): Promise<boolean> => {
+    const warmFile = async (file: FileEntry, alsoCancelled?: () => boolean): Promise<boolean> => {
       let sid = file.sessionId!;
       const leafIds = pixelLeafIds(file.tree!);
       if (leafIds.length === 0) {
@@ -1256,7 +1298,7 @@ function AppShell() {
             }
           ),
         shouldPause: () => canvasRenderingRef.current || prefetchingRef.current,
-        cancelled: chainCancelled,
+        cancelled: () => chainCancelled() || (alsoCancelled?.() ?? false),
         onProgress: (w, s) => {
           doneLeaves = base + w + s;
           setWarmProgress({ done: doneLeaves, total: totalLeaves });
@@ -1277,13 +1319,14 @@ function AppShell() {
         if (next !== undefined && needsWarm(next) && !chainCancelled()) {
           if (!(await warmFile(next))) return true;
         }
-        // 나머지 파일 스윕. 파일 하나가 온전히 끝났을 때만 표시한다 — 도중에
-        // 끊긴 파일은 다음 유휴 때 다시 오고, 이미 디스크에 쌓인 잎은 엔진이
-        // 비용 0으로 걸러 준다.
+        // 나머지 파일 스윕("전체 캐시"가 켜졌을 때만 sweep이 차 있다). 파일
+        // 하나가 온전히 끝났을 때만 표시한다 — 도중에 끊긴 파일은 다음에 다시
+        // 오고, 이미 디스크에 쌓인 드로잉 레이어는 엔진이 비용 0으로 걸러 준다.
+        // 중지 버튼은 fullCacheOnRef를 내리는 것으로 즉시 먹는다.
         let swept = false;
         for (const f of sweep) {
-          if (chainCancelled()) break;
-          if (!(await warmFile(f))) break;
+          if (chainCancelled() || !fullCacheOnRef.current) break;
+          if (!(await warmFile(f, () => !fullCacheOnRef.current))) break;
           sweptFilesRef.current.set(f.path, f.mtime!);
           swept = true;
         }
@@ -1311,7 +1354,7 @@ function AppShell() {
     return () => {
       cancelled = true;
     };
-  }, [loading, prefetchProgress, batchRunning, prefetchHold, warmKick, state.activePath, state.files, refreshSession]);
+  }, [loading, prefetchProgress, batchRunning, prefetchHold, warmKick, state.activePath, state.files, refreshSession, fullCacheOn, handleFullCacheToggle]);
 
   /**
    * 파일별로 손으로 "라인으로 지정"한 레이어. 배치가 이걸 함께 보내야, 이름
@@ -1499,6 +1542,10 @@ function AppShell() {
         onSessionRefreshed={refreshSession}
         onError={pushError}
         onSelectedPresetChange={setSelectedPreset}
+        selectedName={presetName}
+        onSelectedNameChange={handlePresetNameChange}
+        projectPreset={projectPreset}
+        onProjectPresetChange={setProjectPreset}
         selectPresetRequest={selectPresetRequest}
       />
 
@@ -1527,6 +1574,9 @@ function AppShell() {
         loadProgress={loadProgress ? { ...loadProgress, label: "여는 중" } : null}
         prefetchProgress={prefetchProgress ? { ...prefetchProgress, label: "미리보기 준비 중" } : null}
         warmProgress={warmProgress ? { ...warmProgress, label: "레이어 캐시 준비 중" } : null}
+        fullCacheRunning={fullCacheOn}
+        onFullCacheStart={() => handleFullCacheToggle(true)}
+        onFullCacheStop={() => handleFullCacheToggle(false)}
         stopped={stoppedLabel}
         entryCounts={entryCounts}
         staleProjectPaths={staleProjectPaths}
@@ -1546,6 +1596,26 @@ function AppShell() {
         onResume={handleResume}
         onError={pushError}
       />
+
+      {/* 전체 캐시 완료 팝업. 배경 작업이라 끝나는 순간을 사용자가 볼 수 없으므로
+          여기서 분명하게 알린다 — 진행바는 사라지는 것으로만 끝나서, 그것만으로는
+          "끝났다"와 "멈췄다"가 구분되지 않는다. */}
+      {fullCacheDone && (
+        <div className="modal-overlay" onClick={() => setFullCacheDone(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h3>전체 캐시 완료</h3>
+            <p>
+              모든 파일의 드로잉 레이어 캐시가 준비됐습니다. 이제 어떤 파일을 열어도
+              레이어 토글이 바로 반응하고, 앱을 껐다 켜도 그대로 유지됩니다.
+            </p>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setFullCacheDone(false)}>
+                확인
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="preview-area">
         <PreviewCanvas
