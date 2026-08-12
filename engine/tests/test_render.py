@@ -1145,3 +1145,37 @@ def test_render_preview_only_recolors_overlays_whose_view_is_in_the_color_scope(
     arr = np.array(Image.open(png).convert("RGBA"))
     assert tuple(arr[2, 2][:3]) == (255, 0, 0), "범위 안 뷰의 획이 통일색으로 칠해지지 않았다"
     assert tuple(arr[2, 42][:3]) == (100, 100, 100), "범위 밖 뷰의 획이 통일색으로 칠해졌다"
+
+
+def test_leaf_thumbnails_reuse_preview_tiles_instead_of_decoding(fixture_psd, tmp_path, monkeypatch):
+    # 참고 그룹(TEMPLATE 등)을 펼칠 때마다 56.9Mpx 잎이 47초씩 다시 디코드되던
+    # 회귀 방지 — 잎 썸네일은 미리보기·전체 캐시가 데워 둔 타일에서 줄인다.
+    s = _session(fixture_psd)
+    render_mod._preview_tile(s, 2, 1.0)  # 미리보기 배율(캔버스 64px < 1500 → 1.0)
+
+    def boom(layer):
+        raise AssertionError("타일이 있으면 디코드하면 안 된다")
+
+    monkeypatch.setattr(render_mod, "extract_rgba", boom)
+    thumbs = render_thumbnails(s, [2], max_size=32, out_dir=tmp_path)
+    assert "2" in thumbs
+
+
+def test_leaf_thumbnails_fall_back_to_full_res_when_the_tile_is_too_small(fixture_psd, tmp_path, monkeypatch):
+    # 작은 잎 × 큰 캔버스 축소에서는 타일이 썸네일보다 작아 확대 흐림이 생긴다 —
+    # 그때만 원본 디코드로 간다(그런 잎은 어차피 싸다). 원본 경로면 64x48
+    # 잎에서 32px 썸네일이 나오고, 8px짜리 타일을 억지로 키웠다면 8px다.
+    from PIL import Image
+    monkeypatch.setattr(render_mod, "THUMBNAIL_SOURCE_MAX_SIZE", 8)
+    s = _session(fixture_psd)
+    thumbs = render_thumbnails(s, [2], max_size=32, out_dir=tmp_path)
+    assert max(Image.open(thumbs["2"]).size) == 32
+
+
+def test_thumbnailing_does_not_shrink_the_cached_tile(fixture_psd, tmp_path):
+    # 썸네일은 캐시된 타일의 **사본**에서 줄여야 한다 — 제자리에서 줄이면 다음
+    # 미리보기가 48px 뭉개진 그림으로 그려진다.
+    s = _session(fixture_psd)
+    w = render_mod._preview_tile(s, 2, 1.0)[0].width
+    render_thumbnails(s, [2], max_size=16, out_dir=tmp_path)
+    assert render_mod._preview_tile(s, 2, 1.0)[0].width == w

@@ -112,6 +112,11 @@ THUMBNAIL_TILE_SIZE = MERGE_TILE_SIZE
 #: max_size_mapping, psd-tools api/utils.py의 MAX_DIMENSION_PSD와 같은 값이다.
 PSD_MAX_DIMENSION = 30000
 
+#: 잎 썸네일의 원천으로 쓰는 미리보기 타일의 배율 기준. 앱의 미리보기 크기
+#: (src/lib/preview.ts의 PREVIEW_MAX_SIZE)와 같아야 한다 — 그래야 썸네일이
+#: 미리보기·워밍업·전체 캐시가 쌓아 둔 **같은 타일 캐시**를 친다.
+THUMBNAIL_SOURCE_MAX_SIZE = 1500
+
 
 def parse_line_color(value):
     """
@@ -987,7 +992,23 @@ def render_thumbnails(session, layer_ids, max_size, out_dir):
             # group's bbox, which is computed from visible descendants.
             if layer.width <= 0 or layer.height <= 0:
                 continue
-            img = Image.fromarray(extract_rgba(layer))
+            # 잎 썸네일은 가능하면 미리보기 타일(디스크 캐시 포함)에서 줄인다.
+            # 예전처럼 원본 해상도를 다시 디코드하면, 타일·오버레이를 다 캐시해
+            # 둔 판에서도 참고 그룹(TEMPLATE 등)을 펼치는 순간 56.9Mpx 잎 하나가
+            # 실측 47초를 냈다 — 48px 그림을 만들자고 낼 비용이 아니고, stdin이
+            # 직렬이라 그 47초 뒤에 사용자 렌더가 전부 줄을 선다.
+            #
+            # 타일이 청한 썸네일보다 작으면(작은 잎 × 큰 캔버스 축소) 확대
+            # 흐림이 생기므로 그때만 예전 경로(원본 디코드)로 간다 — 타일이
+            # 작다는 것은 잎 자체가 작다는 뜻이라 그 디코드는 어차피 싸다.
+            entry = _preview_tile(session, lid, preview_scale(psd, THUMBNAIL_SOURCE_MAX_SIZE))
+            if entry is None:
+                continue
+            if max(entry[0].width, entry[0].height) >= max_size:
+                # 캐시에 든 타일을 그대로 줄이면 캐시가 오염된다 — 사본에서 줄인다.
+                img = entry[0].copy()
+            else:
+                img = Image.fromarray(extract_rgba(layer))
         img = img.convert("RGBA")
         img.thumbnail((max_size, max_size))
         result[str(lid)] = _save_png(img, out_dir, f"thumb_{lid}")
