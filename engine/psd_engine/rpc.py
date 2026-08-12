@@ -20,6 +20,7 @@ from .matching import (auto_merge_operations, auto_merge_preview,
 from .ops import build_export_plan, finalize_names
 from .raster import export_raster as _export_raster
 from .raster import export_raster_split as _export_raster_split
+from . import tilecache
 from .render import (_perf, assign_line_color, render_document_preview,
                      render_preview, render_thumbnails, warm_preview_tiles)
 from .session import SessionStore
@@ -118,9 +119,21 @@ def _cached_plan_overlays(session, views, opts):
             cache.move_to_end(key)
             plans.extend(cached)
             continue
+        # 세션 캐시 미스면 계산 전에 디스크를 본다. 오버레이는 뷰당 실측
+        # 9~17초짜리 계산인데 결과가 세션과 함께 죽어서, 세션이 밀려날 때마다
+        # (LRU 2칸이라 파일만 옮겨도) 같은 값을 다시 계산했다 — 타일 캐시를
+        # 깔고 나니 토글 "로딩"의 정체가 전부 이것이었다. 키가 뷰 구성+픽셀
+        # 설정이므로 설정이 바뀌면 자동으로 다시 계산된다.
+        vkey = tilecache.overlay_key(view["colourIds"], view["lineIds"], settings_key)
         t0 = time.perf_counter()
-        made = plan_overlays(session, [view], opts)
-        _perf(perf="overlay_view", s=round(time.perf_counter() - t0, 4))
+        made = tilecache.load_overlays(session, vkey)
+        if made is not None:
+            _perf(perf="overlay_disk", n=len(made),
+                  s=round(time.perf_counter() - t0, 4))
+        else:
+            made = plan_overlays(session, [view], opts)
+            _perf(perf="overlay_view", s=round(time.perf_counter() - t0, 4))
+            tilecache.store_overlays(session, vkey, made)
         cache[key] = made
         while len(cache) > OVERLAY_CACHE_PER_SESSION:
             victim = next((k for k in cache if k not in wanted), None)

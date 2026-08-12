@@ -148,3 +148,34 @@ def test_warm_treats_disk_hits_as_free(fixture_psd, monkeypatch):
     fresh = _session(fixture_psd)
     res = warm_preview_tiles(fresh, [2, 4, 5], max_size=256, budget_s=10.0)
     assert sorted(res["warmed"]) == [2, 4, 5] and res["skipped"] == []
+
+
+def test_overlay_roundtrip_preserves_pixels_and_metadata(fixture_psd):
+    # 오버레이는 뷰당 RGBA 한 장 + 배치 정보다. npz 한 파일로 갔다 와야 한다.
+    s = _session(fixture_psd)
+    arr = np.arange(2 * 3 * 4, dtype=np.uint8).reshape(2, 3, 4)
+    key = tilecache.overlay_key([2], [5], (24, 4, 0, 8, 64, "composite", "region"))
+    tilecache.store_overlays(s, key, [{"lineIds": [5], "left": -3, "top": 7, "rgba": arr}])
+    got = tilecache.load_overlays(s, key)
+    assert got is not None and len(got) == 1
+    assert got[0]["lineIds"] == [5] and got[0]["left"] == -3 and got[0]["top"] == 7
+    assert np.array_equal(got[0]["rgba"], arr)
+
+
+def test_overlay_remembers_an_empty_result(fixture_psd):
+    # "이 뷰는 그릴 것 없음"도 계산 한 번의 결론이다 — None(미스)과 구분해
+    # 기억해야 세션마다 같은 헛계산을 반복하지 않는다.
+    s = _session(fixture_psd)
+    key = tilecache.overlay_key([2], [5], (24, 4, 0, 8, 64, "composite", "region"))
+    assert tilecache.load_overlays(s, key) is None
+    tilecache.store_overlays(s, key, [])
+    assert tilecache.load_overlays(s, key) == []
+
+
+def test_overlay_key_varies_with_settings_and_format(monkeypatch):
+    base = tilecache.overlay_key([1], [2], (24, 4, 0))
+    assert tilecache.overlay_key([1], [2], (24, 4, 5)) != base  # 설정이 다르면
+    assert tilecache.overlay_key([1], [3], (24, 4, 0)) != base  # 뷰가 다르면
+    monkeypatch.setattr(tilecache, "OVERLAY_FORMAT", 2)
+    # 알고리즘 판이 바뀌면 같은 설정이라도 옛 그림을 쓰면 안 된다.
+    assert tilecache.overlay_key([1], [2], (24, 4, 0)) != base

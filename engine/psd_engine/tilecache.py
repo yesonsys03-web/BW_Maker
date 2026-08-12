@@ -22,11 +22,13 @@ mtime이 키에 들어 있어 포토샵 재저장이면 자동으로 새 디렉�
 "흡수 금지"는 RPC 응답 얘기다; 여기서 던지면 캐시 없이는 멀쩡했을 렌더가 죽는다).
 """
 import hashlib
+import json
 import os
 import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
@@ -164,6 +166,94 @@ def store(session, layer_id, scale, entry):
         if fresh:
             # 청소는 새 판이 처음 생길 때만 — 쓰기마다 전체 스캔을 돌 이유가
             # 없고, 용량이 자라는 것은 새 디렉터리가 생길 때뿐이다.
+            _prune(keep=d)
+    except OSError:
+        pass
+
+
+#: 오버레이 캐시의 형식·알고리즘 판. 키에 들어간다 — 경계 검출이나 합성
+#: 알고리즘이 바뀌어 **같은 설정에서 다른 그림**이 나오게 되면 이 값을 올려야
+#: 한다. 안 올리면 옛 그림이 디스크에서 그대로 나와, 알고리즘을 고친 사람이
+#: "차이 없음"이라는 틀린 판정을 얻는다(rpc._PIXEL_SETTINGS의 colourMode 주석과
+#: 같은 종류의 함정).
+OVERLAY_FORMAT = 1
+
+
+def overlay_key(colour_ids, line_ids, settings_key):
+    """
+    뷰 하나의 오버레이 캐시 파일명 조각. 세션 RAM 캐시(rpc._cached_plan_overlays)와
+    같은 재료 — 뷰의 컬러/라인 레이어 id와 픽셀 설정 — 를 해시로 접은 것이다.
+    설정이 바뀌면 키가 갈려 자동으로 다시 계산된다.
+    """
+    raw = json.dumps(
+        [OVERLAY_FORMAT, list(colour_ids), list(line_ids), list(settings_key)],
+        separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _overlay_path(path, mtime, key):
+    return _file_dir(path, mtime) / f"o{key}.npz"
+
+
+def load_overlays(session, key):
+    """
+    디스크에서 뷰 하나의 오버레이 목록을 읽는다. 미스·손상·꺼짐이면 None.
+    빈 목록도 유효한 값이다 — "이 뷰는 그릴 것 없음"을 알아내는 데도 계산
+    한 번이 통째로 들므로, 그 결론도 기억해야 한다.
+    """
+    skey = _session_key(session)
+    if not ENABLED or skey is None:
+        return None
+    f = _overlay_path(skey[0], skey[1], key)
+    try:
+        with np.load(f) as z:
+            meta = json.loads(str(z["meta"]))
+            out = []
+            for i, m in enumerate(meta):
+                m["rgba"] = z[f"rgba_{i}"]
+                out.append(m)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        return None
+    try:
+        os.utime(f.parent)
+    except OSError:
+        pass
+    return out
+
+
+def store_overlays(session, key, plans):
+    """
+    plan_overlays 결과(뷰 하나 분)를 디스크에 떨군다. rgba는 npz 압축으로,
+    나머지 필드(lineIds/left/top)는 meta JSON으로 — 한 파일이라 쓰기가
+    원자적이다(타일과 같은 임시파일+os.replace).
+    """
+    skey = _session_key(session)
+    if not ENABLED or skey is None:
+        return
+    d = _file_dir(skey[0], skey[1])
+    try:
+        fresh = not d.is_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        meta = [{k: p[k] for k in p if k != "rgba"} for p in plans]
+        arrays = {f"rgba_{i}": p["rgba"] for i, p in enumerate(plans)}
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                np.savez_compressed(fh, meta=json.dumps(meta), **arrays)
+            os.replace(tmp, _overlay_path(skey[0], skey[1], key))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        if fresh:
             _prune(keep=d)
     except OSError:
         pass

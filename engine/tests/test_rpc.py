@@ -508,6 +508,37 @@ def test_render_preview_reuses_the_overlay_cache_for_a_repeat_render_with_the_sa
     assert len(calls) == 1, f"두 번째 렌더가 캐시를 쓰지 않고 다시 계산했다: {len(calls)}번 호출됨"
 
 
+def test_overlay_cache_survives_a_fresh_session_via_disk(tmp_path, monkeypatch):
+    # 오버레이(뷰당 실측 9~17초)는 세션 RAM 캐시에만 있어서, 세션이 밀려날
+    # 때마다(LRU 2칸이라 파일만 옮겨도) 같은 계산을 다시 했다 — 타일 캐시를
+    # 깔고 난 뒤 토글 "로딩"의 정체가 전부 이것이었다. 새 세션(새 엔진)이
+    # 계산 없이 디스크에서 같은 오버레이를 받아야 한다.
+    p = _two_view_psd(tmp_path)
+    engine = rpc.Engine(out=io.StringIO())
+    sid = engine.open_psd(str(p))["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT"
+    )
+    calls = _spy_on_plan_overlays(monkeypatch)
+    first = engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                                  edgeLines={"enabled": True})
+    assert len(calls) == 1
+
+    engine2 = rpc.Engine(out=io.StringIO())
+    sid2 = engine2.open_psd(str(p))["sessionId"]
+    second = engine2.render_preview(sid2, visibleLayerIds=[front_line_id],
+                                    edgeLines={"enabled": True})
+    assert len(calls) == 1, "새 세션이 디스크 캐시를 안 쓰고 오버레이를 다시 계산했다"
+    # 그림도 같아야 한다 — 캐시를 썼다는 것과 같은 그림이라는 것은 별개 주장이다.
+    import numpy as np
+    from PIL import Image
+    a = np.array(Image.open(first["pngPath"]))
+    b = np.array(Image.open(second["pngPath"]))
+    assert np.array_equal(a, b)
+
+
 def test_render_preview_recomputes_the_overlay_when_a_pixel_affecting_setting_changes(
     tmp_path, monkeypatch
 ):
@@ -629,9 +660,14 @@ def test_the_overlay_cache_evicts_the_oldest_entry_instead_of_growing_without_bo
 ):
     # 오버레이 한 장이 3.1 Mpx 뷰에서 12MB를 넘을 수 있다(컨트롤러 실측) —
     # 세션당 무한정 쌓이면 예전 레이어별 썸네일 캐시가 냈던 OOM을 그대로
-    # 반복한다. 설정을 상한 이상으로 바꿔가며 렌더하면 캐시 크기는 상한을
-    # 넘지 않아야 하고, 밀려난 항목은 다시 요청하면 새로 계산돼야 한다(그냥
-    # 상한에서 추가를 멈추는 구현과 구별하기 위함).
+    # 반복한다. 설정을 상한 이상으로 바꿔가며 렌더하면 캐시 크기(RAM)는 상한을
+    # 넘지 않아야 한다.
+    #
+    # 예전에는 "밀려난 항목은 다시 계산돼야 한다"도 함께 잠갔는데, 디스크
+    # 캐시(tilecache.store_overlays)가 그 전제를 일부러 뒤집었다: RAM에서
+    # 밀려나도 계산은 다시 하지 않고 디스크에서 돌아온다. 그래서 지금은
+    # 반대로 잠근다 — 밀려난 설정을 다시 요청해도 plan_overlays가 불리지
+    # 않아야 한다(불리면 디스크 층이 죽은 것이다).
     p = _two_view_psd(tmp_path)
     engine = rpc.Engine(out=io.StringIO())
     r = engine.open_psd(str(p))
@@ -654,11 +690,11 @@ def test_the_overlay_cache_evicts_the_oldest_entry_instead_of_growing_without_bo
     )
 
     calls_before = len(calls)
-    # 가장 먼저 넣은 설정(widths[0])은 상한에 밀려 캐시에서 빠졌어야 한다 —
-    # 다시 요청하면 캐시가 아니라 새로 계산돼야 한다.
+    # 가장 먼저 넣은 설정(widths[0])은 RAM 상한에 밀려 빠졌지만, 디스크에
+    # 남아 있으므로 다시 요청해도 계산 없이 돌아와야 한다.
     engine.render_preview(sid, visibleLayerIds=[front_line_id],
                           edgeLines={"enabled": True, "width": widths[0]})
-    assert len(calls) == calls_before + 1, "상한에 밀려났어야 할 설정이 여전히 캐시에 남아 있다"
+    assert len(calls) == calls_before, "RAM에서 밀려난 설정이 디스크 캐시 대신 재계산됐다"
 
 
 def test_a_render_whose_views_exceed_the_cache_cap_does_not_thrash(tmp_path, monkeypatch):

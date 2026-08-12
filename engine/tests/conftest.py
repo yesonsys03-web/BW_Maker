@@ -517,3 +517,18 @@ def blend_group_psd(tmp_path):
         ]),
     ], width=32, height=32)
     return str(p)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_tile_cache(tmp_path_factory, monkeypatch):
+    """
+    모든 테스트의 타일·오버레이 디스크 캐시를 임시 디렉터리로 격리한다.
+
+    실세션(rpc.Engine.open_psd)은 path+mtime이 있어 렌더가 tilecache에 쓰는데,
+    이 픽스처가 없으면 그 부산물이 개발자의 진짜 캐시(~/Library/Caches)에
+    쌓이고, 이전 실행이 남긴 캐시가 이번 테스트의 계산 횟수를 바꿔 판정을
+    흔든다. 테스트 파일이 자기 fixture로 다시 지정하는 경우(test_tilecache 등)는
+    그쪽이 이긴다.
+    """
+    monkeypatch.setenv("PSD_ENGINE_TILE_CACHE_DIR",
+                      str(tmp_path_factory.mktemp("tilecache")))

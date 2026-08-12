@@ -22,14 +22,28 @@ from . import tilecache
 
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
-#: 단계별 시간 계측. 켜면(PSD_ENGINE_PERF=1) JSON 한 줄씩 stderr로 낸다 —
-#: stdout은 RPC 채널이라 쓰면 안 된다. 기본은 꺼짐이고 동작에는 영향이 없다.
-PERF = os.environ.get("PSD_ENGINE_PERF", "") not in ("", "0")
+#: 단계별 시간 계측. PSD_ENGINE_PERF=1이면 JSON 한 줄씩 stderr로 낸다 —
+#: stdout은 RPC 채널이라 쓰면 안 된다. 값이 경로면(/로 시작) 그 파일에
+#: append한다: 앱이 띄운 엔진의 stderr는 Rust가 파이프로 삼켜 마지막 50줄만
+#: 남기므로(src-tauri/src/engine.rs), 실행 중인 앱을 계측할 때는 파일이
+#: 유일한 통로다. 기본은 꺼짐이고 동작에는 영향이 없다.
+PERF = os.environ.get("PSD_ENGINE_PERF", "")
+if PERF == "0":
+    PERF = ""
 
 
 def _perf(**kv):
-    if PERF:
-        print(json.dumps(kv), file=sys.stderr, flush=True)
+    if not PERF:
+        return
+    line = json.dumps(kv)
+    if PERF.startswith("/") or PERF.startswith("\\") or ":" in PERF[:3]:
+        try:
+            with open(PERF, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+        return
+    print(line, file=sys.stderr, flush=True)
 
 #: 병합 빠른 경로를 쓸지. 끄면 예전처럼 psd.composite 한 번으로 간다.
 #:
