@@ -794,3 +794,48 @@ def test_warm_preview_tiles_skips_a_leaf_predicted_too_slow(fixture_psd, monkeyp
     assert res["warmed"] == [], "상한 0인데도 디코드를 시작했다"
     assert res["remaining"] == []
     assert sorted(res["skipped"]) == sorted(leaf_ids)
+
+
+# ---- 미리보기 PNG 디스크 캐시 ----
+
+def test_render_preview_serves_the_same_request_from_disk(fixture_psd, tmp_path, monkeypatch):
+    # 같은 인자의 두 번째 호출은 합성 없이 디스크에서 온다 — 워커가 미리 구운
+    # 그림을 클릭이 그대로 받는 것과 같은 경로다. 합성 함수를 지뢰로 바꿔 잠근다.
+    monkeypatch.setenv("PSD_ENGINE_TILE_CACHE_DIR", str(tmp_path / "cache"))
+    from pathlib import Path
+
+    engine = rpc.Engine(out=io.StringIO())
+    sid = engine.open_psd(str(fixture_psd))["sessionId"]
+    first = engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=256)["pngPath"]
+    first_bytes = Path(first).read_bytes()
+
+    def boom(*a, **k):
+        raise AssertionError("같은 요청인데 합성이 다시 돌았다 — 캐시 키가 어긋난 것")
+
+    monkeypatch.setattr(rpc, "render_preview", boom)
+    second = engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=256)["pngPath"]
+    assert Path(second).read_bytes() == first_bytes
+    # 렌더 링이 지워도 되는 새 디렉터리의 사본으로 나온다 — 캐시 원본이 아니다.
+    assert second != first
+
+
+def test_render_preview_recomposes_when_any_input_changes(fixture_psd, tmp_path, monkeypatch):
+    monkeypatch.setenv("PSD_ENGINE_TILE_CACHE_DIR", str(tmp_path / "cache"))
+    engine = rpc.Engine(out=io.StringIO())
+    sid = engine.open_psd(str(fixture_psd))["sessionId"]
+    engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=256)
+
+    calls = []
+    real = rpc.render_preview
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(rpc, "render_preview", spy)
+    # 눈 하나를 끈 화면(다른 visible)은 다른 그림 — 캐시를 지나쳐 다시 합성한다.
+    engine.render_preview(sid, visibleLayerIds=[5], maxSize=256)
+    # 색 통일을 켠 것도 다른 그림이다.
+    engine.render_preview(sid, visibleLayerIds=[2, 5], maxSize=256,
+                          lineColor="#112233", lineColorIds=[5])
+    assert len(calls) == 2

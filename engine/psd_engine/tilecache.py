@@ -259,6 +259,88 @@ def store_overlays(session, key, plans):
         pass
 
 
+#: 미리보기 PNG 캐시의 형식·알고리즘 판. OVERLAY_FORMAT과 같은 규칙이다 —
+#: render_preview의 합성이 바뀌어 **같은 입력에서 다른 그림**이 나오게 되면
+#: 이 값을 올려야 한다. 안 올리면 옛 그림이 디스크에서 그대로 나온다.
+PREVIEW_FORMAT = 1
+
+
+def preview_key(material):
+    """
+    미리보기 PNG 하나의 캐시 파일명 조각. material은 rpc._preview_key_material이
+    만든, 그림을 정하는 입력 전부의 정규형이다 — 재료를 거기 한 곳에서만 만드는
+    이유는 렌더(rpc.render_preview)와 워커(warmworker)가 **같은 그림에 같은
+    키**를 만들어야 하기 때문이다. 둘이 각자 재료를 접으면 필드 하나 차이로
+    워커가 구운 그림을 렌더가 영영 못 찾는다.
+    """
+    raw = json.dumps([PREVIEW_FORMAT] + material, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _preview_path(path, mtime, key):
+    return _file_dir(path, mtime) / f"p{key}.png"
+
+
+def load_preview(session, key, dest):
+    """
+    캐시된 미리보기 PNG를 dest로 복사한다. 성공하면 dest, 미스·손상·꺼짐이면
+    None — 호출자는 합성으로 간다. 복사해서 주는 이유: 렌더 디렉터리는 링으로
+    청소되므로(rpc.RENDER_DIR_GENERATIONS) 캐시 원본을 그 자리에 노출하면
+    청소가 캐시를 지운다.
+    """
+    skey = _session_key(session)
+    if not ENABLED or skey is None:
+        return None
+    f = _preview_path(skey[0], skey[1], key)
+    try:
+        with Image.open(f) as img:
+            img.verify()  # 손상 PNG를 화면에 올리지 않는다 — 타일과 같은 강등
+        import shutil
+        shutil.copyfile(f, dest)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        return None
+    try:
+        os.utime(f.parent)
+    except OSError:
+        pass
+    return dest
+
+
+def store_preview(session, key, src):
+    """
+    render_preview가 렌더 디렉터리에 쓴 PNG를 캐시로 복사한다(임시파일 +
+    os.replace — 타일과 같은 원자성).
+    """
+    skey = _session_key(session)
+    if not ENABLED or skey is None:
+        return
+    d = _file_dir(skey[0], skey[1])
+    try:
+        fresh = not d.is_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh, open(src, "rb") as sf:
+                fh.write(sf.read())
+            os.replace(tmp, _preview_path(skey[0], skey[1], key))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        if fresh:
+            _prune(keep=d)
+    except OSError:
+        pass
+
+
 def _dir_size(d):
     total = 0
     for root, _dirs, files in os.walk(d):

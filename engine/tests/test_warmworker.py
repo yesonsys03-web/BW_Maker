@@ -106,3 +106,130 @@ def test_worker_counts_views_in_its_progress_total(tmp_path):
     plain = _run([json.dumps({"path": str(p)}) + "\n"])
     plain_done = [e for e in plain if e["event"] == "file"][0]
     assert done["total"] > plain_done["total"], "뷰 몫이 총량에 안 잡혔다"
+
+
+# ---- 프리셋 미리보기 미리 굽기 ----
+
+#: 프런트 BG 프리셋의 매칭 부분과 같은 모양(src/lib/presets.ts). 워커가 이걸
+#: 받아 "갓 적용한 화면"의 미리보기를 굽는다.
+_PRESET = {
+    "name": "BG",
+    "include": {"type": "contains", "value": "line", "caseSensitive": False},
+    "matchGroups": True,
+    "includeHidden": True,
+    "excludeGroupPrefixes": ["-"],
+    "lineColor": "#000000",
+    "edgeLines": {"enabled": False},
+}
+
+
+def _front_render_args(opened, matched):
+    """프런트가 프리셋을 갓 적용한 화면으로 render_preview에 보내는 인자를
+    그대로 재현한다 — appStore.applyPresetResult(정렬)와
+    preview.visibleIdsForPreview(문서 순서 픽셀 잎), previewCache.lineColorIdsFor,
+    engine.renderPreview(payload의 manualColourIds: [])의 합이다."""
+    included = sorted(matched)
+    included_set = set(included)
+    visible = []
+
+    def walk(nodes):
+        for n in nodes:
+            if n["kind"] == "group":
+                walk(n.get("children") or [])
+            elif n["kind"] == "pixel" and n["id"] in included_set:
+                visible.append(n["id"])
+
+    walk(opened["tree"])
+    matched_set = set(matched)
+    return {
+        "visibleLayerIds": visible,
+        "includedIds": included,
+        "lineColor": _PRESET["lineColor"],
+        "lineColorIds": [i for i in visible if i in matched_set],
+        "edgeLines": {**_PRESET["edgeLines"], "manualColourIds": []},
+    }
+
+
+def test_worker_prebakes_the_preset_preview_the_engine_then_reads(fixture_psd, monkeypatch):
+    # 핵심 주장: 워커가 프리셋으로 구운 미리보기 PNG를, 화면이 같은 프리셋을 갓
+    # 적용해 부르는 render_preview가 **합성 없이** 읽는다. 키 재료가 세 곳
+    # (프런트 파생 → RPC 인자, 워커의 _preset_preview_args, rpc._preview_key_material)
+    # 에서 같아야 성립하는 주장이라 통합으로 잠근다.
+    import psd_engine.rpc as rpc
+
+    _run([json.dumps({"path": str(fixture_psd), "presets": [_PRESET]}) + "\n"])
+
+    engine = rpc.Engine(out=io.StringIO())
+    opened = engine.open_psd(str(fixture_psd))
+    matched = engine.apply_preset(opened["sessionId"], _PRESET)["matchedLayerIds"]
+    args = _front_render_args(opened, matched)
+    assert args["visibleLayerIds"], "매칭이 비면 이 테스트는 아무것도 검증하지 않는다"
+
+    def boom(*a, **k):
+        raise AssertionError("합성이 다시 돌았다 — 워커가 구운 그림을 못 찾은 것")
+
+    monkeypatch.setattr(rpc, "render_preview", boom)
+    r = engine.render_preview(opened["sessionId"], maxSize=256, **args)
+    assert r["pngPath"]
+
+
+def test_worker_counts_preset_previews_in_its_progress_total(fixture_psd):
+    plain = _run([json.dumps({"path": str(fixture_psd)}) + "\n"])
+    with_presets = _run([
+        json.dumps({"path": str(fixture_psd), "presets": [_PRESET]}) + "\n"])
+    plain_total = [e for e in plain if e["event"] == "file"][0]["total"]
+    total = [e for e in with_presets if e["event"] == "file"][0]["total"]
+    progress = [e for e in with_presets if e["event"] == "progress"]
+    assert total == plain_total + 1  # 프리셋 하나 = 미리보기 한 장
+    assert len(progress) == total
+
+
+def test_worker_skips_presets_with_nothing_to_draw(fixture_psd):
+    # 매칭 0장 프리셋은 화면도 합성하지 않으므로 구울 것이 없다 — 총량에 안 잡힌다.
+    blank = {**_PRESET, "include": {"type": "contains", "value": "없는이름",
+                                    "caseSensitive": False}}
+    events = _run([json.dumps({"path": str(fixture_psd), "presets": [blank]}) + "\n"])
+    plain = _run([json.dumps({"path": str(fixture_psd)}) + "\n"])
+    assert [e for e in events if e["event"] == "file"][0]["total"] == \
+        [e for e in plain if e["event"] == "file"][0]["total"]
+
+
+def test_worker_prebakes_the_char_preset_preview_with_edge_lines(tmp_path, monkeypatch):
+    # CHAR 프리셋(경계선 켜짐) 판. 히트면 오버레이 계획(plan_overlays, 뷰당
+    # 9~36초)조차 돌지 않아야 한다 — 캐시 확인이 뷰 계산보다 먼저다.
+    import psd_engine.rpc as rpc
+    from test_rpc import _two_view_psd
+
+    char = {**_PRESET, "name": "CHAR", "edgeLines": {"enabled": True}}
+    p = _two_view_psd(tmp_path)
+    _run([json.dumps({"path": str(p), "presets": [char]}) + "\n"])
+
+    engine = rpc.Engine(out=io.StringIO())
+    opened = engine.open_psd(str(p))
+    matched = engine.apply_preset(opened["sessionId"], char)["matchedLayerIds"]
+    included = sorted(matched)
+    included_set, matched_set = set(included), set(matched)
+    visible = []
+
+    def walk(nodes):
+        for n in nodes:
+            if n["kind"] == "group":
+                walk(n.get("children") or [])
+            elif n["kind"] == "pixel" and n["id"] in included_set:
+                visible.append(n["id"])
+
+    walk(opened["tree"])
+    assert len(visible) == 2  # FRONT/BACK의 LINES 둘
+
+    def boom(*a, **k):
+        raise AssertionError("캐시 히트여야 하는데 합성/오버레이 계산이 돌았다")
+
+    monkeypatch.setattr(rpc, "render_preview", boom)
+    monkeypatch.setattr(rpc, "plan_overlays", boom)
+    r = engine.render_preview(
+        opened["sessionId"], visibleLayerIds=visible, maxSize=256,
+        lineColor=char["lineColor"],
+        lineColorIds=[i for i in visible if i in matched_set],
+        edgeLines={"enabled": True, "manualColourIds": []},
+        includedIds=included)
+    assert r["pngPath"]

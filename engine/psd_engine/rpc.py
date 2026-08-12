@@ -144,6 +144,118 @@ def _cached_plan_overlays(session, views, opts):
     return plans
 
 
+def _preview_key_material(visible_ids, max_size, line_color, line_color_ids,
+                          edge_lines, included_ids):
+    """
+    미리보기 PNG 디스크 캐시 키의 재료 — render_preview_cached가 그림을 만들 때
+    실제로 읽는 입력 전부의 정규형이다. 여기 없는 값이 그림을 바꾸게 되면 그
+    값을 반드시 추가해야 한다(빠뜨리면 다른 그림이 같은 키로 재사용된다 —
+    tilecache._PIXEL_SETTINGS의 colourMode 사고와 같은 종류다).
+
+    **정규화 규칙.** 집합으로만 읽히는 목록은 정렬한다 — line_color_ids는
+    render.render_preview가 set()으로, included_ids는 character.manual_views가
+    멤버십으로만 쓴다. 반대로 visible_ids는 합성 순서 그 자체라, manualColourIds는
+    뷰 순서(오버레이가 얹히는 순서)라 순서를 보존한다. 경계선이 꺼져 있으면
+    엣지 쪽 입력은 통째로 "off"다 — 엔진이 그 값들을 아예 읽지 않으므로 키에
+    실으면 무관한 변경에 캐시만 버려진다(previewCache.ts의 edgeLinesKey와 같은
+    판단).
+
+    프런트(src/lib/previewCache.ts previewRenderSpec)가 보내는 값과
+    워커(warmworker._preset_preview_args)가 만드는 값이 이 함수 위에서 같은
+    키로 접혀야 워커가 구운 그림을 클릭이 찾는다 — 세 곳 중 하나를 바꾸면
+    나머지 둘을 같이 봐야 한다.
+    """
+    if edge_lines and edge_lines.get("enabled"):
+        opts = {**EDGE_DEFAULTS, **edge_lines}
+        edge = [list(_edge_settings_key(opts)),
+                list(edge_lines.get("manualColourIds") or []),
+                sorted(included_ids) if included_ids is not None else None]
+    else:
+        edge = "off"
+    return [int(max_size), list(visible_ids), line_color,
+            sorted(line_color_ids) if line_color_ids is not None else None,
+            edge]
+
+
+def render_preview_cached(session, out_dir, visible_ids, max_size=1500,
+                          line_color=None, line_color_ids=None,
+                          edge_lines=None, included_ids=None):
+    """
+    render_preview 본체 + 디스크 캐시. Engine.render_preview(사용자 렌더)와
+    warmworker(전체 캐시 워커의 미리 굽기)가 함께 쓴다 — 같은 함수여야 두
+    경로가 같은 그림·같은 키를 만든다.
+
+    히트면 합성 없이 캐시 PNG를 out_dir로 복사해 돌려준다. 미스면 예전 그대로
+    합성하고, 부산물을 캐시에 떨궈 다음 같은 요청(재시작·세션 축출 뒤 포함)이
+    디코드·합성 없이 끝나게 한다 — 타일 캐시(_preview_tile)와 같은 구조를
+    그림 한 장 단위로 반복한 것이다.
+    """
+    key = tilecache.preview_key(_preview_key_material(
+        visible_ids, max_size, line_color, line_color_ids,
+        edge_lines, included_ids))
+    t0 = time.perf_counter()
+    hit = tilecache.load_preview(session, key,
+                                 str(Path(out_dir) / "preview.png"))
+    if hit is not None:
+        _perf(perf="preview_disk", s=round(time.perf_counter() - t0, 4))
+        return hit
+    overlay_s = 0.0
+    overlays = None
+    if edge_lines and edge_lines.get("enabled"):
+        opts = {**EDGE_DEFAULTS, **edge_lines}
+        visible = set(visible_ids)
+        # 수동은 자동에 **보탠다**(설계 3.1). 자동 결과를 지우지 않는다.
+        #
+        # manual_views의 included_ids는 "내보내기에 이미 포함된 라인"을
+        # 뜻한다(character.manual_views 참고) — export_psd는 실제 includedIds를
+        # 준다. render_preview도 이제 같은 것을 includedIds로 받는다
+        # (src/lib/engine.ts의 renderPreview → PreviewCanvas/App.tsx의
+        # ops.includedIds가 그대로 여기까지 온다).
+        #
+        # 이걸 visible_ids(체크 ∩ 눈, 솔로 중이면 솔로 목록)로 대신하면
+        # 안 된다 — 체크는 됐지만 눈으로만 숨긴 라인이 "빠진" 것으로 보여,
+        # 이 앱 다른 곳에서는 눈이 무엇이 그려지는지만 바꾸는데(export_psd는
+        # 눈을 아예 안 본다) 여기서만 계산 자체가 눈에 따라 달라지는 예외가
+        # 생긴다. 반대로 그 버그를 피하려고 세션의 모든 레이어 id를 넘기면
+        # (전 버전이 그랬다) 교집합이 사실상 무력화돼, 아티스트가 체크를
+        # 해제해 실제로는 내보내기에 없는 라인까지 "이미 있다"고 보아 획을
+        # 덜 그린다 — 미리보기가 내보내기보다 획이 적어 보이는 정확히 그
+        # 라인이 지워진다.
+        #
+        # includedIds가 있으면 그것을 그대로 쓴다. 없는 옛 호출(직접
+        # render_preview를 부르는 기존 테스트 등)은 이전처럼 세션의 모든
+        # 레이어 id로 근사한다 — 하위 호환을 위한 기본값일 뿐, 새 호출은
+        # 전부 진짜 목록을 넘긴다.
+        #
+        # visible_ids(위 visible)는 이 계산에 관여하지 않는다 — 그건
+        # 무엇이 그려지는지(눈 포함)를 정하고, includedIds는 무엇이 "이미
+        # 있는 라인"인지를 정한다. 서로 다른 질문이라 한 값으로 합치면
+        # 안 된다.
+        included = included_ids if included_ids is not None \
+            else session["layers_by_id"].keys()
+        views = find_views(session) + manual_views(
+            session, edge_lines.get("manualColourIds") or [], included)
+        # render.render_preview가 그리기 직전에 이미 하는 lineIds & visible
+        # 필터를 여기로 앞당긴다. plan_overlays 하나가 뷰당 0.9~11.6초라
+        # (설계 9절) 다섯 뷰 모델에서 하나만 솔로해도 나머지 넷을 합성해
+        # 버리고 버리는 낭비가 있었다 — 요청이 stdin 큐에서 순차 처리되므로
+        # 그 낭비가 뒤에 온 다른 요청까지 물고 늘어진다. 그리기 시점 필터는
+        # 그대로 둔다 — 호출자가 잊을 수 없는 안전망이다.
+        views = [v for v in views if set(v["lineIds"]) & visible]
+        t_overlay = time.perf_counter()
+        overlays = _cached_plan_overlays(session, views, opts)
+        overlay_s = time.perf_counter() - t_overlay
+    png_path = render_preview(session, visible_ids, max_size, out_dir,
+                              line_color=line_color,
+                              line_color_ids=line_color_ids,
+                              edge_overlays=overlays)
+    tilecache.store_preview(session, key, png_path)
+    _perf(perf="rpc.render_preview", n=len(visible_ids),
+          overlay_plan_s=round(overlay_s, 4),
+          total_s=round(time.perf_counter() - t0, 4))
+    return png_path
+
+
 def _emit(obj, out):
     out.write(json.dumps(obj) + "\n")
     out.flush()
@@ -250,61 +362,15 @@ class Engine:
 
     def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None,
                        lineColorIds=None, edgeLines=None, includedIds=None):
-        t_start = time.perf_counter()
-        overlay_s = 0.0
+        # 본체는 모듈 함수에 있다 — 전체 캐시 워커(warmworker)가 같은 함수로
+        # 같은 그림을 미리 구워 두므로, 여기가 디스크 히트로 끝나는 것이
+        # "전체 캐시 완료 = 어떤 파일이든 즉시"의 미리보기 쪽 절반이다.
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
-        overlays = None
-        if edgeLines and edgeLines.get("enabled"):
-            opts = {**EDGE_DEFAULTS, **edgeLines}
-            visible = set(visibleLayerIds)
-            # 수동은 자동에 **보탠다**(설계 3.1). 자동 결과를 지우지 않는다.
-            #
-            # manual_views의 included_ids는 "내보내기에 이미 포함된 라인"을
-            # 뜻한다(character.manual_views 참고) — export_psd는 실제 includedIds를
-            # 준다. render_preview도 이제 같은 것을 includedIds로 받는다
-            # (src/lib/engine.ts의 renderPreview → PreviewCanvas/App.tsx의
-            # ops.includedIds가 그대로 여기까지 온다).
-            #
-            # 이걸 visibleLayerIds(체크 ∩ 눈, 솔로 중이면 솔로 목록)로 대신하면
-            # 안 된다 — 체크는 됐지만 눈으로만 숨긴 라인이 "빠진" 것으로 보여,
-            # 이 앱 다른 곳에서는 눈이 무엇이 그려지는지만 바꾸는데(export_psd는
-            # 눈을 아예 안 본다) 여기서만 계산 자체가 눈에 따라 달라지는 예외가
-            # 생긴다. 반대로 그 버그를 피하려고 세션의 모든 레이어 id를 넘기면
-            # (전 버전이 그랬다) 교집합이 사실상 무력화돼, 아티스트가 체크를
-            # 해제해 실제로는 내보내기에 없는 라인까지 "이미 있다"고 보아 획을
-            # 덜 그린다 — 미리보기가 내보내기보다 획이 적어 보이는 정확히 그
-            # 라인이 지워진다.
-            #
-            # includedIds가 있으면 그것을 그대로 쓴다. 없는 옛 호출(직접
-            # render_preview를 부르는 기존 테스트 등)은 이전처럼 세션의 모든
-            # 레이어 id로 근사한다 — 하위 호환을 위한 기본값일 뿐, 새 호출은
-            # 전부 진짜 목록을 넘긴다.
-            #
-            # visibleLayerIds(위 visible)는 이 계산에 관여하지 않는다 — 그건
-            # 무엇이 그려지는지(눈 포함)를 정하고, includedIds는 무엇이 "이미
-            # 있는 라인"인지를 정한다. 서로 다른 질문이라 한 값으로 합치면
-            # 안 된다.
-            included = includedIds if includedIds is not None else s["layers_by_id"].keys()
-            views = find_views(s) + manual_views(
-                s, edgeLines.get("manualColourIds") or [], included)
-            # render.render_preview가 그리기 직전에 이미 하는 lineIds & visible
-            # 필터를 여기로 앞당긴다. plan_overlays 하나가 뷰당 0.9~11.6초라
-            # (설계 9절) 다섯 뷰 모델에서 하나만 솔로해도 나머지 넷을 합성해
-            # 버리고 버리는 낭비가 있었다 — 요청이 stdin 큐에서 순차 처리되므로
-            # 그 낭비가 뒤에 온 다른 요청까지 물고 늘어진다. 그리기 시점 필터는
-            # 그대로 둔다 — 호출자가 잊을 수 없는 안전망이다.
-            views = [v for v in views if set(v["lineIds"]) & visible]
-            t_overlay = time.perf_counter()
-            overlays = _cached_plan_overlays(s, views, opts)
-            overlay_s = time.perf_counter() - t_overlay
-        png_path = render_preview(s, visibleLayerIds, maxSize, out_dir,
-                                  line_color=lineColor,
-                                  line_color_ids=lineColorIds,
-                                  edge_overlays=overlays)
-        _perf(perf="rpc.render_preview", n=len(visibleLayerIds),
-              overlay_plan_s=round(overlay_s, 4),
-              total_s=round(time.perf_counter() - t_start, 4))
+        png_path = render_preview_cached(
+            s, out_dir, visibleLayerIds, maxSize, line_color=lineColor,
+            line_color_ids=lineColorIds, edge_lines=edgeLines,
+            included_ids=includedIds)
         return {"pngPath": png_path}
 
     # 이 둘은 세션이 아니라 트리를 받는다. 이름만 보고 묶는 계산이라 픽셀도 PSD도

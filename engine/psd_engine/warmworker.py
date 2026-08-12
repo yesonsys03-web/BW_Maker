@@ -10,25 +10,100 @@
 (tilecache.store), 같은 타일을 두 번 쓰면 같은 내용이 두 번 놓일 뿐이다.
 
 프로토콜은 메인 엔진과 같은 줄 단위 JSON이다.
-  stdin  : {"path": "<PSD 경로>"} 한 줄에 하나. EOF면 끝낸다.
+  stdin  : {"path": "<PSD 경로>", "edgeLines"?, "presets"?} 한 줄에 하나. EOF면 끝낸다.
   stdout : {"event": "ready"}                                  기동 직후 한 번
-           {"event": "progress", "path", "done", "total"}      드로잉 레이어 하나마다
+           {"event": "progress", "path", "done", "total"}      단위 작업 하나마다
            {"event": "file", "path", "ok": true, "total"}      파일 완료
            {"event": "file", "path", "ok": false, "message"}   파일 실패(다음 줄 계속)
 
-진행을 드로잉 레이어 한 장마다 알리는 것은 낭비가 아니다 — 진행이 안 보이면
+`presets`는 앱의 프리셋 목록(BG·CHAR가 기본)이다. 있으면 타일·오버레이에 더해
+**프리셋마다 "갓 적용한 화면"의 미리보기 PNG까지** 디스크 캐시에 미리 굽는다 —
+타일이 다 있어도 클릭 순간의 미리보기 합성(타일 수백 장 + PNG 인코딩, 실측
+최악 41초)은 남아 있었고, 그것까지 치러야 "전체 캐시 완료 = 어떤 파일이든,
+어느 프리셋이든 즉시"가 참이 된다. `edgeLines`는 presets 이전의 프로토콜로,
+오버레이 워밍업만 한다 — presets가 있으면 무시된다.
+
+진행을 단위 작업 하나마다 알리는 것은 낭비가 아니다 — 진행이 안 보이면
 사용자는 멈췄다고 보고 아무거나 누른다. 파일 실패는 그 파일만 접고 다음 줄을
 기다린다: 한 장이 깨졌다고 폴더 전체 캐시가 끊기면 안 된다.
 """
 import json
 import os
+import shutil
 import sys
+import tempfile
 
 from psd_tools import PSDImage
 from psd_tools.constants import ColorMode
 
+from .matching import match_preset
 from .render import _preview_tile, preview_scale
 from .tree import build_tree
+
+
+def _pixel_leaf_ids(nodes, included=None, initial=False):
+    """
+    문서 순서의 픽셀 잎 id. included가 있으면 그 안의 것만, initial이면
+    자기 visible 플래그가 켜진 것만(파일을 연 직후 보이는 잎 — isDocumentView의
+    initial과 같은 뜻).
+
+    프런트 visibleIdsForPreview(src/lib/preview.ts)와 같은 걷기·같은 순서여야
+    한다 — 이 목록이 미리보기 캐시 키(rpc._preview_key_material)에 순서째
+    들어가므로, 순서가 다르면 같은 그림에 다른 키가 붙는다.
+    """
+    out = []
+    for node in nodes:
+        if node["kind"] == "group":
+            out.extend(_pixel_leaf_ids(node.get("children") or [],
+                                       included, initial))
+        elif node["kind"] == "pixel":
+            if included is not None and node["id"] not in included:
+                continue
+            if initial and not node["visible"]:
+                continue
+            out.append(node["id"])
+    return out
+
+
+def _preset_preview_args(tree, preset):
+    """
+    "이 프리셋을 갓 적용한 화면"이 render_preview에 보낼 인자와 **정확히 같은**
+    값. 미리 구울 것이 없으면 None.
+
+    프런트의 세 계산을 그대로 옮긴 것이라 그쪽이 바뀌면 여기도 같이 봐야 한다.
+      - includedIds: applyPresetResult(src/state/appStore.tsx)가 매칭 결과를
+        숫자 오름차순으로 정렬해 넣는다.
+      - visibleIds: visibleIdsForPreview(src/lib/preview.ts) — 눈·솔로가 없는
+        갓 적용 상태이므로 "포함된 픽셀 잎, 문서 순서"다.
+      - lineColorIds: lineColorIdsFor(src/lib/previewCache.ts) — visibleIds 중
+        매칭에 걸린 것.
+    edgeLines의 manualColourIds는 빈 목록이다 — 수동 지정은 파일별 작업 상태라
+    갓 적용 상태에는 없다(engine.ts renderPreview가 payload를 만드는 방식과
+    같다). 수동 지정·눈·솔로가 있는 화면은 키가 달라 캐시를 그냥 지나친다 —
+    그런 화면은 예전처럼 그 자리에서 합성한다.
+
+    None이 되는 두 경우도 프런트를 따른다: 그릴 것이 없으면(매칭 0장) 화면도
+    합성하지 않고, 매칭이 "파일을 연 직후 보이는 전부"와 같으면 화면은
+    render_document_preview(저장된 병합 이미지, 즉시)로 가므로 구울 것이 없다.
+    """
+    matched, _skipped = match_preset(tree, preset)
+    matched_set = set(matched)
+    visible = _pixel_leaf_ids(tree, matched_set)
+    if not visible:
+        return None
+    initial = _pixel_leaf_ids(tree, initial=True)
+    if len(initial) == len(visible) and set(initial) == set(visible):
+        return None
+    edge = preset.get("edgeLines")
+    line_color = preset.get("lineColor")
+    return {
+        "visible": visible,
+        "included": sorted(matched),
+        "lineColor": line_color,
+        "lineColorIds": None if line_color is None
+            else [i for i in visible if i in matched_set],
+        "edgeLines": {**edge, "manualColourIds": []} if edge else None,
+    }
 
 
 def _emit(obj, out):
@@ -36,20 +111,27 @@ def _emit(obj, out):
     out.flush()
 
 
-def warm_file(path, max_size, out, edge_lines=None):
+def warm_file(path, max_size, out, edge_lines=None, presets=None):
     """
-    파일 하나의 모든 드로잉 레이어 타일을, 그리고 경계선이 켜져 있으면 각 뷰의
-    오버레이까지 디스크에 쌓는다. "전체 캐시 완료"가 "어떤 파일을 눌러도 즉시"를
-    뜻하려면 오버레이(뷰당 실측 9~36초)까지 미리 치러야 한다 — 타일만 쌓으면
-    파일마다 첫 경계선 렌더가 그 비용을 그 자리에서 낸다.
+    파일 하나의 모든 드로잉 레이어 타일을, 경계선이 켜진 설정이 있으면 각 뷰의
+    오버레이까지, 그리고 presets가 오면 **프리셋마다 갓 적용한 화면의 미리보기
+    PNG까지** 디스크에 쌓는다. "전체 캐시 완료"가 "어떤 파일을 눌러도 즉시"를
+    뜻하려면 오버레이(뷰당 실측 9~36초)와 클릭 순간의 미리보기 합성까지 미리
+    치러야 한다 — 타일만 쌓으면 파일마다 첫 렌더가 그 비용을 그 자리에서 낸다.
+
+    경계선 설정은 presets가 있으면 거기서 뽑는다(켜진 edgeLines, 픽셀 설정이
+    같은 것은 한 번 — BG는 꺼져 있어 CHAR 하나만 남는 것이 기본이다). presets가
+    없으면 예전 프로토콜대로 edge_lines 하나다.
 
     뷰는 자동 검출(find_views)만 다룬다. 수동 지정 뷰는 앱의 작업 상태라 워커가
-    모르고, 그런 파일은 드물어서 첫 렌더 한 번을 그냥 치른다.
+    모르고, 그런 파일은 드물어서 첫 렌더 한 번을 그냥 치른다. 미리보기도 같은
+    이유로 갓 적용 상태만 굽는다 — 눈·솔로·수동 지정이 낀 화면은 키가 달라
+    캐시를 지나치고, 그 자리에서 합성한다(_preset_preview_args 참고).
     """
     from . import tilecache
     from .character import find_views
     from .edges import EDGE_DEFAULTS, plan_overlays
-    from .rpc import _edge_settings_key
+    from .rpc import _edge_settings_key, render_preview_cached
 
     mtime = os.path.getmtime(path)
     psd = PSDImage.open(path)
@@ -59,17 +141,27 @@ def warm_file(path, max_size, out, edge_lines=None):
         raise ValueError(f"unsupported color mode: {psd.color_mode!r} (RGB only)")
     built = build_tree(psd)
     session = {"psd": psd, "path": str(path), "mtime": mtime,
-               "layers_by_id": built["layers_by_id"]}
+               "tree": built["tree"], "layers_by_id": built["layers_by_id"]}
     scale = preview_scale(psd, max_size)
     leaves = [lid for lid, layer in built["layers_by_id"].items()
               if not layer.is_group()]
-    views, opts = [], None
-    if edge_lines and edge_lines.get("enabled"):
-        views = find_views(session)
-        # 키가 렌더 경로(rpc._cached_plan_overlays)와 비트까지 같아야 한다 —
-        # 그래서 병합도 키 추출도 그쪽 코드를 그대로 쓴다.
-        opts = {**EDGE_DEFAULTS, **edge_lines}
-    total = len(leaves) + len(views)
+    # 키가 렌더 경로(rpc._cached_plan_overlays)와 비트까지 같아야 한다 —
+    # 그래서 병합도 키 추출도 그쪽 코드를 그대로 쓴다.
+    variants, seen = [], set()
+    for e in ([p.get("edgeLines") for p in presets] if presets
+              else [edge_lines]):
+        if not (e and e.get("enabled")):
+            continue
+        opts = {**EDGE_DEFAULTS, **e}
+        skey = _edge_settings_key(opts)
+        if skey not in seen:
+            seen.add(skey)
+            variants.append(opts)
+    views = find_views(session) if variants else []
+    previews = [args for p in (presets or [])
+                for args in [_preset_preview_args(built["tree"], p)]
+                if args is not None]
+    total = len(leaves) + len(views) * len(variants) + len(previews)
     done = 0
     for lid in leaves:
         # _preview_tile이 디스크 우선 → 디코드 → 디스크 저장까지 다 한다.
@@ -79,7 +171,7 @@ def warm_file(path, max_size, out, edge_lines=None):
         done += 1
         _emit({"event": "progress", "path": path, "done": done, "total": total},
               out)
-    if views:
+    for opts in variants:
         skey = _edge_settings_key(opts)
         for view in views:
             vkey = tilecache.overlay_key(view["colourIds"], view["lineIds"], skey)
@@ -89,6 +181,24 @@ def warm_file(path, max_size, out, edge_lines=None):
             done += 1
             _emit({"event": "progress", "path": path, "done": done,
                    "total": total}, out)
+    if previews:
+        # render_preview_cached가 out_dir에 PNG를 쓰고 캐시로 복사한다 —
+        # 남는 사본은 파일이 끝나면 통째로 버린다(메인 엔진의 렌더 링과 달리
+        # 여기 PNG는 아무도 다시 읽지 않는다).
+        out_dir = tempfile.mkdtemp(prefix="warm_preview_")
+        try:
+            for args in previews:
+                render_preview_cached(
+                    session, out_dir, args["visible"], max_size,
+                    line_color=args["lineColor"],
+                    line_color_ids=args["lineColorIds"],
+                    edge_lines=args["edgeLines"],
+                    included_ids=args["included"])
+                done += 1
+                _emit({"event": "progress", "path": path, "done": done,
+                       "total": total}, out)
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
     return total
 
 
@@ -124,7 +234,8 @@ def main(stdin=None, stdout=None, max_size=1500):
         path = msg["path"]
         try:
             mtime = os.path.getmtime(path)
-            total = warm_file(path, max_size, stdout, msg.get("edgeLines"))
+            total = warm_file(path, max_size, stdout, msg.get("edgeLines"),
+                              msg.get("presets"))
             # mtime을 실어 보낸다 — 프런트는 앱에서 아직 안 연 파일도 워커에
             # 맡기므로, "이 판을 쓸었다"는 기록(path+mtime)의 mtime을 워커가
             # 재서 알려 줘야 한다.

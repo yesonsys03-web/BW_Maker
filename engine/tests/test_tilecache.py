@@ -179,3 +179,55 @@ def test_overlay_key_varies_with_settings_and_format(monkeypatch):
     monkeypatch.setattr(tilecache, "OVERLAY_FORMAT", 2)
     # 알고리즘 판이 바뀌면 같은 설정이라도 옛 그림을 쓰면 안 된다.
     assert tilecache.overlay_key([1], [2], (24, 4, 0)) != base
+
+
+# ---- 미리보기 PNG 캐시 ----
+
+def _png(tmp_path, name, value=90):
+    p = tmp_path / name
+    Image.new("RGBA", (8, 6), (value, value, value, 255)).save(p)
+    return p
+
+
+def test_preview_roundtrip_copies_the_same_bytes(fixture_psd, tmp_path):
+    s = _session(fixture_psd)
+    src = _png(tmp_path, "src.png")
+    key = tilecache.preview_key([256, [1, 2], None, None, "off"])
+    tilecache.store_preview(s, key, src)
+    dest = tmp_path / "out" ; dest.mkdir()
+    got = tilecache.load_preview(s, key, str(dest / "preview.png"))
+    assert got == str(dest / "preview.png")
+    assert (dest / "preview.png").read_bytes() == src.read_bytes()
+
+
+def test_preview_miss_and_corruption_degrade_to_none(fixture_psd, tmp_path, cache_dir):
+    s = _session(fixture_psd)
+    key = tilecache.preview_key([256, [1], None, None, "off"])
+    assert tilecache.load_preview(s, key, str(tmp_path / "a.png")) is None
+    # 손상 파일은 지우고 미스로 강등한다 — 화면에 깨진 그림을 올리지 않는다.
+    tilecache.store_preview(s, key, _png(tmp_path, "ok.png"))
+    broken = next(cache_dir.rglob("p*.png"))
+    broken.write_bytes(b"not a png")
+    assert tilecache.load_preview(s, key, str(tmp_path / "b.png")) is None
+    assert not broken.exists()
+
+
+def test_preview_key_changes_with_any_input(fixture_psd):
+    base = [256, [1, 2], "#000000", [1], "off"]
+    variants = [
+        [512, [1, 2], "#000000", [1], "off"],          # 배율
+        [256, [2, 1], "#000000", [1], "off"],          # 합성 순서
+        [256, [1, 2], None, [1], "off"],               # 색 통일
+        [256, [1, 2], "#000000", [2], "off"],          # 색 통일 대상
+        [256, [1, 2], "#000000", [1], [["a"], [], []]],  # 경계선 설정
+    ]
+    keys = {tilecache.preview_key(m) for m in [base] + variants}
+    assert len(keys) == len(variants) + 1
+
+
+def test_preview_cache_disabled_is_a_clean_miss(fixture_psd, tmp_path, monkeypatch):
+    monkeypatch.setattr(tilecache, "ENABLED", False)
+    s = _session(fixture_psd)
+    key = tilecache.preview_key([256, [1], None, None, "off"])
+    tilecache.store_preview(s, key, _png(tmp_path, "src.png"))
+    assert tilecache.load_preview(s, key, str(tmp_path / "o.png")) is None

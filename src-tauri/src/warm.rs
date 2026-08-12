@@ -99,7 +99,7 @@ pub fn warm_workers_start(
     Ok(json!({ "generation": generation, "ids": ids }))
 }
 
-/// 워커 하나에 파일 하나를 먹인다. edge_lines(경계선 설정)는 그대로 전달만
+/// 워커 하나에 파일 하나를 먹인다. presets(프리셋 목록)는 그대로 전달만
 /// 한다 — 뜻은 엔진(warmworker.py)이 안다. 워커가 이미 죽었으면 에러 —
 /// 프런트는 그 파일을 다른 워커에 다시 준다.
 #[tauri::command]
@@ -107,11 +107,11 @@ pub fn warm_worker_send(
     state: State<'_, WarmState>,
     id: u32,
     path: String,
-    edge_lines: Option<serde_json::Value>,
+    presets: Option<serde_json::Value>,
 ) -> Result<(), String> {
     let mut workers = state.workers.lock().unwrap();
     let proc = workers.get_mut(&id).ok_or("no such worker")?;
-    let line = json!({ "path": path, "edgeLines": edge_lines }).to_string();
+    let line = json!({ "path": path, "presets": presets }).to_string();
     writeln!(proc.stdin, "{line}")
         .and_then(|_| proc.stdin.flush())
         .map_err(|e| format!("worker write failed: {e}"))

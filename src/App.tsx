@@ -30,7 +30,7 @@ import {
   parseTreePanelWidth,
 } from "./lib/layout";
 import { drainLoadQueue } from "./lib/loadQueue";
-import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY } from "./lib/presets";
+import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY, loadPresets } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError } from "./lib/preview";
 import { PreviewCache, needsPrefetch, previewRenderSpec } from "./lib/previewCache";
 import { openFailureReport, type FailedOpen } from "./lib/openReport";
@@ -1403,16 +1403,28 @@ function AppShell() {
     const estimated = targets.reduce(
       (n, f) => n + (f.tree ? pixelLeafIds(f.tree).length : 0), 0);
     setWarmProgress({ done: 0, total: estimated });
-    // 경계선 설정도 함께 보낸다 — 워커가 각 파일의 뷰 오버레이(뷰당 9~36초)까지
-    // 미리 계산해 디스크에 쌓아야, "전체 캐시 완료 = 어떤 파일이든 즉시"가
-    // 경계선 켠 상태에서도 참이 된다. 현재 프리셋의 설정을 그대로 쓴다(렌더가
-    // 쓰는 캐시 키의 재료와 같아야 하므로).
-    const edgeLines = presetRef.current?.edgeLines ?? null;
+    // 프리셋 목록을 함께 보낸다 — 워커가 각 파일의 뷰 오버레이(뷰당 9~36초)와
+    // 프리셋마다 갓 적용한 화면의 미리보기 PNG까지 미리 구워 디스크에 쌓아야,
+    // "전체 캐시 완료 = 어떤 파일이든 즉시"가 BG·CHAR 어느 프리셋을 골라도
+    // 참이 된다. 목록은 PresetBar와 같은 원본(presets.json)에서 읽고, 지금
+    // 선택이 프로젝트에서 올라온 판(목록에 없는 편집본)이면 그것도 보탠다 —
+    // 화면이 실제로 렌더할 설정이 빠지면 그 파일들만 캐시가 안 듣는다. 읽기
+    // 실패는 선택된 프리셋 하나로 강등한다(스윕이 프리셋 파일 문제로 서면 안
+    // 된다 — 미리보기만 못 굽고 타일·오버레이는 그대로 쌓인다).
+    const presetsPromise = loadPresets()
+      .catch(() => [] as Preset[])
+      .then((list) => {
+        const cur = presetRef.current;
+        if (cur && !list.some((p) => JSON.stringify(p) === JSON.stringify(cur))) {
+          list.push(cur);
+        }
+        return list;
+      });
     const handle = runWorkerSweep({
       paths: targets.map((f) => f.path),
       workerCount: cacheWorkers,
       start: (count) => warmWorkersStart(count, PREVIEW_MAX_SIZE),
-      send: (id, path) => warmWorkerSend(id, path, edgeLines),
+      send: async (id, path) => warmWorkerSend(id, path, await presetsPromise),
       stop: warmWorkersStop,
       onLine: onWarmWorkerLine,
       onExit: onWarmWorkerExit,
