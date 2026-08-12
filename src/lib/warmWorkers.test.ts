@@ -148,3 +148,79 @@ test("events from a stale generation are ignored", async () => {
   const result = await run.finished;
   expect(result).toEqual({ done: [{ path: "a" }], failed: [] });
 });
+
+// ---- v0.2.7 침묵 멈춤의 회귀 잠금 ----
+// 디스패치의 어느 단계가 실패해도 스윕은 "사유를 실은 실패"로 끝나야 한다.
+// 예전에는 send 실패가 조용히 큐로 되돌아가고, start/구독 실패는 unhandled
+// rejection으로 증발해, 진행바가 0에서 영원히 멈춘 채 아무 카드도 없었다.
+
+test("every send failing settles the sweep with the reason, not a silent stall", async () => {
+  const h = harness(["a", "b", "c"], 2);
+  h.deps.send = async () => {
+    throw new Error("no such worker");
+  };
+  const run = runWorkerSweep(h.deps);
+  const result = await run.finished;
+  expect(result).not.toBeNull();
+  expect(result!.done).toEqual([]);
+  // 남은 파일 전부가 같은 사유로 실패에 적힌다.
+  expect(result!.failed.length).toBe(3);
+  expect(result!.failed[0].message).toContain("no such worker");
+  expect(h.stop).toHaveBeenCalled();
+});
+
+test("a start failure settles with the reason instead of an unhandled rejection", async () => {
+  const h = harness(["a"], 2);
+  h.deps.start = async () => {
+    throw new Error("spawn refused");
+  };
+  const run = runWorkerSweep(h.deps);
+  const result = await run.finished;
+  expect(result).not.toBeNull();
+  expect(result!.failed.map((f) => f.path)).toEqual(["a"]);
+  expect(result!.failed[0].message).toContain("spawn refused");
+});
+
+test("thirty seconds of worker silence fails the sweep and names the stalled stage", async () => {
+  vi.useFakeTimers();
+  try {
+    // send는 성공하는데 워커가 아무 신호(ready/progress/file)도 안 낸다 —
+    // v0.2.7의 실제 증상(동결 진입점이 --warm-worker를 몰라 RPC 엔진으로 뜸).
+    const h = harness(["a", "b"], 2);
+    const run = runWorkerSweep(h.deps);
+    await vi.advanceTimersByTimeAsync(29_000);
+    // 아직은 기다린다 — 느린 기동을 성급히 실패로 접지 않는다.
+    let settled = false;
+    void run.finished.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await run.finished;
+    expect(result).not.toBeNull();
+    expect(result!.failed.length).toBe(2);
+    expect(result!.failed[0].message).toContain("신호가 없음");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a worker event before the deadline disarms the silence watchdog", async () => {
+  vi.useFakeTimers();
+  try {
+    const h = harness(["a"], 1, [0]);
+    const run = runWorkerSweep(h.deps);
+    await vi.advanceTimersByTimeAsync(0);
+    h.emit(0, { event: "ready" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    // 신호를 봤으므로 무소식 실패는 나지 않는다 — 스윕은 계속 산다.
+    let settled = false;
+    void run.finished.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    h.emit(0, { event: "file", path: "a", ok: true, total: 1 });
+    const result = await run.finished;
+    expect(result).toEqual({ done: [{ path: "a" }], failed: [] });
+  } finally {
+    vi.useRealTimers();
+  }
+});
