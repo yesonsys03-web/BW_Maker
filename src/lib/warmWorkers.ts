@@ -22,17 +22,24 @@ export interface WorkerEvent {
   total?: number;
   ok?: boolean;
   message?: string;
+  /** 파일 완료 이벤트에 실려 오는 그 파일의 mtime. 프런트는 앱에서 아직 안 연
+   * 파일도 워커에 맡기므로, "이 판을 쓸었다"(path+mtime) 기록의 mtime은 워커가
+   * 재서 준다. */
+  mtime?: number;
 }
 
 export interface WorkerSweepProgress {
   /** 지금까지 처리한 드로잉 레이어 수(끝난 파일 + 진행 중 파일의 합). */
   doneLeaves: number;
+  /** 워커가 지금까지 보고한 파일별 총량의 합 — 시작 전 파일은 모른다.
+   * 호출자는 자기 추정치와 max로 합쳐 진행바 총량을 만든다. */
+  totalLeavesKnown: number;
   filesDone: number;
   filesTotal: number;
 }
 
 export interface WorkerSweepResult {
-  done: string[];
+  done: Array<{ path: string; mtime?: number }>;
   failed: Array<{ path: string; message: string }>;
 }
 
@@ -61,6 +68,8 @@ export function runWorkerSweep(deps: WorkerSweepDeps): WorkerSweepHandle {
   const inflight = new Map<number, string>();
   /** 진행 중 파일의 마지막 done — 죽은 파일도 여기까지는 처리한 것으로 센다. */
   const partial = new Map<string, number>();
+  /** 워커가 보고한 파일별 드로잉 레이어 총량. 시작 전 파일은 없다. */
+  const totals = new Map<string, number>();
   const result: WorkerSweepResult = { done: [], failed: [] };
   let finishedLeaves = 0;
   let cancelled = false;
@@ -71,8 +80,11 @@ export function runWorkerSweep(deps: WorkerSweepDeps): WorkerSweepHandle {
   const report = () => {
     let doneLeaves = finishedLeaves;
     for (const p of inflight.values()) doneLeaves += partial.get(p) ?? 0;
+    let totalLeavesKnown = 0;
+    for (const t of totals.values()) totalLeavesKnown += t;
     deps.onProgress?.({
       doneLeaves,
+      totalLeavesKnown,
       filesDone: result.done.length + result.failed.length,
       filesTotal: deps.paths.length,
     });
@@ -121,12 +133,14 @@ export function runWorkerSweep(deps: WorkerSweepDeps): WorkerSweepHandle {
         }
         if (ev.event === "progress" && ev.path !== undefined) {
           partial.set(ev.path, ev.done ?? 0);
+          if (ev.total !== undefined) totals.set(ev.path, ev.total);
           report();
         } else if (ev.event === "file" && ev.path !== undefined) {
           inflight.delete(e.id);
           if (ev.ok) {
-            result.done.push(ev.path);
+            result.done.push({ path: ev.path, mtime: ev.mtime });
             finishedLeaves += ev.total ?? partial.get(ev.path) ?? 0;
+            if (ev.total !== undefined) totals.set(ev.path, ev.total);
           } else {
             result.failed.push({ path: ev.path, message: ev.message ?? "unknown" });
             finishedLeaves += partial.get(ev.path) ?? 0;

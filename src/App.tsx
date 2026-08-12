@@ -1383,22 +1383,26 @@ function AppShell() {
   // 완료 팝업)와 그 둘을 잇기만 한다.
   useEffect(() => {
     if (!fullCacheOn || cacheWorkers <= 1) return;
-    // 대상: 열린 파일 전부. 체인과 달리 활성·다음도 뺄 이유가 없다 — 워커는
-    // 자기 프로세스라 화면의 엔진 세션을 건드리지 않고, 이미 디스크에 있는
-    // 드로잉 레이어는 디스크 읽기로 순식간에 지나간다.
+    // 대상: **목록의 전체 파일.** 앱에서 열렸는지(status/sessionId)를 보면 안
+    // 된다 — 프로젝트 로드 직후에는 대부분이 아직 안 열린 상태라, 그 순간 열린
+    // 몇 장만 쓸고 "완료" 팝업이 떴다(실사용에서 그렇게 잡혔다: 스윕이 수상하게
+    // 일찍 끝나고, 안 쓸린 파일의 56.9Mpx 레이어가 토글에서 50초를 냈다).
+    // 워커는 자기 프로세스로 PSD를 직접 열므로 앱 세션이 필요 없고, 이미
+    // 디스크에 있는 드로잉 레이어는 순식간에 지나간다. mtime을 모르는(아직 안
+    // 연) 파일은 무조건 포함한다 — 쓸었는지 판정할 근거가 없으면 쓰는 쪽이 싸다.
     const targets = filesRef.current.filter(
-      (f) =>
-        f.status === "open" && f.tree !== undefined && f.mtime !== undefined &&
-        sweptFilesRef.current.get(f.path) !== f.mtime
+      (f) => f.mtime === undefined || sweptFilesRef.current.get(f.path) !== f.mtime
     );
     if (targets.length === 0) {
       handleFullCacheToggle(false);
       setFullCacheDone(true);
       return;
     }
-    const totalLeaves = targets.reduce((n, f) => n + pixelLeafIds(f.tree!).length, 0);
-    const mtimeByPath = new Map(targets.map((f) => [f.path, f.mtime!]));
-    setWarmProgress({ done: 0, total: totalLeaves });
+    // 총량 추정: 트리를 아는 파일은 정확히, 모르는 파일은 워커가 보고하는
+    // 총량으로 자라며 채워진다(진행바가 100%를 넘지 않게 max로 합친다).
+    const estimated = targets.reduce(
+      (n, f) => n + (f.tree ? pixelLeafIds(f.tree).length : 0), 0);
+    setWarmProgress({ done: 0, total: estimated });
     const handle = runWorkerSweep({
       paths: targets.map((f) => f.path),
       workerCount: cacheWorkers,
@@ -1407,14 +1411,19 @@ function AppShell() {
       stop: warmWorkersStop,
       onLine: onWarmWorkerLine,
       onExit: onWarmWorkerExit,
-      onProgress: (p) => setWarmProgress({ done: p.doneLeaves, total: totalLeaves }),
+      onProgress: (p) =>
+        setWarmProgress({
+          done: p.doneLeaves,
+          total: Math.max(estimated, p.totalLeavesKnown, p.doneLeaves),
+        }),
     });
     void handle.finished.then((result) => {
       setWarmProgress(null);
       if (result === null) return; // 캐시 중지 — 요청은 이미 내려가 있다
-      for (const path of result.done) {
-        const mtime = mtimeByPath.get(path);
-        if (mtime !== undefined) sweptFilesRef.current.set(path, mtime);
+      for (const f of result.done) {
+        // 쓸었다는 기록의 mtime은 워커가 잰 값이 정본이다 — 앱이 아직 안 연
+        // 파일은 f.mtime이 없고, 열린 파일이라도 워커가 본 디스크가 사실이다.
+        if (f.mtime !== undefined) sweptFilesRef.current.set(f.path, f.mtime);
       }
       if (result.failed.length > 0) {
         // 실패는 완료 팝업과 별개로 카드 한 장에 모아 알린다 — 조용히 넘기면

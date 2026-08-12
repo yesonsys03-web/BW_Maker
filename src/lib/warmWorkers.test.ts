@@ -50,7 +50,7 @@ test("each worker pulls the next file as soon as it finishes one", async () => {
   h.emit(0, { event: "file", path: "a", ok: true, total: 2 });
   h.emit(1, { event: "file", path: "c", ok: true, total: 1 });
   const result = await run.finished;
-  expect(result).toEqual({ done: ["b", "a", "c"], failed: [] });
+  expect(result).toEqual({ done: [{ path: "b" }, { path: "a" }, { path: "c" }], failed: [] });
   expect(h.stop).toHaveBeenCalled();
 });
 
@@ -63,8 +63,19 @@ test("progress counts finished files plus the in-flight partials", async () => {
   h.emit(1, { event: "progress", path: "b", done: 5, total: 10 });
   expect(h.progress[h.progress.length - 1]).toBe(8); // 3 + 5
 
-  h.emit(0, { event: "file", path: "a", ok: true, total: 10 });
+  h.emit(0, { event: "file", path: "a", ok: true, total: 10, mtime: 1234 });
   expect(h.progress[h.progress.length - 1]).toBe(15); // 끝난 a(10) + 진행 중 b(5)
+});
+
+test("the worker-reported mtime rides along in the result", async () => {
+  // 앱이 아직 안 연 파일도 워커에 맡기므로, "쓸었다"(path+mtime) 기록의 mtime은
+  // 워커가 재서 준 값이 정본이다.
+  const h = harness(["a"], 1, [0]);
+  const run = runWorkerSweep(h.deps);
+  await tick();
+  h.emit(0, { event: "file", path: "a", ok: true, total: 2, mtime: 1786500000 });
+  const result = await run.finished;
+  expect(result!.done).toEqual([{ path: "a", mtime: 1786500000 }]);
 });
 
 test("a dead worker's file goes back to the queue and another worker takes it", async () => {
@@ -79,7 +90,7 @@ test("a dead worker's file goes back to the queue and another worker takes it", 
 
   h.emit(1, { event: "file", path: "a", ok: true, total: 1 });
   const result = await run.finished;
-  expect(result).toEqual({ done: ["b", "a"], failed: [] });
+  expect(result).toEqual({ done: [{ path: "b" }, { path: "a" }], failed: [] });
 });
 
 test("when every worker dies the sweep ends and reports what was left", async () => {
@@ -107,7 +118,7 @@ test("a failed file is recorded but the sweep keeps going", async () => {
 
   const result = await run.finished;
   expect(result).toEqual({
-    done: ["b"],
+    done: [{ path: "b" }],
     failed: [{ path: "a", message: "ValueError: bad" }],
   });
 });
@@ -135,5 +146,5 @@ test("events from a stale generation are ignored", async () => {
   // 이전 세대 이벤트로는 끝나지 않는다 — 진짜 세대(7)의 완료만 친다.
   h.emit(0, { event: "file", path: "a", ok: true, total: 1 });
   const result = await run.finished;
-  expect(result).toEqual({ done: ["a"], failed: [] });
+  expect(result).toEqual({ done: [{ path: "a" }], failed: [] });
 });

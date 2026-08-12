@@ -29,6 +29,9 @@ def test_worker_fills_the_disk_cache_and_reports_progress(fixture_psd):
     assert events[0] == {"event": "ready"}
     done = [e for e in events if e["event"] == "file"]
     assert len(done) == 1 and done[0]["ok"] is True and done[0]["total"] > 0
+    # 프런트가 "쓸었다"(path+mtime)를 기록할 수 있게 mtime을 실어 보낸다 —
+    # 앱이 아직 안 연 파일은 프런트가 mtime을 모른다.
+    assert done[0]["mtime"] == os.path.getmtime(fixture_psd)
     # 드로잉 레이어 한 장마다 진행을 알린다 — 마지막 진행이 총량과 같다.
     progress = [e for e in events if e["event"] == "progress"]
     assert len(progress) == done[0]["total"]

@@ -1684,10 +1684,12 @@ test("the full-folder sweep waits for the artist to start it, then reports compl
   await waitFor(() => expect(screen.queryByText("전체 캐시 완료")).toBeNull());
 });
 
-test("with multiple workers the full cache runs out of process and still reports completion", async () => {
-  // 워커 수를 올리면 전체 캐시는 메인 엔진이 아니라 별도 워커 프로세스로 돈다 —
-  // 파일을 워커에 나눠 먹이고(디스패치 규칙은 lib/warmWorkers.test.ts가 잠근다),
-  // 전부 끝나면 같은 완료 팝업이 뜬다.
+test("with multiple workers the full cache covers files the app has not opened yet", async () => {
+  // 워커 수를 올리면 전체 캐시는 별도 워커 프로세스로 돈다(디스패치 규칙은
+  // lib/warmWorkers.test.ts가 잠근다). 대상은 **목록 전체**여야 한다 — 앱에서
+  // 열린 파일만 쓸면, 프로젝트 로드 직후(대부분 아직 안 열림)에 몇 장만 쓸고
+  // "완료" 팝업이 뜬다. 실사용에서 그렇게 잡힌 회귀다: 스윕이 수상하게 일찍
+  // 끝나고, 안 쓸린 파일의 56.9Mpx 레이어가 토글에서 50초를 냈다.
   let lineCb: ((e: { generation: number; id: number; line: string }) => void) | undefined;
   engine.onWarmWorkerLine.mockImplementation(async (cb: (e: { generation: number; id: number; line: string }) => void) => {
     lineCb = cb;
@@ -1697,10 +1699,7 @@ test("with multiple workers the full cache runs out of process and still reports
 
   render(<App />);
   await addFiles({ click });
-  await finishOpen(0, 1);
-  await finishOpen(1, 2);
-  await finishOpen(2, 3);
-  await waitFor(() => expect(engine.warmPreviewTiles).toHaveBeenCalled());
+  await finishOpen(0, 1); // 나머지 두 파일은 아직 열리지 않았다
 
   const workers = screen.getByTitle(/전체 캐시를 몇 개의 작업 프로세스/) as HTMLSelectElement;
   workers.value = "2";
@@ -1711,7 +1710,10 @@ test("with multiple workers the full cache runs out of process and still reports
   // 세 파일 중 두 개가 먼저 두 워커에 나간다(당겨 가기).
   await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
   const done = (call: [number, string]) =>
-    lineCb!({ generation: 3, id: call[0], line: JSON.stringify({ event: "file", path: call[1], ok: true, total: 3 }) });
+    lineCb!({
+      generation: 3, id: call[0],
+      line: JSON.stringify({ event: "file", path: call[1], ok: true, total: 3, mtime: 1 }),
+    });
   done(engine.warmWorkerSend.mock.calls[0] as [number, string]);
   done(engine.warmWorkerSend.mock.calls[1] as [number, string]);
   await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(3));
@@ -1719,8 +1721,9 @@ test("with multiple workers the full cache runs out of process and still reports
 
   await waitFor(() => expect(screen.getByText("전체 캐시 완료")).toBeTruthy());
   expect(engine.warmWorkersStop).toHaveBeenCalled();
-  // 체인은 그동안 스윕하지 않았다 — 세 번째 파일은 워커가 처리했다.
-  expect(engine.warmPreviewTiles.mock.calls.map((c) => c[0])).not.toContain(3);
+  // 안 연 파일까지 목록 전체가 워커에 넘어갔다.
+  const sent = engine.warmWorkerSend.mock.calls.map((c) => c[1]);
+  expect(new Set(sent)).toEqual(new Set(PATHS));
 });
 
 test("the warmup chain shows leaf-level progress while it runs", async () => {

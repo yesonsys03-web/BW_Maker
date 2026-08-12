@@ -90,9 +90,13 @@ def main(stdin=None, stdout=None, max_size=1500):
             continue
         path = json.loads(line)["path"]
         try:
+            mtime = os.path.getmtime(path)
             total = warm_file(path, max_size, stdout)
-            _emit({"event": "file", "path": path, "ok": True, "total": total},
-                  stdout)
+            # mtime을 실어 보낸다 — 프런트는 앱에서 아직 안 연 파일도 워커에
+            # 맡기므로, "이 판을 쓸었다"는 기록(path+mtime)의 mtime을 워커가
+            # 재서 알려 줘야 한다.
+            _emit({"event": "file", "path": path, "ok": True, "total": total,
+                   "mtime": mtime}, stdout)
         except Exception as e:  # 파일 하나의 실패로 워커를 죽이지 않는다
             _emit({"event": "file", "path": path, "ok": False,
                    "message": f"{type(e).__name__}: {e}"}, stdout)
