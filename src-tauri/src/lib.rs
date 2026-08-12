@@ -2,6 +2,7 @@
 mod engine;
 mod files;
 mod project_fs;
+mod warm;
 
 use tauri::Manager;
 
@@ -17,6 +18,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(engine::EngineState::default())
+        .manage(warm::WarmState::default())
         .invoke_handler(tauri::generate_handler![
             greet,
             engine::engine_request,
@@ -27,11 +29,15 @@ pub fn run() {
             project_fs::project_make_dir,
             project_fs::project_read_text,
             project_fs::project_write_text,
-            project_fs::project_write_b64
+            project_fs::project_write_b64,
+            warm::warm_workers_start,
+            warm::warm_worker_send,
+            warm::warm_workers_stop
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 engine::kill_engine(window.app_handle());
+                warm::kill_warm_workers(window.app_handle());
             }
         })
         .build(tauri::generate_context!())
@@ -64,7 +70,10 @@ pub fn run() {
                     dialog.show(|_| std::process::exit(1));
                 }
             }
-            tauri::RunEvent::Exit => engine::kill_engine(app_handle),
+            tauri::RunEvent::Exit => {
+                engine::kill_engine(app_handle);
+                warm::kill_warm_workers(app_handle);
+            }
             _ => {}
         });
 }

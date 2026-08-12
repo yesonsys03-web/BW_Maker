@@ -42,6 +42,8 @@ function renderPanel(
       fullCacheRunning={false}
       onFullCacheStart={vi.fn()}
       onFullCacheStop={vi.fn()}
+      cacheWorkers={1}
+      onCacheWorkersChange={vi.fn()}
       stopped={null}
       entryCounts={entryCounts}
       staleProjectPaths={staleProjectPaths}

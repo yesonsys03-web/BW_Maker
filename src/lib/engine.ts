@@ -376,3 +376,43 @@ export async function onEngineDead(cb: (payload: EngineDeadPayload) => void): Pr
   const unlisten = await listen<EngineDeadPayload>("engine-dead", (event) => cb(event.payload ?? {}));
   return unlisten;
 }
+
+/**
+ * 전체 캐시 워커(엔진 --warm-worker 프로세스, src-tauri/src/warm.rs) 제어.
+ * 디스패치 규칙은 lib/warmWorkers.ts에 있고, 여기는 Rust 커맨드/이벤트 배선만.
+ */
+export interface WarmWorkersStarted {
+  generation: number;
+  ids: number[];
+}
+
+export async function warmWorkersStart(count: number, maxSize: number): Promise<WarmWorkersStarted> {
+  return invoke("warm_workers_start", { count, maxSize });
+}
+
+export async function warmWorkerSend(id: number, path: string): Promise<void> {
+  await invoke("warm_worker_send", { id, path });
+}
+
+export async function warmWorkersStop(): Promise<void> {
+  await invoke("warm_workers_stop");
+}
+
+export interface WarmWorkerLine {
+  generation: number;
+  id: number;
+  line: string;
+}
+
+export async function onWarmWorkerLine(cb: (e: WarmWorkerLine) => void): Promise<() => void> {
+  return listen<WarmWorkerLine>("warm-worker-line", (event) => cb(event.payload));
+}
+
+export interface WarmWorkerExit {
+  generation: number;
+  id: number;
+}
+
+export async function onWarmWorkerExit(cb: (e: WarmWorkerExit) => void): Promise<() => void> {
+  return listen<WarmWorkerExit>("warm-worker-exit", (event) => cb(event.payload));
+}

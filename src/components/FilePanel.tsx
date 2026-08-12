@@ -40,6 +40,9 @@ interface FilePanelProps {
   fullCacheRunning: boolean;
   onFullCacheStart: () => void;
   onFullCacheStop: () => void;
+  /** 전체 캐시 워커 수. 1 = 엔진이 짬짬이(기본), 그 이상 = 별도 프로세스 병렬. */
+  cacheWorkers: number;
+  onCacheWorkersChange: (n: number) => void;
   /**
    * 중지된 배경 작업이 남아 있을 때 그것이 무엇인지("남은 파일 22개"). 없으면 null.
    * 진행바와 같은 자리에 재개 버튼을 띄우는 근거다 — 중지를 누른 그 자리에서
@@ -138,6 +141,8 @@ export function FilePanel({
   fullCacheRunning,
   onFullCacheStart,
   onFullCacheStop,
+  cacheWorkers,
+  onCacheWorkersChange,
   stopped,
   entryCounts,
   staleProjectPaths,
@@ -337,6 +342,18 @@ export function FilePanel({
           >
             {fullCacheRunning ? "캐시 중지" : "전체 캐시"}
           </button>
+          <select
+            value={String(cacheWorkers)}
+            onChange={(e) => onCacheWorkersChange(Number(e.currentTarget.value))}
+            disabled={fullCacheRunning}
+            title="전체 캐시를 몇 개의 작업 프로세스로 돌릴지. 1이면 엔진이 짬짬이 돌고(기본), 늘리면 그만큼 빨라지는 대신 CPU와 메모리를 더 씁니다."
+          >
+            {[1, 2, 4, 6].map((n) => (
+              <option key={n} value={n}>
+                {n === 1 ? "워커 1 (기본)" : `워커 ${n}`}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
       {loadProgress ?? prefetchProgress ? (

@@ -113,7 +113,7 @@ fn locate_bundled_engine() -> Result<std::path::PathBuf, String> {
     })
 }
 
-fn engine_command() -> Result<Command, String> {
+pub(crate) fn engine_command() -> Result<Command, String> {
     let mut c = if cfg!(debug_assertions) {
         // dev: 저장소의 engine/ 프로젝트를 그대로 실행한다. 엔진을 고칠 때마다 다시
         // 동결할 필요가 없다.

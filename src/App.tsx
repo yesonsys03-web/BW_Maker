@@ -12,7 +12,8 @@ import { OpsHistory } from "./components/OpsHistory";
 import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { loadPngDataUrl, pinFile, psdMtimes, renderDocumentPreview, renderPreview, renderThumbnails, warmPreviewTiles } from "./lib/engine";
+import { loadPngDataUrl, onWarmWorkerExit, onWarmWorkerLine, pinFile, psdMtimes, renderDocumentPreview, renderPreview, renderThumbnails, warmPreviewTiles, warmWorkerSend, warmWorkersStart, warmWorkersStop } from "./lib/engine";
+import { runWorkerSweep } from "./lib/warmWorkers";
 import { ProjectBar, type ProjectBusy } from "./components/ProjectBar";
 import {
   BOTTOM_PANEL_HEIGHT_STORAGE_KEY,
@@ -76,6 +77,9 @@ const PREFETCH_YIELD_MAX_MS = 60_000;
  * 손을 멈추면 그때 마지막 설정 하나로만 준비가 돈다(prefetchHold 참고).
  */
 const PREFETCH_PRESET_HOLD_MS = 2_000;
+
+/** 전체 캐시 워커 수를 남기는 localStorage 키. 기본 1(현행 엔진 내 순차). */
+const CACHE_WORKERS_STORAGE_KEY = "bwMaker.cacheWorkers";
 
 function fileName(path: string): string {
   const parts = path.split(/[\\/]/);
@@ -574,6 +578,19 @@ function AppShell() {
   }, []);
   /** 전체 캐시가 끝났음을 알리는 팝업. 확인을 누르면 내린다. */
   const [fullCacheDone, setFullCacheDone] = useState(false);
+  /**
+   * 전체 캐시 워커 수. 1이면 지금처럼 메인 엔진이 짬짬이 돈다(기본). 늘리면
+   * 별도 워커 프로세스들이 파일을 나눠 병렬로 돌아 그만큼 빨라진다 — 실측
+   * (i9-9900K)으로 4~6개면 4~5배. 마지막 선택은 저장한다.
+   */
+  const [cacheWorkers, setCacheWorkers] = useState<number>(() => {
+    const n = Number(window.localStorage.getItem(CACHE_WORKERS_STORAGE_KEY) ?? "1");
+    return Number.isInteger(n) && n >= 1 && n <= 8 ? n : 1;
+  });
+  const handleCacheWorkersChange = useCallback((n: number) => {
+    setCacheWorkers(n);
+    window.localStorage.setItem(CACHE_WORKERS_STORAGE_KEY, String(n));
+  }, []);
   const prefetchingRef = useRef(false);
   /**
    * 프리셋이 방금 바뀌었으니 준비 큐는 잠깐 서 있으라는 표시.
@@ -1213,6 +1230,9 @@ function AppShell() {
   useEffect(() => {
     if (loading || prefetchProgress !== null || batchRunning || prefetchHold) return;
     if (warmingRef.current || prefetchingRef.current || drainingRef.current) return;
+    // 워커 스윕이 도는 동안 체인은 통째로 쉰다 — 워커가 어차피 모든 파일의
+    // 디스크 캐시를 채우고 있고, 진행바를 두 곳에서 쓰면 서로 덮는다.
+    if (fullCacheOn && cacheWorkers > 1) return;
     const files = filesRef.current;
     const active = files.find((f) => f.path === activePathRef.current);
     if (!active || active.sessionId === undefined || !active.tree) return;
@@ -1354,7 +1374,61 @@ function AppShell() {
     return () => {
       cancelled = true;
     };
-  }, [loading, prefetchProgress, batchRunning, prefetchHold, warmKick, state.activePath, state.files, refreshSession, fullCacheOn, handleFullCacheToggle]);
+  }, [loading, prefetchProgress, batchRunning, prefetchHold, warmKick, state.activePath, state.files, refreshSession, fullCacheOn, cacheWorkers, handleFullCacheToggle]);
+
+  // 전체 캐시 — 워커 모드(워커 수 2 이상). 별도 프로세스들이 파일을 나눠 디스크
+  // 캐시를 채우므로 메인 엔진(stdin 직렬)과 안 겹치고, 큰 드로잉 레이어도
+  // 건너뛰지 않고 전부 치른다. 디스패치 규칙은 lib/warmWorkers.ts에, 프로세스
+  // 관리는 src-tauri/src/warm.rs에 있다. 이 효과는 화면 상태(대상 목록·진행바·
+  // 완료 팝업)와 그 둘을 잇기만 한다.
+  useEffect(() => {
+    if (!fullCacheOn || cacheWorkers <= 1) return;
+    // 대상: 열린 파일 전부. 체인과 달리 활성·다음도 뺄 이유가 없다 — 워커는
+    // 자기 프로세스라 화면의 엔진 세션을 건드리지 않고, 이미 디스크에 있는
+    // 드로잉 레이어는 디스크 읽기로 순식간에 지나간다.
+    const targets = filesRef.current.filter(
+      (f) =>
+        f.status === "open" && f.tree !== undefined && f.mtime !== undefined &&
+        sweptFilesRef.current.get(f.path) !== f.mtime
+    );
+    if (targets.length === 0) {
+      handleFullCacheToggle(false);
+      setFullCacheDone(true);
+      return;
+    }
+    const totalLeaves = targets.reduce((n, f) => n + pixelLeafIds(f.tree!).length, 0);
+    const mtimeByPath = new Map(targets.map((f) => [f.path, f.mtime!]));
+    setWarmProgress({ done: 0, total: totalLeaves });
+    const handle = runWorkerSweep({
+      paths: targets.map((f) => f.path),
+      workerCount: cacheWorkers,
+      start: (count) => warmWorkersStart(count, PREVIEW_MAX_SIZE),
+      send: warmWorkerSend,
+      stop: warmWorkersStop,
+      onLine: onWarmWorkerLine,
+      onExit: onWarmWorkerExit,
+      onProgress: (p) => setWarmProgress({ done: p.doneLeaves, total: totalLeaves }),
+    });
+    void handle.finished.then((result) => {
+      setWarmProgress(null);
+      if (result === null) return; // 캐시 중지 — 요청은 이미 내려가 있다
+      for (const path of result.done) {
+        const mtime = mtimeByPath.get(path);
+        if (mtime !== undefined) sweptFilesRef.current.set(path, mtime);
+      }
+      if (result.failed.length > 0) {
+        // 실패는 완료 팝업과 별개로 카드 한 장에 모아 알린다 — 조용히 넘기면
+        // 그 파일들만 캐시 없이 남은 이유를 알 수 없다.
+        pushError(`전체 캐시에서 실패한 파일 ${result.failed.length}개`, {
+          message: result.failed.map((f) => `${fileName(f.path)} — ${f.message}`).join("\n"),
+          traceback: "",
+        });
+      }
+      handleFullCacheToggle(false);
+      setFullCacheDone(true);
+    });
+    return () => handle.cancel();
+  }, [fullCacheOn, cacheWorkers, handleFullCacheToggle, pushError]);
 
   /**
    * 파일별로 손으로 "라인으로 지정"한 레이어. 배치가 이걸 함께 보내야, 이름
@@ -1577,6 +1651,8 @@ function AppShell() {
         fullCacheRunning={fullCacheOn}
         onFullCacheStart={() => handleFullCacheToggle(true)}
         onFullCacheStop={() => handleFullCacheToggle(false)}
+        cacheWorkers={cacheWorkers}
+        onCacheWorkersChange={handleCacheWorkersChange}
         stopped={stoppedLabel}
         entryCounts={entryCounts}
         staleProjectPaths={staleProjectPaths}

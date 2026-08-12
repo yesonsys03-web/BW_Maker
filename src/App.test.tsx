@@ -29,6 +29,11 @@ const engine = vi.hoisted(() => ({
   callEngine: vi.fn(),
   psdMtimes: vi.fn(),
   warmPreviewTiles: vi.fn(),
+  warmWorkersStart: vi.fn(),
+  warmWorkerSend: vi.fn(),
+  warmWorkersStop: vi.fn(),
+  onWarmWorkerLine: vi.fn(),
+  onWarmWorkerExit: vi.fn(),
 }));
 
 vi.mock("./lib/engine", () => ({
@@ -191,6 +196,12 @@ beforeEach(() => {
   // 기본은 "전부 한 번에 데워짐" — 워밍업 큐가 한 번 부르고 끝난다. 워밍업의
   // 반복·양보 규약 자체는 lib/warmupQueue.test.ts가 잠근다.
   engine.warmPreviewTiles.mockResolvedValue({ warmed: [], skipped: [], remaining: [] });
+  // 워커 모드 기본 대역 — 워커 수가 1(기본)이면 아무 테스트도 여기 안 온다.
+  engine.warmWorkersStart.mockResolvedValue({ generation: 1, ids: [0] });
+  engine.warmWorkerSend.mockResolvedValue(undefined);
+  engine.warmWorkersStop.mockResolvedValue(undefined);
+  engine.onWarmWorkerLine.mockResolvedValue(() => {});
+  engine.onWarmWorkerExit.mockResolvedValue(() => {});
   vi.mocked(openDialog).mockResolvedValue(PATHS as never);
 });
 
@@ -1002,7 +1013,7 @@ test("changing the preset holds the prefetch queue until the artist stops", asyn
   // 프리셋을 바꾸고 **적용까지** 누른다. 아티스트가 하는 조작이 그것이고, 큐를
   // 다시 세우는 것도 그것이다 — 드롭다운만 바꾸면 준비 큐는 애초에 안 깨어난다
   // (효과의 의존성이 ops·파일 목록이라, 적용이 ops를 갈아야 다시 돈다).
-  const select = screen.getByRole("combobox") as HTMLSelectElement;
+  const select = screen.getByRole("combobox", { name: "프리셋" }) as HTMLSelectElement;
   select.value = "다른 프리셋";
   select.dispatchEvent(new Event("change", { bubbles: true }));
   click(screen.getByRole("button", { name: "적용" }));
@@ -1390,20 +1401,20 @@ test("the chosen preset survives an app relaunch", async () => {
 
   const first = render(<App />);
   await waitFor(() =>
-    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(other.name)
+    expect((screen.getByRole("combobox", { name: "프리셋" }) as HTMLSelectElement).value).toBe(other.name)
   );
-  const el = screen.getByRole("combobox") as HTMLSelectElement;
+  const el = screen.getByRole("combobox", { name: "프리셋" }) as HTMLSelectElement;
   el.value = PRESET.name;
   el.dispatchEvent(new Event("change", { bubbles: true }));
   await waitFor(() =>
-    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(PRESET.name)
+    expect((screen.getByRole("combobox", { name: "프리셋" }) as HTMLSelectElement).value).toBe(PRESET.name)
   );
   first.unmount();
 
   vi.mocked(loadPresets).mockResolvedValueOnce([other, PRESET]);
   render(<App />);
   await waitFor(() =>
-    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(PRESET.name)
+    expect((screen.getByRole("combobox", { name: "프리셋" }) as HTMLSelectElement).value).toBe(PRESET.name)
   );
 });
 
@@ -1422,7 +1433,7 @@ test("opening a project moves the app's preset selection to the project's preset
   render(<App />);
   // 마운트 때는 목록의 첫 번째가 선택된다.
   await waitFor(() =>
-    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(other.name)
+    expect((screen.getByRole("combobox", { name: "프리셋" }) as HTMLSelectElement).value).toBe(other.name)
   );
 
   const fixture = projectWithOnePreview();
@@ -1433,7 +1444,7 @@ test("opening a project moves the app's preset selection to the project's preset
   // 저장 이후 그 프리셋을 편집한 경우 다른 설정이 올라와 복원한 미리보기의 키가
   // 전부 어긋난다. 그래서 드롭다운도 목록의 같은 이름과 구분해 보여준다.
   await waitFor(() =>
-    expect((screen.getByRole("combobox") as HTMLSelectElement).selectedOptions[0].textContent).toBe(
+    expect((screen.getByRole("combobox", { name: "프리셋" }) as HTMLSelectElement).selectedOptions[0].textContent).toBe(
       `${PRESET.name} (프로젝트)`
     )
   );
@@ -1671,6 +1682,45 @@ test("the full-folder sweep waits for the artist to start it, then reports compl
 
   click(screen.getByRole("button", { name: "확인" }));
   await waitFor(() => expect(screen.queryByText("전체 캐시 완료")).toBeNull());
+});
+
+test("with multiple workers the full cache runs out of process and still reports completion", async () => {
+  // 워커 수를 올리면 전체 캐시는 메인 엔진이 아니라 별도 워커 프로세스로 돈다 —
+  // 파일을 워커에 나눠 먹이고(디스패치 규칙은 lib/warmWorkers.test.ts가 잠근다),
+  // 전부 끝나면 같은 완료 팝업이 뜬다.
+  let lineCb: ((e: { generation: number; id: number; line: string }) => void) | undefined;
+  engine.onWarmWorkerLine.mockImplementation(async (cb: (e: { generation: number; id: number; line: string }) => void) => {
+    lineCb = cb;
+    return () => {};
+  });
+  engine.warmWorkersStart.mockResolvedValue({ generation: 3, ids: [0, 1] });
+
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+  await finishOpen(1, 2);
+  await finishOpen(2, 3);
+  await waitFor(() => expect(engine.warmPreviewTiles).toHaveBeenCalled());
+
+  const workers = screen.getByTitle(/전체 캐시를 몇 개의 작업 프로세스/) as HTMLSelectElement;
+  workers.value = "2";
+  workers.dispatchEvent(new Event("change", { bubbles: true }));
+  click(screen.getByRole("button", { name: "전체 캐시" }));
+
+  await waitFor(() => expect(engine.warmWorkersStart).toHaveBeenCalledWith(2, expect.any(Number)));
+  // 세 파일 중 두 개가 먼저 두 워커에 나간다(당겨 가기).
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
+  const done = (call: [number, string]) =>
+    lineCb!({ generation: 3, id: call[0], line: JSON.stringify({ event: "file", path: call[1], ok: true, total: 3 }) });
+  done(engine.warmWorkerSend.mock.calls[0] as [number, string]);
+  done(engine.warmWorkerSend.mock.calls[1] as [number, string]);
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(3));
+  done(engine.warmWorkerSend.mock.calls[2] as [number, string]);
+
+  await waitFor(() => expect(screen.getByText("전체 캐시 완료")).toBeTruthy());
+  expect(engine.warmWorkersStop).toHaveBeenCalled();
+  // 체인은 그동안 스윕하지 않았다 — 세 번째 파일은 워커가 처리했다.
+  expect(engine.warmPreviewTiles.mock.calls.map((c) => c[0])).not.toContain(3);
 });
 
 test("the warmup chain shows leaf-level progress while it runs", async () => {
