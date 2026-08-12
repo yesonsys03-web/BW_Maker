@@ -166,8 +166,25 @@ export function PreviewCanvas({
    */
   const [fitReady, setFitReady] = useState(false);
 
-  /** 새 그림을 건다. 배율이 다시 정해질 때까지 감춘 채로 둔다. */
+  /** 지금 걸려 있는 src. showImage의 같은-그림 판정용 — imgSrc state는 콜백
+   * 클로저에 갇히므로 ref로 든다. setImgSrc 호출처는 showImage 하나뿐이라
+   * 이 거울이 어긋날 자리가 없다. */
+  const shownSrcRef = useRef<string | null>(null);
+  /**
+   * 새 그림을 건다. 배율이 다시 정해질 때까지 감춘 채로 둔다.
+   *
+   * **같은 그림이면 아무것도 하지 않는다.** 감춤을 풀어 주는 것은 <img>의
+   * onLoad(→ measureAndFit)인데, src가 같으면 DOM 속성이 안 바뀌어 onLoad가
+   * 다시 오지 않는다 — 감추기만 하고 켜 줄 사건이 없어 그림이 화면에서 사라진
+   * 채 남는다. 실사고: 이미 체크된 레이어를 L(라인으로 지정)로 지정하면
+   * includedIds가 **내용은 같고 정체만 새 배열**이 되고, 렌더 효과가 다시 돌아
+   * 같은 캐시 키에 적중해 지금 화면의 dataUrl을 그대로 다시 걸었다 — 미리보기가
+   * 사라지고 레이어를 다시 토글해야(조합이 진짜로 바뀌어 새 onLoad가 와야)
+   * 돌아오는 증상이 그것이다.
+   */
   const showImage = useCallback((src: string | null) => {
+    if (shownSrcRef.current === src) return;
+    shownSrcRef.current = src;
     setImgSrc(src);
     setFitReady(false);
   }, []);
