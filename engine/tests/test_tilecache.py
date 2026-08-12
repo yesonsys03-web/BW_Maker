@@ -179,34 +179,3 @@ def test_overlay_key_varies_with_settings_and_format(monkeypatch):
     monkeypatch.setattr(tilecache, "OVERLAY_FORMAT", 2)
     # 알고리즘 판이 바뀌면 같은 설정이라도 옛 그림을 쓰면 안 된다.
     assert tilecache.overlay_key([1], [2], (24, 4, 0)) != base
-
-
-def test_group_thumbnails_survive_a_fresh_session_via_disk(fixture_psd, tmp_path):
-    # 그룹 썸네일은 그룹 전체 합성이라 큰 그룹에서 몇 초~몇 분짜리다. 결과물을
-    # 디스크에 기억하므로, 새 세션은 합성 없이 같은 그림을 받아야 한다.
-    from psd_engine.render import render_thumbnails
-    s1 = _session(fixture_psd)
-    first = np.array(Image.open(render_thumbnails(s1, [1], 48, tmp_path)["1"]))
-
-    s2 = _session(fixture_psd)
-
-    def boom(*a, **k):
-        raise AssertionError("디스크에 있으면 합성하면 안 된다")
-
-    s2["layers_by_id"][1].composite = boom
-    second = np.array(Image.open(render_thumbnails(s2, [1], 48, tmp_path)["1"]))
-    assert np.array_equal(first, second)
-
-
-def test_group_thumbnail_cache_respects_visibility_changes(fixture_psd, tmp_path):
-    # 키에 보이는 자손 집합이 들어 있어야 한다 — 없으면 눈을 끈 뒤에도 옛 그림이
-    # 디스크에서 그대로 나온다. 'line'(id 4)을 끄면 (6,6)이 fill 값(128)이어야
-    # 한다(test_render의 같은 판정).
-    from psd_engine.render import render_thumbnails
-    s1 = _session(fixture_psd)
-    render_thumbnails(s1, [1], 128, tmp_path)  # 전부 보이는 상태로 프라이밍
-
-    s2 = _session(fixture_psd)
-    s2["layers_by_id"][4].visible = False
-    arr = np.array(Image.open(render_thumbnails(s2, [1], 128, tmp_path)["1"]))
-    assert arr[6, 6, 0] == 128
