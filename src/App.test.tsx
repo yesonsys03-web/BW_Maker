@@ -1642,3 +1642,23 @@ test("after active and next, the remaining files are swept for the disk cache", 
   await new Promise((r) => setTimeout(r, 30));
   expect(engine.warmPreviewTiles.mock.calls.length).toBe(4);
 });
+
+test("the warmup chain shows leaf-level progress while it runs", async () => {
+  // 배경에서 몇 분씩 도는 일이 화면에 안 보이면 사용자는 앱이 멈췄다고 보고
+  // 아무거나 누른다 — 그때마다 워밍업은 비켜서느라 더 안 끝난다. 그래서 이
+  // 진행 표시는 장식이 아니라 기능이다. 첫 요청을 잡아 두고 막대가 떠 있는지,
+  // 체인이 다 돌면 사라지는지 본다.
+  let release!: (v: { warmed: number[]; skipped: number[]; remaining: number[] }) => void;
+  engine.warmPreviewTiles.mockImplementationOnce(() => new Promise((r) => (release = r)));
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+  await finishOpen(1, 2);
+  await finishOpen(2, 3);
+
+  // 잎 단위 합계다: 파일 3개 × 잎 3개 = 9. 파일 단위로 세면 큰 파일에서 몇 분씩
+  // 안 움직여 "멈췄다"로 읽힌다.
+  await waitFor(() => expect(screen.getByText(/레이어 캐시 준비 중\.\.\. 0\/9/)).toBeTruthy());
+  release({ warmed: [1, 2, 3], skipped: [], remaining: [] });
+  await waitFor(() => expect(screen.queryByText(/레이어 캐시 준비 중/)).toBeNull());
+});

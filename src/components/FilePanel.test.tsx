@@ -38,6 +38,7 @@ function renderPanel(
       activePath={null}
       loadProgress={null}
       prefetchProgress={null}
+      warmProgress={null}
       stopped={null}
       entryCounts={entryCounts}
       staleProjectPaths={staleProjectPaths}

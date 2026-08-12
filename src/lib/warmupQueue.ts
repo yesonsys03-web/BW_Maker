@@ -19,6 +19,12 @@ export interface WarmupOptions {
   cancelled: () => boolean;
   /** 테스트가 시간을 쥘 수 있게 주입한다. 기본은 setTimeout. */
   wait?: (ms: number) => Promise<void>;
+  /**
+   * 요청 하나가 끝날 때마다 누적 (데움, 건너뜀)을 알린다. 진행 표시용이다 —
+   * 눈에 보이는 진행이 없으면 사용자는 앱이 멈췄다고 보고 아무거나 누르고,
+   * 그때마다 이 큐는 비켜서느라 더 안 끝난다.
+   */
+  onProgress?: (warmed: number, skipped: number) => void;
 }
 
 /** shouldPause가 참인 동안 다시 물어보는 간격. 프리페치 큐의 양보 폴링과 같은 값. */
@@ -51,6 +57,7 @@ export async function drainWarmupQueue({
   shouldPause,
   cancelled,
   wait = defaultWait,
+  onProgress,
 }: WarmupOptions): Promise<WarmupSummary | null> {
   let pending = leafIds;
   let warmed = 0;
@@ -64,6 +71,7 @@ export async function drainWarmupQueue({
     const res = await request(pending);
     warmed += res.warmed.length;
     skipped += res.skipped.length;
+    onProgress?.(warmed, skipped);
     // 엔진은 호출당 최소 한 장을 데우므로 remaining은 반드시 줄어든다. 혹시
     // 그 약속이 깨져도(버전 어긋남 등) 같은 목록으로 영원히 돌지는 않는다.
     if (res.remaining.length >= pending.length) return { warmed, skipped };

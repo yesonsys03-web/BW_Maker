@@ -540,6 +540,12 @@ function AppShell() {
   // 얹힌다. 먼저 처리해 캐시에 넣어두면 그 왕복이 통째로 사라진다.
   const previewCacheRef = useRef(new PreviewCache());
   const [prefetchProgress, setPrefetchProgress] = useState<{ done: number; total: number } | null>(null);
+  /**
+   * 워밍업 체인(활성 → 다음 → 나머지 스윕)의 잎 단위 진행. 안 돌면 null.
+   * 눈에 보이는 진행이 없으면 사용자는 앱이 멈췄다고 보고 아무거나 누르고,
+   * 그때마다 워밍업은 비켜서느라 더 안 끝난다 — 그래서 이 표시가 기능이다.
+   */
+  const [warmProgress, setWarmProgress] = useState<{ done: number; total: number } | null>(null);
   const prefetchingRef = useRef(false);
   /**
    * 프리셋이 방금 바뀌었으니 준비 큐는 잠깐 서 있으라는 표시.
@@ -1215,6 +1221,18 @@ function AppShell() {
     // 않는다. 축출-재오픈이 끼었으면 그전에 데운 타일이 새 세션에 없으므로
     // 끝난 것으로 적지 않는다 — 체인이 끝나며 올리는 warmKick이 효과를 다시
     // 깨워 마저 데운다(이미 핫인 잎은 엔진이 비용 없이 거른다).
+    // 진행은 잎 단위로 센다 — 파일 단위는 큰 파일에서 몇 분씩 안 움직여
+    // "멈췄다"로 읽힌다. 이미 핫인 잎은 엔진이 첫 응답에서 한꺼번에 걸러
+    // 주므로, 데워진 파일 구간은 막대가 빠르게 지나간다.
+    const chainFiles = [
+      ...(needsWarm(active) ? [active] : []),
+      ...(next !== undefined && needsWarm(next) ? [next] : []),
+      ...sweep,
+    ];
+    const totalLeaves = chainFiles.reduce((n, f) => n + pixelLeafIds(f.tree!).length, 0);
+    let doneLeaves = 0;
+    if (totalLeaves > 0) setWarmProgress({ done: 0, total: totalLeaves });
+
     const warmFile = async (file: FileEntry): Promise<boolean> => {
       let sid = file.sessionId!;
       const leafIds = pixelLeafIds(file.tree!);
@@ -1222,6 +1240,7 @@ function AppShell() {
         warmedSessionsRef.current.add(sid);
         return true;
       }
+      const base = doneLeaves;
       let reopened = false;
       const summary = await drainWarmupQueue({
         leafIds,
@@ -1238,7 +1257,15 @@ function AppShell() {
           ),
         shouldPause: () => canvasRenderingRef.current || prefetchingRef.current,
         cancelled: chainCancelled,
+        onProgress: (w, s) => {
+          doneLeaves = base + w + s;
+          setWarmProgress({ done: doneLeaves, total: totalLeaves });
+        },
       });
+      if (summary !== null) {
+        doneLeaves = base + leafIds.length;
+        setWarmProgress({ done: doneLeaves, total: totalLeaves });
+      }
       if (summary !== null && !reopened) warmedSessionsRef.current.add(sid);
       return summary !== null;
     };
@@ -1278,6 +1305,7 @@ function AppShell() {
       }
     })().then((kick) => {
       warmingRef.current = false;
+      setWarmProgress(null);
       if (kick) setWarmKick((k) => k + 1);
     });
     return () => {
@@ -1498,6 +1526,7 @@ function AppShell() {
         activePath={state.activePath}
         loadProgress={loadProgress ? { ...loadProgress, label: "여는 중" } : null}
         prefetchProgress={prefetchProgress ? { ...prefetchProgress, label: "미리보기 준비 중" } : null}
+        warmProgress={warmProgress ? { ...warmProgress, label: "레이어 캐시 준비 중" } : null}
         stopped={stoppedLabel}
         entryCounts={entryCounts}
         staleProjectPaths={staleProjectPaths}

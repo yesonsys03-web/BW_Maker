@@ -25,6 +25,14 @@ interface FilePanelProps {
    */
   prefetchProgress: LoadBar | null;
   /**
+   * 잎 타일 워밍업 체인(활성 → 다음 → 나머지 스윕)의 진행. 안 돌면 null.
+   * 이 표시는 장식이 아니라 기능이다 — 배경에서 몇 분씩 도는 일이 화면에
+   * 안 보이면 사용자는 앱이 멈췄다고 보고 아무거나 누르고, 워밍업은 그때마다
+   * 비켜서느라 더 안 끝난다. 중지 버튼은 없다: 이 일은 사람이 뭘 하든 알아서
+   * 비켜서므로 멈출 이유가 없고, 기다릴 필요도 없다.
+   */
+  warmProgress: LoadBar | null;
+  /**
    * 중지된 배경 작업이 남아 있을 때 그것이 무엇인지("남은 파일 22개"). 없으면 null.
    * 진행바와 같은 자리에 재개 버튼을 띄우는 근거다 — 중지를 누른 그 자리에서
    * 되돌릴 수 있어야 한다. 이게 없으면 다시 시작하는 방법이 "이미 있는 폴더를
@@ -76,7 +84,7 @@ function fileName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-function ProgressBar({ progress, onCancel }: { progress: LoadBar; onCancel: () => void }) {
+function ProgressBar({ progress, onCancel }: { progress: LoadBar; onCancel?: () => void }) {
   return (
     <div className="file-load-progress">
       <div className="export-progress-bar">
@@ -89,9 +97,11 @@ function ProgressBar({ progress, onCancel }: { progress: LoadBar; onCancel: () =
         <span className="export-progress-label">
           {progress.label}... {progress.done}/{progress.total}
         </span>
-        <button type="button" onClick={onCancel}>
-          중지
-        </button>
+        {onCancel ? (
+          <button type="button" onClick={onCancel}>
+            중지
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -116,6 +126,7 @@ export function FilePanel({
   activePath,
   loadProgress,
   prefetchProgress,
+  warmProgress,
   stopped,
   entryCounts,
   staleProjectPaths,
@@ -309,6 +320,8 @@ export function FilePanel({
         <ProgressBar progress={(loadProgress ?? prefetchProgress)!} onCancel={onCancelLoad} />
       ) : stopped ? (
         <StoppedBar label={stopped} onResume={onResume} />
+      ) : warmProgress ? (
+        <ProgressBar progress={warmProgress} />
       ) : null}
       <div
         className={`file-drop-zone${isDragOver ? " drag-over" : ""}`}
