@@ -1,6 +1,6 @@
 [package]
 name = "bw_maker"
-version = "0.2.6"
+version = "0.2.7"
 description = "Extracts rule-matching layers from animation BG PSDs into a new PSD"
 authors = ["Yeson"]
 edition = "2021"
