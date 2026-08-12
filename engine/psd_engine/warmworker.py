@@ -36,8 +36,21 @@ def _emit(obj, out):
     out.flush()
 
 
-def warm_file(path, max_size, out):
-    """파일 하나의 모든 드로잉 레이어 타일을 디스크에 쌓는다."""
+def warm_file(path, max_size, out, edge_lines=None):
+    """
+    파일 하나의 모든 드로잉 레이어 타일을, 그리고 경계선이 켜져 있으면 각 뷰의
+    오버레이까지 디스크에 쌓는다. "전체 캐시 완료"가 "어떤 파일을 눌러도 즉시"를
+    뜻하려면 오버레이(뷰당 실측 9~36초)까지 미리 치러야 한다 — 타일만 쌓으면
+    파일마다 첫 경계선 렌더가 그 비용을 그 자리에서 낸다.
+
+    뷰는 자동 검출(find_views)만 다룬다. 수동 지정 뷰는 앱의 작업 상태라 워커가
+    모르고, 그런 파일은 드물어서 첫 렌더 한 번을 그냥 치른다.
+    """
+    from . import tilecache
+    from .character import find_views
+    from .edges import EDGE_DEFAULTS, plan_overlays
+    from .rpc import _edge_settings_key
+
     mtime = os.path.getmtime(path)
     psd = PSDImage.open(path)
     # 메인 엔진(session.open)과 같은 제한 — 거기서 못 여는 파일을 여기서 데워도
@@ -50,14 +63,33 @@ def warm_file(path, max_size, out):
     scale = preview_scale(psd, max_size)
     leaves = [lid for lid, layer in built["layers_by_id"].items()
               if not layer.is_group()]
-    for i, lid in enumerate(leaves):
+    views, opts = [], None
+    if edge_lines and edge_lines.get("enabled"):
+        views = find_views(session)
+        # 키가 렌더 경로(rpc._cached_plan_overlays)와 비트까지 같아야 한다 —
+        # 그래서 병합도 키 추출도 그쪽 코드를 그대로 쓴다.
+        opts = {**EDGE_DEFAULTS, **edge_lines}
+    total = len(leaves) + len(views)
+    done = 0
+    for lid in leaves:
         # _preview_tile이 디스크 우선 → 디코드 → 디스크 저장까지 다 한다.
         # 세션 RAM 캐시는 예산(192MB) LRU가 걸려 있고, 파일이 끝나면 session
         # 딕셔너리와 함께 통째로 버려진다.
         _preview_tile(session, lid, scale)
-        _emit({"event": "progress", "path": path, "done": i + 1,
-               "total": len(leaves)}, out)
-    return len(leaves)
+        done += 1
+        _emit({"event": "progress", "path": path, "done": done, "total": total},
+              out)
+    if views:
+        skey = _edge_settings_key(opts)
+        for view in views:
+            vkey = tilecache.overlay_key(view["colourIds"], view["lineIds"], skey)
+            if tilecache.load_overlays(session, vkey) is None:
+                made = plan_overlays(session, [view], opts)
+                tilecache.store_overlays(session, vkey, made)
+            done += 1
+            _emit({"event": "progress", "path": path, "done": done,
+                   "total": total}, out)
+    return total
 
 
 def main(stdin=None, stdout=None, max_size=1500):
@@ -88,10 +120,11 @@ def main(stdin=None, stdout=None, max_size=1500):
         line = line.strip()
         if not line:
             continue
-        path = json.loads(line)["path"]
+        msg = json.loads(line)
+        path = msg["path"]
         try:
             mtime = os.path.getmtime(path)
-            total = warm_file(path, max_size, stdout)
+            total = warm_file(path, max_size, stdout, msg.get("edgeLines"))
             # mtime을 실어 보낸다 — 프런트는 앱에서 아직 안 연 파일도 워커에
             # 맡기므로, "이 판을 쓸었다"는 기록(path+mtime)의 mtime을 워커가
             # 재서 알려 줘야 한다.

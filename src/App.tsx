@@ -1403,11 +1403,16 @@ function AppShell() {
     const estimated = targets.reduce(
       (n, f) => n + (f.tree ? pixelLeafIds(f.tree).length : 0), 0);
     setWarmProgress({ done: 0, total: estimated });
+    // 경계선 설정도 함께 보낸다 — 워커가 각 파일의 뷰 오버레이(뷰당 9~36초)까지
+    // 미리 계산해 디스크에 쌓아야, "전체 캐시 완료 = 어떤 파일이든 즉시"가
+    // 경계선 켠 상태에서도 참이 된다. 현재 프리셋의 설정을 그대로 쓴다(렌더가
+    // 쓰는 캐시 키의 재료와 같아야 하므로).
+    const edgeLines = presetRef.current?.edgeLines ?? null;
     const handle = runWorkerSweep({
       paths: targets.map((f) => f.path),
       workerCount: cacheWorkers,
       start: (count) => warmWorkersStart(count, PREVIEW_MAX_SIZE),
-      send: warmWorkerSend,
+      send: (id, path) => warmWorkerSend(id, path, edgeLines),
       stop: warmWorkersStop,
       onLine: onWarmWorkerLine,
       onExit: onWarmWorkerExit,

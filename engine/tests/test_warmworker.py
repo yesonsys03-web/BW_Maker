@@ -64,3 +64,45 @@ def test_worker_decodes_without_the_warmup_skip(fixture_psd, monkeypatch):
     done = [e for e in events if e["event"] == "file"]
     assert done[0]["ok"] is True
     assert done[0]["total"] == len([e for e in events if e["event"] == "progress"])
+
+
+def test_worker_prewarms_overlays_the_engine_then_reads(tmp_path, monkeypatch):
+    # "전체 캐시 완료 = 어떤 파일이든 즉시"가 경계선까지 참이려면, 워커가 쌓은
+    # 오버레이를 엔진 렌더가 계산 없이 읽어야 한다 — 키(뷰 구성+설정)가 두 경로에서
+    # 비트까지 같아야 성립하는 주장이라, 통합으로 잠근다.
+    import io as _io
+    import psd_engine.rpc as rpc
+    from test_rpc import _two_view_psd
+
+    p = _two_view_psd(tmp_path)
+    _run([json.dumps({"path": str(p), "edgeLines": {"enabled": True}}) + "\n"])
+
+    calls = []
+    real = rpc.plan_overlays
+    def spy(session, views, opts):
+        calls.append(views)
+        return real(session, views, opts)
+    monkeypatch.setattr(rpc, "plan_overlays", spy)
+
+    engine = rpc.Engine(out=_io.StringIO())
+    sid = engine.open_psd(str(p))["sessionId"]
+    s = engine.store.get(sid)
+    front_line_id = next(
+        lid for lid, l in s["layers_by_id"].items()
+        if l.name == "LINES" and l.parent.name == "FRONT")
+    engine.render_preview(sid, visibleLayerIds=[front_line_id],
+                          edgeLines={"enabled": True})
+    assert calls == [], "워커가 쌓아 둔 오버레이를 엔진이 다시 계산했다 — 키가 어긋난 것"
+
+
+def test_worker_counts_views_in_its_progress_total(tmp_path):
+    # 오버레이(뷰당 9~36초)도 진행에 잡혀야 바가 멈춘 것처럼 보이지 않는다.
+    from test_rpc import _two_view_psd
+    p = _two_view_psd(tmp_path)
+    events = _run([json.dumps({"path": str(p), "edgeLines": {"enabled": True}}) + "\n"])
+    done = [e for e in events if e["event"] == "file"][0]
+    progress = [e for e in events if e["event"] == "progress"]
+    assert done["total"] == len(progress)
+    plain = _run([json.dumps({"path": str(p)}) + "\n"])
+    plain_done = [e for e in plain if e["event"] == "file"][0]
+    assert done["total"] > plain_done["total"], "뷰 몫이 총량에 안 잡혔다"

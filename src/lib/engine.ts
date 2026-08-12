@@ -390,8 +390,12 @@ export async function warmWorkersStart(count: number, maxSize: number): Promise<
   return invoke("warm_workers_start", { count, maxSize });
 }
 
-export async function warmWorkerSend(id: number, path: string): Promise<void> {
-  await invoke("warm_worker_send", { id, path });
+export async function warmWorkerSend(
+  id: number,
+  path: string,
+  edgeLines: EdgeLines | null = null
+): Promise<void> {
+  await invoke("warm_worker_send", { id, path, edgeLines });
 }
 
 export async function warmWorkersStop(): Promise<void> {
