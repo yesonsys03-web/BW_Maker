@@ -233,3 +233,56 @@ def test_worker_prebakes_the_char_preset_preview_with_edge_lines(tmp_path, monke
         edgeLines={"enabled": True, "manualColourIds": []},
         includedIds=included)
     assert r["pngPath"]
+
+
+# ---- 배치 내보내기 잡 ----
+
+#: _PRESET에 내보내기 필드를 더한 것 — batch._process_one이 읽는 값들.
+_EXPORT_PRESET = {**_PRESET, "naming": "original", "outputSuffix": "_LINE",
+                  "outputFormat": "psd", "merge": "none", "embedPreview": True}
+
+
+def test_worker_exports_a_file_like_the_serial_batch(fixture_psd, tmp_path):
+    out_dir = tmp_path / "산출"
+    out_dir.mkdir()
+    events = _run([json.dumps({
+        "path": str(fixture_psd),
+        "export": {"preset": _EXPORT_PRESET, "outputDir": str(out_dir)},
+    }) + "\n"])
+    files = [e for e in events if e["event"] == "file"]
+    assert files[0]["ok"] is True
+    result = files[0]["result"]
+    # run_batch의 항목과 같은 모양 — 프런트 보고서가 그대로 읽는다.
+    assert result["verification"]["ok"] is True
+    assert os.path.isfile(result["outputPath"])
+    assert result["outputPath"].startswith(str(out_dir))
+    # 진행이 배치의 단계 이벤트 모양으로 나온다 — BatchPanel이 문구로 보여준다.
+    stages = [e for e in events if e["event"] == "progress"]
+    assert stages and all("stage" in e and "current" in e for e in stages)
+
+
+def test_worker_export_failure_carries_the_batch_error_entry(tmp_path):
+    missing = tmp_path / "없는판.psd"
+    events = _run([json.dumps({
+        "path": str(missing), "export": {"preset": _EXPORT_PRESET},
+    }) + "\n"])
+    ev = [e for e in events if e["event"] == "file"][0]
+    assert ev["ok"] is False
+    # 실패도 run_batch 항목 모양(error.message/traceback) — 흡수 금지 정책 그대로.
+    assert ev["result"]["ok"] is False
+    assert ev["result"]["error"]["traceback"]
+    # 워커는 살아서 다음 줄을 기다린다 — 이어지는 워밍업 잡이 정상 처리된다.
+
+
+def test_worker_alternates_export_and_warm_jobs(fixture_psd, tmp_path):
+    out_dir = tmp_path / "산출2"
+    out_dir.mkdir()
+    events = _run([
+        json.dumps({"path": str(fixture_psd),
+                    "export": {"preset": _EXPORT_PRESET,
+                               "outputDir": str(out_dir)}}) + "\n",
+        json.dumps({"path": str(fixture_psd)}) + "\n",
+    ])
+    files = [e for e in events if e["event"] == "file"]
+    assert [f["ok"] for f in files] == [True, True]
+    assert "result" in files[0] and "result" not in files[1]

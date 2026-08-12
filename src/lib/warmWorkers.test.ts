@@ -224,3 +224,68 @@ test("a worker event before the deadline disarms the silence watchdog", async ()
     vi.useRealTimers();
   }
 });
+
+// ---- 배치 내보내기 어댑터 ----
+
+import { runBatchExport, type BatchExportDeps, type BatchWorkerResultEntry } from "./warmWorkers";
+
+function batchDeps(h: ReturnType<typeof harness>): BatchExportDeps {
+  const { onProgress: _drop, ...rest } = h.deps;
+  return rest;
+}
+
+const entry = (path: string, ok = true): BatchWorkerResultEntry =>
+  ({ path, ok, outputPath: `/out/${path}`, layerCount: 1 });
+
+test("batch export returns worker results in input order, not completion order", async () => {
+  const h = harness(["a", "b"], 2);
+  const results: string[] = [];
+  const run = runBatchExport({
+    ...batchDeps(h),
+    onResult: (e) => void results.push(e.path),
+  });
+  await tick();
+  // b가 먼저 끝나도(완주 순서) 최종 목록은 입력 순서다 — 보고서가 실행마다
+  // 다른 순서로 나오면 안 된다. 점진 콜백(onResult)은 완주 순서 그대로다.
+  h.emit(1, { event: "file", path: "b", ok: true, result: entry("b") });
+  h.emit(0, { event: "file", path: "a", ok: false, result: entry("a", false) });
+  const outcome = await run.finished;
+  expect(results).toEqual(["b", "a"]);
+  expect(outcome.results.map((r) => r.path)).toEqual(["a", "b"]);
+  expect(outcome.results.map((r) => r.ok)).toEqual([false, true]);
+  expect(outcome.stopped).toBe(false);
+  expect(outcome.remaining).toEqual([]);
+});
+
+test("batch export stop drains in-flight files instead of killing them", async () => {
+  // 내보내기 쓰기는 원자적이지 않다 — 중지는 "진행 중 파일은 마친다"여야
+  // 반쪽 PSD가 안 남는다(직렬 배치의 '현재 파일 마치는 중...'과 같은 약속).
+  const h = harness(["a", "b", "c"], 2);
+  const run = runBatchExport(batchDeps(h));
+  await tick();
+  expect(h.sends.length).toBe(2); // a, b가 워커에
+  run.stop();
+  // 중지 뒤에도 진행 중이던 파일의 완료는 정상 수집되고, c는 먹이지 않는다.
+  h.emit(0, { event: "file", path: "a", ok: true, result: entry("a") });
+  await tick();
+  expect(h.sends.length).toBe(2);
+  h.emit(1, { event: "file", path: "b", ok: true, result: entry("b") });
+  const outcome = await run.finished;
+  expect(outcome.stopped).toBe(true);
+  expect(outcome.results.map((r) => r.path)).toEqual(["a", "b"]);
+  expect(outcome.remaining).toEqual(["c"]);
+  expect(h.stop).toHaveBeenCalled();
+});
+
+test("batch export wiring failures land in the report, loudly", async () => {
+  const h = harness(["a", "b"], 2);
+  const deps = batchDeps(h);
+  deps.send = async () => {
+    throw new Error("no such worker");
+  };
+  const outcome = await runBatchExport(deps).finished;
+  expect(outcome.stopped).toBe(false);
+  expect(outcome.results.map((r) => r.ok)).toEqual([false, false]);
+  const err = outcome.results[0].error as { message: string };
+  expect(err.message).toContain("no such worker");
+});

@@ -391,18 +391,27 @@ export async function warmWorkersStart(count: number, maxSize: number): Promise<
 }
 
 /**
- * 워커에 파일 하나를 먹인다. presets는 앱의 프리셋 목록(BG·CHAR가 기본) —
- * 워커가 타일·오버레이에 더해 프리셋마다 "갓 적용한 화면"의 미리보기 PNG까지
- * 엔진 디스크 캐시에 미리 굽는다(engine/psd_engine/warmworker.py). 목록
- * 전체를 보내는 이유: 어느 프리셋이 선택돼 있든, 스윕 뒤에 바꾸든 그 화면이
- * 이미 구워져 있어야 "전체 캐시 완료 = 즉시"가 프리셋 선택과 무관하게 참이다.
+ * 워커 잡 한 줄. 모양은 엔진 프로토콜(engine/psd_engine/warmworker.py)이 정본:
+ * - 워밍업: `presets`는 앱의 프리셋 목록(BG·CHAR가 기본) — 워커가 타일·
+ *   오버레이에 더해 프리셋마다 "갓 적용한 화면"의 미리보기 PNG까지 디스크에
+ *   미리 굽는다. 목록 전체를 보내는 이유: 어느 프리셋이 선택돼 있든, 스윕 뒤에
+ *   바꾸든 그 화면이 이미 구워져 있어야 "전체 캐시 완료 = 즉시"가 참이다.
+ * - 배치 내보내기: `export`가 있으면 그 파일 하나를 batch._process_one으로
+ *   내보낸다 — 산출물·검증이 메인 엔진의 순차 배치와 같은 함수를 탄다.
  */
-export async function warmWorkerSend(
-  id: number,
-  path: string,
-  presets: Preset[] | null = null
-): Promise<void> {
-  await invoke("warm_worker_send", { id, path, presets });
+export interface WarmWorkerJob {
+  path: string;
+  presets?: Preset[];
+  export?: {
+    preset: Preset;
+    outputDir: string | null;
+    overwrite: boolean;
+    manualLineIds?: number[];
+  };
+}
+
+export async function warmWorkerSend(id: number, payload: WarmWorkerJob): Promise<void> {
+  await invoke("warm_worker_send", { id, payload });
 }
 
 export async function warmWorkersStop(): Promise<void> {

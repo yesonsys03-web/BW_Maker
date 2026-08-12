@@ -23,6 +23,15 @@
 어느 프리셋이든 즉시"가 참이 된다. `edgeLines`는 presets 이전의 프로토콜로,
 오버레이 워밍업만 한다 — presets가 있으면 무시된다.
 
+`export`가 있으면 그 줄은 워밍업이 아니라 **배치 내보내기 한 파일**이다:
+  {"path", "export": {"preset", "outputDir"?, "overwrite"?, "manualLineIds"?}}
+batch._process_one을 그대로 돌리므로 산출물·검증·색 통일 규칙이 메인 엔진의
+배치와 비트까지 같다 — 워커는 파일을 나눠 드는 것뿐이다. 진행은 배치의 stage
+이벤트({"event":"progress","path","stage","current","total"}), 완료는
+{"event":"file","path","ok","result"}로 나간다. result는 run_batch의 항목과
+같은 모양이라(실패면 error.traceback 포함) 프런트가 기존 배치 보고서에 그대로
+합친다.
+
 진행을 단위 작업 하나마다 알리는 것은 낭비가 아니다 — 진행이 안 보이면
 사용자는 멈췄다고 보고 아무거나 누른다. 파일 실패는 그 파일만 접고 다음 줄을
 기다린다: 한 장이 깨졌다고 폴더 전체 캐시가 끊기면 안 된다.
@@ -202,12 +211,45 @@ def warm_file(path, max_size, out, edge_lines=None, presets=None):
     return total
 
 
+def export_file(path, job, out, store):
+    """
+    배치 내보내기 한 파일. 규칙 전부를 batch._process_one에 위임한다 — 매칭,
+    수동 라인 합류, 색 통일, 경계선, 분할, 검증이 메인 엔진의 배치와 같은 함수
+    하나를 타야 워커로 나눠 돌린 산출물이 순차 배치와 갈리지 않는다.
+
+    실패도 run_batch와 같은 모양의 항목으로 돌려보낸다(에러를 흡수하지 않는다
+    — traceback째 result.error에 싣는다). 호출자는 이 함수가 던지지 않는다고
+    믿어도 된다: 한 파일의 실패로 워커가 죽으면 안 되는 것은 워밍업과 같다.
+    """
+    import traceback
+
+    from .batch import _process_one
+
+    def progress(p, stage, current, total):
+        _emit({"event": "progress", "path": p, "stage": stage,
+               "current": current, "total": total}, out)
+
+    try:
+        result = _process_one(store, path, job["preset"], job.get("outputDir"),
+                              job.get("overwrite", False), progress,
+                              manual_line_ids=job.get("manualLineIds") or ())
+        _emit({"event": "file", "path": path, "ok": result["ok"],
+               "result": result}, out)
+    except Exception as e:  # noqa: BLE001 — run_batch와 같은 항목별 기록 정책
+        _emit({"event": "file", "path": path, "ok": False,
+               "message": f"{type(e).__name__}: {e}",
+               "result": {"path": path, "ok": False,
+                          "error": {"message": str(e),
+                                    "traceback": traceback.format_exc()}}}, out)
+
+
 def main(stdin=None, stdout=None, max_size=1500):
     """
     워커 루프. max_size는 앱의 미리보기 배율(PREVIEW_MAX_SIZE=1500)과 같아야
     같은 키의 타일이 쌓인다 — 배율이 캐시 키에 들어간다(tilecache._tile_path).
     """
     from .rpc import _as_utf8, _watch_for_orphaning
+    from .session import SessionStore
 
     # 프로세스 손질은 진짜 워커로 떴을 때만(stdin 미주입 = __main__ 경로).
     # 테스트가 스트림을 주입해 부르는 경우까지 pytest 프로세스를 nice로 내리면
@@ -226,12 +268,23 @@ def main(stdin=None, stdout=None, max_size=1500):
     stdin = stdin or _as_utf8(sys.stdin)
     stdout = stdout or _as_utf8(sys.stdout)
     _emit({"event": "ready"}, stdout)
+    #: 내보내기 잡용 세션 저장소. run_batch(max_sessions=1)와 같은 규율 —
+    #: 파일당 열고-처리-닫기라 워커의 메모리 곡선이 순차 배치와 같다.
+    #: (워커의 nice(10)는 내보내기에도 그대로 둔다: 배치 중에도 사람이 누른
+    #: 미리보기·UI가 먼저다. 노는 기계에서는 nice가 속도를 깎지 않는다.)
+    export_store = None
     for line in stdin:
         line = line.strip()
         if not line:
             continue
         msg = json.loads(line)
         path = msg["path"]
+        if "export" in msg:
+            # 실패 항목도 export_file이 만들어 보낸다 — 여기서 또 감싸지 않는다.
+            if export_store is None:
+                export_store = SessionStore(max_sessions=1)
+            export_file(path, msg["export"], stdout, export_store)
+            continue
         try:
             mtime = os.path.getmtime(path)
             total = warm_file(path, max_size, stdout, msg.get("edgeLines"),

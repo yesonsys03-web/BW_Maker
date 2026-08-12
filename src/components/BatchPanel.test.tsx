@@ -110,6 +110,7 @@ async function startRun(manualLineIdsByPath: Record<string, number[]> = {}) {
       files={FILES}
       defaultPresetName={null}
       manualLineIdsByPath={manualLineIdsByPath}
+      workers={1}
       onError={vi.fn()}
       onRunningChange={(r) => runningSignals.push(r)}
     />
@@ -310,6 +311,7 @@ function panel(defaultPresetName: string | null) {
       files={FILES}
       defaultPresetName={defaultPresetName}
       manualLineIdsByPath={{}}
+      workers={1}
       onError={vi.fn()}
       onRunningChange={() => {}}
     />

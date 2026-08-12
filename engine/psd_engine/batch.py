@@ -50,6 +50,9 @@ def _add_manual_lines(session, matched, manual_line_ids):
 
 def _process_one(store, path, preset, output_dir, overwrite, progress,
                  manual_line_ids=()):
+    # warmworker.export_file이 이 함수를 그대로 부른다 — 워커로 나눠 돌린 배치가
+    # 순차 배치와 같은 산출물을 내는 근거가 "같은 함수"라는 사실 하나이므로,
+    # 시그니처나 결과 모양을 바꾸면 그쪽도 같이 볼 것.
     sid = store.open(path)
     try:
         s = store.get(sid)

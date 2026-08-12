@@ -1383,6 +1383,14 @@ function AppShell() {
   // 완료 팝업)와 그 둘을 잇기만 한다.
   useEffect(() => {
     if (!fullCacheOn || cacheWorkers <= 1) return;
+    // 배치가 도는 동안은 비켜선다 — 워커 스폰(warmWorkersStart)이 이전 세대를
+    // 죽이므로, 여기서 스윕을 시작하면 **내보내기 중인 배치 워커를 죽여 반쪽
+    // PSD가 남는다**(내보내기 쓰기는 원자적이지 않다). batchRunning이 deps에
+    // 있으므로 배치가 끝나면 효과가 다시 돌아 스윕이 알아서 이어진다. 반대
+    // 방향(스윕 중 배치 시작)은 배치의 start가 스윕 워커를 죽이는 것으로
+    // 정리된다 — 캐시 쓰기는 원자적이라 잃는 것이 없고, 이 효과의 클린업이
+    // 스윕 핸들을 접는다.
+    if (batchRunning) return;
     // 대상: **목록의 전체 파일.** 앱에서 열렸는지(status/sessionId)를 보면 안
     // 된다 — 프로젝트 로드 직후에는 대부분이 아직 안 열린 상태라, 그 순간 열린
     // 몇 장만 쓸고 "완료" 팝업이 떴다(실사용에서 그렇게 잡혔다: 스윕이 수상하게
@@ -1424,7 +1432,7 @@ function AppShell() {
       paths: targets.map((f) => f.path),
       workerCount: cacheWorkers,
       start: (count) => warmWorkersStart(count, PREVIEW_MAX_SIZE),
-      send: async (id, path) => warmWorkerSend(id, path, await presetsPromise),
+      send: async (id, path) => warmWorkerSend(id, { path, presets: await presetsPromise }),
       stop: warmWorkersStop,
       onLine: onWarmWorkerLine,
       onExit: onWarmWorkerExit,
@@ -1454,7 +1462,7 @@ function AppShell() {
       setFullCacheDone(true);
     });
     return () => handle.cancel();
-  }, [fullCacheOn, cacheWorkers, handleFullCacheToggle, pushError]);
+  }, [fullCacheOn, cacheWorkers, batchRunning, handleFullCacheToggle, pushError]);
 
   /**
    * 파일별로 손으로 "라인으로 지정"한 레이어. 배치가 이걸 함께 보내야, 이름
@@ -1828,6 +1836,7 @@ function AppShell() {
               files={state.files}
               defaultPresetName={selectedPreset?.name ?? null}
               manualLineIdsByPath={manualLineIdsByPath}
+              workers={cacheWorkers}
               onError={pushError}
               onRunningChange={handleBatchRunningChange}
             />

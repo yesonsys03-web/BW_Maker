@@ -1709,20 +1709,21 @@ test("with multiple workers the full cache covers files the app has not opened y
   await waitFor(() => expect(engine.warmWorkersStart).toHaveBeenCalledWith(2, expect.any(Number)));
   // 세 파일 중 두 개가 먼저 두 워커에 나간다(당겨 가기).
   await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
-  const done = (call: [number, string]) =>
+  // 두 번째 인자는 {path, presets} 페이로드다(engine.ts의 WarmWorkerJob).
+  const done = (call: [number, { path: string }]) =>
     lineCb!({
       generation: 3, id: call[0],
-      line: JSON.stringify({ event: "file", path: call[1], ok: true, total: 3, mtime: 1 }),
+      line: JSON.stringify({ event: "file", path: call[1].path, ok: true, total: 3, mtime: 1 }),
     });
-  done(engine.warmWorkerSend.mock.calls[0] as [number, string]);
-  done(engine.warmWorkerSend.mock.calls[1] as [number, string]);
+  done(engine.warmWorkerSend.mock.calls[0] as [number, { path: string }]);
+  done(engine.warmWorkerSend.mock.calls[1] as [number, { path: string }]);
   await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(3));
-  done(engine.warmWorkerSend.mock.calls[2] as [number, string]);
+  done(engine.warmWorkerSend.mock.calls[2] as [number, { path: string }]);
 
   await waitFor(() => expect(screen.getByText("전체 캐시 완료")).toBeTruthy());
   expect(engine.warmWorkersStop).toHaveBeenCalled();
   // 안 연 파일까지 목록 전체가 워커에 넘어갔다.
-  const sent = engine.warmWorkerSend.mock.calls.map((c) => c[1]);
+  const sent = engine.warmWorkerSend.mock.calls.map((c) => (c[1] as { path: string }).path);
   expect(new Set(sent)).toEqual(new Set(PATHS));
 });
 

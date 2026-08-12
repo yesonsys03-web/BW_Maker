@@ -1,10 +1,14 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { findConflicts, planBatchOutputs } from "../lib/batch";
-import { batchRun, onEngineEvent, pathsExist } from "../lib/engine";
+import {
+  batchRun, onEngineEvent, onWarmWorkerExit, onWarmWorkerLine, pathsExist,
+  warmWorkerSend, warmWorkersStart, warmWorkersStop,
+} from "../lib/engine";
 import { loadPresets } from "../lib/presets";
 import { batchOutcome, describeVerification } from "../lib/verifyReport";
-import { toEngineError } from "../lib/preview";
+import { PREVIEW_MAX_SIZE, toEngineError } from "../lib/preview";
+import { runBatchExport, type BatchExportHandle } from "../lib/warmWorkers";
 import type { FileEntry } from "../state/appStore";
 import type { BatchItemResult, EngineError, Preset } from "../lib/types";
 
@@ -37,6 +41,13 @@ interface BatchPanelProps {
    * `no layers matched`로 실패했다(2026-08-10 신고). 그 지정을 실어 보낸다.
    */
   manualLineIdsByPath: Record<string, number[]>;
+  /**
+   * 작업 프로세스 수 — 파일 패널의 워커 드롭다운(전체 캐시와 같은 값)이다.
+   * 2 이상이면 파일들을 워커 프로세스에 나눠 내보낸다: 메인 엔진(stdin 직렬)이
+   * 비므로 배치 중에도 미리보기가 살고, 파일 단위 병렬이라 배치 자체도 빨라진다.
+   * 1이면 지금까지의 직렬 경로 그대로다.
+   */
+  workers: number;
   onError: (title: string, error: EngineError) => void;
   /**
    * 배치가 도는 동안 배경 큐들이 비켜설 수 있도록 알린다. 파일 사이의 틈은
@@ -94,7 +105,7 @@ interface PendingRun {
  * independent of any currently-open session, and the engine keeps going past
  * per-file failures, so this UI only ever renders the final results list.
  */
-export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, onError, onRunningChange }: BatchPanelProps) {
+export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, workers, onError, onRunningChange }: BatchPanelProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedPresetName, setSelectedPresetName] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set(files.map((f) => f.path)));
@@ -114,6 +125,8 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, onEr
    */
   const [stopping, setStopping] = useState(false);
   const stopRef = useRef(false);
+  /** 워커 모드 실행 핸들. 중지 버튼이 드레인(진행 중 파일은 마침)을 건다. */
+  const batchHandleRef = useRef<BatchExportHandle | null>(null);
   /** 중지하고 남은 것. 재개가 여기서 이어받는다. 취소하면 버린다. */
   const [stopped, setStopped] = useState<StoppedRun | null>(null);
 
@@ -217,7 +230,59 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, onEr
     }
     setProgress(null);
     const collected: BatchItemResult[] = append ? [...(results ?? [])] : [];
+    const base = collected.length;
     try {
+      if (workers > 1) {
+        // 워커 모드: 파일들을 워커 프로세스에 나눠 내보낸다. 규칙은 엔진의
+        // batch._process_one 그대로라 산출물이 직렬 경로와 같고, 큐·중지·실패
+        // 가시화는 전체 캐시 스윕과 같은 코어(runBatchExport)를 쓴다. 워커
+        // 스폰(warmWorkersStart)은 이전 세대를 죽이므로 전체 캐시 스윕과 배치가
+        // 겹치면 안 된다 — App의 스윕 효과가 batchRunning 동안 비켜선다.
+        const handle = runBatchExport({
+          paths,
+          workerCount: workers,
+          start: (count) => warmWorkersStart(count, PREVIEW_MAX_SIZE),
+          send: (id, path) => {
+            // 이 파일의 지정만 실어 보낸다 — 직렬 경로와 같은 판단이다.
+            const manual = manualLineIdsByPath[path];
+            return warmWorkerSend(id, {
+              path,
+              export: {
+                preset,
+                outputDir: dir,
+                overwrite,
+                ...(manual && manual.length > 0 ? { manualLineIds: manual } : {}),
+              },
+            });
+          },
+          stop: warmWorkersStop,
+          onLine: onWarmWorkerLine,
+          onExit: onWarmWorkerExit,
+          onProgress: (p) => {
+            setFileProgress({ done: p.filesDone, total: p.filesTotal });
+            if (p.stage !== undefined) {
+              setProgress({ path: p.path, stage: p.stage,
+                            current: p.current ?? 0, total: p.total ?? 0 });
+            }
+          },
+          onResult: (entry) => {
+            // 파일마다 표를 갱신한다 — 직렬 경로와 같은 약속. 최종 목록은
+            // finished가 입력 순서로 정렬해 다시 채운다.
+            collected.push(entry as BatchItemResult);
+            setResults([...collected]);
+          },
+        });
+        batchHandleRef.current = handle;
+        setFileProgress({ done: 0, total: paths.length });
+        const outcome = await handle.finished;
+        collected.length = base;
+        collected.push(...(outcome.results as BatchItemResult[]));
+        setResults([...collected]);
+        if (outcome.stopped && outcome.remaining.length > 0) {
+          setStopped({ paths: outcome.remaining, preset, outputDir: dir, overwrite });
+        }
+        return;
+      }
       for (let i = 0; i < paths.length; i += 1) {
         if (stopRef.current) {
           // 남은 것을 들고 있어야 재개가 이어받는다.
@@ -240,6 +305,7 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, onEr
     } catch (e) {
       onError("배치 실행 실패", toEngineError(e));
     } finally {
+      batchHandleRef.current = null;
       setRunning(false);
       onRunningChange(false);
       setStopping(false);
@@ -250,6 +316,9 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, onEr
 
   function handleStop() {
     stopRef.current = true;
+    // 워커 모드의 중지는 드레인이다 — 새 파일은 안 먹이고 진행 중 파일은 마친다.
+    // 산출물 쓰기가 원자적이지 않아 즉시 죽이면 반쪽 PSD가 남는다.
+    batchHandleRef.current?.stop();
     setStopping(true);
   }
 
