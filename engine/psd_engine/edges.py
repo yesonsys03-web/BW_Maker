@@ -6,6 +6,8 @@
 
 scipy를 쓰지 않는다(엔진 venv에 없다). 모폴로지는 PIL, 연결 요소는 직접 구현한다.
 """
+from contextlib import contextmanager
+
 import numpy as np
 from PIL import Image, ImageFilter
 
@@ -799,12 +801,63 @@ def _composite_colour(psd, colour_layers, box):
     return np.array(img.convert("RGBA"))
 
 
+def _view_ancestors(psd, layer):
+    out = []
+    cur = layer.parent
+    while cur is not None and cur is not psd:
+        out.append(cur)
+        cur = cur.parent
+    return out
+
+
+@contextmanager
+def _opacity_neutralised(psd, layers):
+    """레이어들과 그 조상의 불투명도를 잠시 255로 — 검출용 색 그림 전용.
+
+    아티스트는 색 참조를 선화 위에 **반투명으로** 얹어 두곤 한다 — 실납품에서
+    캐릭터 그룹 36/255(14%)짜리 판이 나왔다. 화면 미리보기·내보내기는 불투명도를
+    평평하게 무시하므로 색이 선명해 보이는데, 검출용 합성만 원본 불투명도를
+    적용하면 알파 14%짜리 유령 그림이 검출기에 들어가 획이 0이 된다 — 증상은
+    "구조(캐릭터 그룹/COLORS/LINES)가 맞는데 라인 생성이 안 됨"이고, 화면에선
+    색이 선명해서 원인이 안 보인다.
+
+    전수 감사(HH0305 캐릭터 100장 + 신고 판 2장, 뷰 346개, 2026-08-12,
+    .superpowers/sdd/opacity-neutral-colour/): 불투명도 전부 255인 **337개 뷰는
+    바이트 동일**, 변화는 반투명이 낀 3개 파일뿐이고 전부 "반투명 때문에 문턱
+    아래로 묻혔던 경계에 획이 생기는" 방향이었다(0→81k px 둘, 기존 획 +5% 하나).
+
+    fill 불투명도(BLEND_FILL_OPACITY)는 건드리지 않는다 — 같은 감사에서 255가
+    아닌 것이 0건이라, 없는 인구를 위해 tagged block 쓰기를 얹지 않는다.
+
+    복원은 finally다. 세션의 psd 객체는 뒤이은 요청들이 그대로 읽으므로(stdin
+    직렬이라 겹치지는 않는다), 합성 도중 예외가 나도 원값이 남아야 한다.
+    """
+    targets, seen = [], set()
+    for l in layers:
+        for node in [l] + _view_ancestors(psd, l):
+            if id(node) not in seen:
+                seen.add(id(node))
+                targets.append(node)
+    saved = [(node, node.opacity) for node in targets]
+    try:
+        for node in targets:
+            node.opacity = 255
+        yield
+    finally:
+        for node, op in saved:
+            node.opacity = op
+
+
 def overlay_for_view(session, colour_ids, line_ids, opts):
     """
     뷰 하나의 획 오버레이. 그릴 것이 없으면 None.
 
     색 레이어를 **합성해서** 본다. 레이어별 알파 경계를 쓰면 다른 레이어에 가려져
     실제로는 보이지 않는 경계까지 후보가 되기 때문이다(모듈 docstring 참고).
+
+    합성할 때 색 레이어·조상의 불투명도는 무시한다(_opacity_neutralised) —
+    미리보기·내보내기와 같은 눈으로 봐야, 반투명 색 참조 판에서 검출이 조용히
+    죽지 않는다.
 
     뷰포트는 색 레이어들의 합집합이다. 기존 라인은 그 좌표계로 옮겨 담는다 —
     라인이 색보다 넓어도 겹치는 부분만 있으면 된다.
@@ -816,10 +869,13 @@ def overlay_for_view(session, colour_ids, line_ids, opts):
         return None
 
     o = {**EDGE_DEFAULTS, **(opts or {})}
-    if o.get("colourMode") == "paste":
-        colour_rgba = _paste_colour(colour_layers, box)
-    else:
-        colour_rgba = _composite_colour(session["psd"], colour_layers, box)
+    with _opacity_neutralised(session["psd"], colour_layers):
+        if o.get("colourMode") == "paste":
+            # paste는 원본 픽셀을 그대로 붙여 원래도 불투명도를 안 읽지만,
+            # 두 모드가 같은 규약 아래 있다는 것을 코드 모양으로 남긴다.
+            colour_rgba = _paste_colour(colour_layers, box)
+        else:
+            colour_rgba = _composite_colour(session["psd"], colour_layers, box)
     line_alpha = _paste_alpha(
         _drop_filled(
             [layers_by_id[i] for i in line_ids], box, o["lineAlpha"]),

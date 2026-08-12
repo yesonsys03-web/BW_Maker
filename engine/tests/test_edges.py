@@ -1119,3 +1119,48 @@ def test_stroke_rgba_keeps_an_opaque_core_when_it_thins_the_stroke():
     assert int(bare.max()) < int(out.max()) * 0.85, (
         f"팽창이 있으나 없으나 심의 농도가 같다 (있음 {int(out.max())}, "
         f"없음 {int(bare.max())}) — 이 픽스처는 농도 손실을 못 잡는다")
+
+
+def _two_tone_psd(tmp_path, name, colours_opacity=255, view_opacity=255):
+    """_two_tone_session과 같은 판. 색 그룹/뷰 그룹의 불투명도만 손잡이로 뺐다."""
+    colours = nested_layers.Group(name="COLORS", opacity=colours_opacity, layers=[
+        make_rgb_image("dark", (40, 20, 20), 0, 0, 32, 12),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    line = make_rgb_image("LINES", (0, 0, 0), 0, 0, 4, 24)
+    p = tmp_path / name
+    write_psd(p, [nested_layers.Group(name="FRONT 3/4", opacity=view_opacity,
+                                      layers=[line, colours])])
+    store = SessionStore()
+    return store.get(store.open(str(p)))
+
+
+def test_overlay_ignores_translucent_colour_ancestors(tmp_path):
+    # 아티스트는 색 참조를 선화 위에 반투명으로 얹어 두곤 한다(실납품에서 캐릭터
+    # 그룹 36/255짜리 판). 검출용 색 합성이 그 불투명도를 그대로 적용하면 알파
+    # 14% 유령 그림이 검출기에 들어가 획이 0이 된다 — 획은 불투명 쌍둥이 판과
+    # **바이트까지 같아야** 한다(전수 감사 337/337 동일이 이 계약의 근거다).
+    opaque = _two_tone_psd(tmp_path, "불투명.psd")
+    translucent = _two_tone_psd(tmp_path, "반투명.psd",
+                                colours_opacity=36, view_opacity=128)
+    ov = find_views(opaque)[0]
+    tv = find_views(translucent)[0]
+    o_rgba, o_left, o_top = overlay_for_view(opaque, ov["colourIds"],
+                                             ov["lineIds"], EDGE_DEFAULTS)
+    t_rgba, t_left, t_top = overlay_for_view(translucent, tv["colourIds"],
+                                             tv["lineIds"], EDGE_DEFAULTS)
+    assert o_rgba[..., 3].max() > 0
+    assert (t_left, t_top) == (o_left, o_top)
+    assert t_rgba.tobytes() == o_rgba.tobytes(), \
+        "반투명 판의 획이 불투명 판과 다르다 — 불투명도 중화가 안 먹은 것"
+
+
+def test_overlay_restores_opacities_afterwards(tmp_path):
+    # 세션의 psd 객체는 뒤이은 요청들이 그대로 읽는다 — 중화는 합성 동안만이고
+    # 원값이 반드시 되돌아와야 한다(내보내기·병합은 원본 불투명도 의미를 쓴다).
+    s = _two_tone_psd(tmp_path, "복원.psd", colours_opacity=36, view_opacity=128)
+    view = find_views(s)[0]
+    layers = list(s["layers_by_id"].values())
+    before = [(l.name, l.opacity) for l in layers]
+    overlay_for_view(s, view["colourIds"], view["lineIds"], EDGE_DEFAULTS)
+    assert [(l.name, l.opacity) for l in layers] == before
