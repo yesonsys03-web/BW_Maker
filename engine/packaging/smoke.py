@@ -221,6 +221,60 @@ def main():
         response = engine.call("존재하지_않는_메서드")
         check("모르는 메서드 → 에러 응답", "error" in response, json.dumps(response)[:300])
 
+        # 전체 캐시 워커 모드. v0.2.7에서 동결 진입점(engine_main.py)이
+        # --warm-worker 분기를 몰라 워커가 **일반 RPC 엔진으로** 떴고 — ready 한
+        # 줄 없이 stdin만 기다렸다 — 빌드 앱의 전체 캐시가 0/6869에서 통째로
+        # 멈췄다. dev는 `-m psd_engine`이라 멀쩡했으므로, 이 검사는 동결본을
+        # 실제로 워커로 띄워야만 잡는다(psd_engine/entry.py 참고). 첫 줄의
+        # ready 이벤트가 판정의 핵심이다: RPC 엔진은 기동 시 아무것도 내지 않는다.
+        cache_dir = work / "타일캐시"
+        worker_tmp = work / "worker-tmp"
+        worker_tmp.mkdir()
+        worker = subprocess.Popen(
+            [str(exe), "--warm-worker", "--max-size", "256"],
+            env={**os.environ, "PSD_ENGINE_TILE_CACHE_DIR": str(cache_dir),
+                 "TMPDIR": str(worker_tmp), "TEMP": str(worker_tmp),
+                 "TMP": str(worker_tmp)},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        worker_watchdog = threading.Timer(60, worker.kill)
+        worker_watchdog.start()
+        try:
+            first = worker.stdout.readline().decode("utf-8", "replace").strip()
+            try:
+                ready_ok = bool(first) and json.loads(first).get("event") == "ready"
+            except ValueError:
+                ready_ok = False
+            check(
+                "워커 모드 기동(ready 이벤트)", ready_ok,
+                f"첫 줄={first!r} — 비어 있으면 동결 진입점이 --warm-worker를 "
+                f"모르고 RPC 엔진으로 뜬 것이다(stderr: "
+                f"{worker.stderr.peek()[:300] if worker.poll() is not None else '살아 있음'})",
+            )
+            request = json.dumps({"path": str(fixture)}, ensure_ascii=False)
+            worker.stdin.write((request + "\n").encode("utf-8"))
+            worker.stdin.flush()
+            file_event = None
+            while file_event is None:
+                line = worker.stdout.readline()
+                if not line:
+                    raise AssertionError(
+                        f"워커가 파일 이벤트 없이 죽었다 (exit={worker.poll()})")
+                message = json.loads(line.decode("utf-8"))
+                if message.get("event") == "file":
+                    file_event = message
+            check("워커가 파일 하나를 끝까지 데움", file_event.get("ok") is True,
+                  json.dumps(file_event, ensure_ascii=False)[:300])
+            check("워커가 타일을 디스크에 쌓음",
+                  cache_dir.is_dir() and any(cache_dir.rglob("*.png")),
+                  str(cache_dir))
+            worker.stdin.close()
+            check("워커 stdin 닫힘 → 정상 종료", worker.wait(timeout=30) == 0)
+        finally:
+            worker_watchdog.cancel()
+            if worker.poll() is None:
+                worker.kill()
+
         exit_code = engine.close()
         check("stdin 닫힘 → 정상 종료", exit_code == 0, f"exit={exit_code}")
         leftovers = [p.name for p in engine_tmp.iterdir()]
