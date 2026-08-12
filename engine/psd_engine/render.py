@@ -949,9 +949,23 @@ def _group_rgba_tiled(psd, group, bbox, leaves, always_wanted):
 def render_thumbnails(session, layer_ids, max_size, out_dir):
     psd = session["psd"]
     result = {}
+    # 그룹 썸네일 캐시 키(보이는 자손 id 집합)를 만들 때 쓰는 역참조.
+    rev = {id(l): k for k, l in session["layers_by_id"].items()}
     for lid in layer_ids:
         layer = session["layers_by_id"][lid]
         if layer.is_group():
+            # 그룹 썸네일은 그룹 전체 합성이라 큰 그룹에서 몇 초~몇 분까지
+            # 실측된 비용이다(THUMBNAIL_TILE_PX 주석의 표). 잎 썸네일처럼
+            # 타일로 대체하면 블렌드·마스크가 걸린 그룹에서 그림이 달라지므로,
+            # 대신 **결과물을 디스크에 기억**한다 — 픽셀은 그대로, 비용은
+            # (파일, 가시성 상태)당 한 번. 눈을 바꾸면 키가 갈려 다시 그린다.
+            vis_ids = sorted(rev[id(d)] for d in layer.descendants()
+                             if d.visible and id(d) in rev)
+            tkey = tilecache.group_thumb_key(lid, max_size, vis_ids)
+            cached = tilecache.load_group_thumb(session, tkey)
+            if cached is not None:
+                result[str(lid)] = _save_png(cached, out_dir, f"thumb_{lid}")
+                continue
             # For groups: include group + ancestors (hidden group override),
             # but respect visible flag on descendants
             ancestors_and_self = set()
@@ -983,6 +997,11 @@ def render_thumbnails(session, layer_ids, max_size, out_dir):
                 # Group has no visible pixel content (e.g. all descendants are
                 # themselves empty/hidden) — not a thumbnail target.
                 continue
+            img = img.convert("RGBA")
+            img.thumbnail((max_size, max_size))
+            tilecache.store_group_thumb(session, tkey, img)
+            result[str(lid)] = _save_png(img, out_dir, f"thumb_{lid}")
+            continue
         else:
             # Artist created the layer but never painted it (empty bbox);
             # extract_rgba()/PIL would raise on a 0x0 image. Not a thumbnail

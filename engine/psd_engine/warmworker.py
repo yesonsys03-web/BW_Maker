@@ -46,9 +46,13 @@ def warm_file(path, max_size, out, edge_lines=None):
     뷰는 자동 검출(find_views)만 다룬다. 수동 지정 뷰는 앱의 작업 상태라 워커가
     모르고, 그런 파일은 드물어서 첫 렌더 한 번을 그냥 치른다.
     """
+    import shutil
+    import tempfile
+
     from . import tilecache
     from .character import find_views
     from .edges import EDGE_DEFAULTS, plan_overlays
+    from .render import render_thumbnails
     from .rpc import _edge_settings_key
 
     mtime = os.path.getmtime(path)
@@ -69,7 +73,9 @@ def warm_file(path, max_size, out, edge_lines=None):
         # 키가 렌더 경로(rpc._cached_plan_overlays)와 비트까지 같아야 한다 —
         # 그래서 병합도 키 추출도 그쪽 코드를 그대로 쓴다.
         opts = {**EDGE_DEFAULTS, **edge_lines}
-    total = len(leaves) + len(views)
+    groups = [lid for lid, layer in built["layers_by_id"].items()
+              if layer.is_group()]
+    total = len(leaves) + len(views) + len(groups)
     done = 0
     for lid in leaves:
         # _preview_tile이 디스크 우선 → 디코드 → 디스크 저장까지 다 한다.
@@ -89,6 +95,20 @@ def warm_file(path, max_size, out, edge_lines=None):
             done += 1
             _emit({"event": "progress", "path": path, "done": done,
                    "total": total}, out)
+    if groups:
+        # 그룹 행 썸네일도 미리 그린다 — 그룹 전체 합성이라 큰 그룹은 몇 초~몇 분
+        # 짜리다. 저장 시점 가시성(파일에 적힌 눈 상태)으로 그리는데, 새로 연
+        # 세션이 처음 보여주는 상태가 정확히 그것이라 첫 화면이 캐시를 친다.
+        # 크기 48은 App.tsx의 renderThumbnails(s, chunk, 48)와 같아야 한다.
+        tmpdir = tempfile.mkdtemp(prefix="warm_thumbs_")
+        try:
+            for gid in groups:
+                render_thumbnails(session, [gid], 48, tmpdir)
+                done += 1
+                _emit({"event": "progress", "path": path, "done": done,
+                       "total": total}, out)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
     return total
 
 
