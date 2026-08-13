@@ -179,7 +179,9 @@ def store(session, layer_id, scale, entry):
 #: 진하다"를 봤다(2026-08-13). PREVIEW_FORMAT·OVERLAY_FORMAT과 같은 역할이다.
 #:
 #: 2: _visible_reduce — 사라질 획만 최소 가시성까지 올린다(판 1은 전부 최댓값).
-SCALED_OVERLAY_FORMAT = 2
+#: 3: 알파를 최댓값이 아니라 **평균 × 배수**로 낸다 — 판 1·2는 획이 블록 경계에
+#:    걸리면 양쪽을 다 채워 1px 획이 2px로 굵어졌다(내보내기와 대조해 확인).
+SCALED_OVERLAY_FORMAT = 3
 
 
 def _scaled_overlay_path(path, mtime, view_key, scale, rgb):
@@ -362,7 +364,9 @@ def store_overlays(session, key, plans):
 #: 9: 축소 보정이 **사라질 획만** 최소 가시성까지 올린다(_visible_reduce) —
 #:    판 4·8은 획을 전부 최댓값으로 올려 실제보다 굵고 진해 보였다. 굵기 차이가
 #:    화면에 남는 다른 그림이 된다. 프런트 판도 함께 올렸다.
-PREVIEW_FORMAT = 9
+#: 10: 축소 보정이 굵기를 안 건드린다(알파에 배수만) — 생성 라인이 내보내기보다
+#:    두 배 굵게 보이던 것이 사라진 다른 그림이다. 프런트 판도 함께 올렸다.
+PREVIEW_FORMAT = 10
 
 
 def preview_key(material):
