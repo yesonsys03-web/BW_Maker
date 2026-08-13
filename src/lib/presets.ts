@@ -78,8 +78,31 @@ export const CHAR_PRESET: Preset = {
   edgeLines: { ...DEFAULT_EDGE_LINES, enabled: true },
 };
 
+/**
+ * 소품(PP/PR) 판용. CHAR와 **한 가지만** 다르다: 색경계선 검출이 픽셀 걸음
+ * (edgeMode "change")이다.
+ *
+ * 소품 판은 색 그림이 통째로 구워져 있고(무늬 선까지 컬러 잎 안에) 광택이
+ * ~30px 램프로 번져 있는 경우가 있다. 기본 검출(region)은 램프의 계단 색
+ * 하나하나를 대표색으로 삼아 이웃 간 거리가 전부 게이트 아래로 쪼개지므로
+ * — 게이트 사슬 — 총 34짜리 광택 경계를 통째로 기각한다(2026-08-13 신고 판
+ * 실측). change는 그 판에서 아티스트 마크업과 일치하는 획을 냈다.
+ *
+ * 뷰 단위 자동 판별은 세 가지 신호(흡수 비율·넓은 창 합집합·거리 게이트)로
+ * 시도했고 전부 전수 감사가 기각했다 — 캐릭터 음영 램프와 광택 램프가
+ * 기하학적으로 같은 부류라서다. 그래서 판 종류 단위로 가른다: 아티스트가
+ * 이미 쓰는 규칙 형태(BG냐 CHAR냐)와 같아서, 소품 폴더(PP/PR)의 판이면
+ * PROP을 고르면 된다.
+ */
+export const PROP_PRESET: Preset = {
+  ...SHARED,
+  name: "PROP",
+  excludeGroupPrefixes: ["-", "HEIGHTS", "TEMPLATE", "COLOR PALETTE"],
+  edgeLines: { ...DEFAULT_EDGE_LINES, enabled: true, edgeMode: "change" },
+};
+
 /** 처음 실행할 때 깔리는 프리셋. 고르면 바로 작업할 수 있어야 한다. */
-export const DEFAULT_PRESETS: Preset[] = [BG_PRESET, CHAR_PRESET];
+export const DEFAULT_PRESETS: Preset[] = [BG_PRESET, CHAR_PRESET, PROP_PRESET];
 
 /** 색 통일을 켤 때 처음 제안하는 색. 라인 아트의 기본값. */
 export const DEFAULT_LINE_COLOR = "#000000";
@@ -318,7 +341,12 @@ export function parsePresets(raw: string): Preset[] {
 export function withDefaultPresets(list: Preset[]): Preset[] {
   const names = new Set(list.map((p) => p.name));
   const missing = DEFAULT_PRESETS.filter((p) => !names.has(p.name)).map((p) => ({ ...p }));
-  return missing.length === 0 ? list : [...missing, ...list];
+  // 빠진 기본은 **끝에** 붙인다. 앞에 끼우면 새 기본 프리셋이 추가되는
+  // 버전마다 모든 기계의 첫 프리셋이 바뀌는데, 배치는 자기 드롭다운의 첫
+  // 번째로 돌므로(BatchPanel) 배치 결과가 조용히 달라진다 — PROP을 추가할 때
+  // 실제로 걸릴 뻔한 함정이다. 끝에 붙이면 어떤 기계에서도 이미 있던 첫
+  // 프리셋이 그대로다.
+  return missing.length === 0 ? list : [...list, ...missing];
 }
 
 /**

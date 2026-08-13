@@ -21,7 +21,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   writeTextFile: (...a: unknown[]) => writeTextFileMock(...a),
 }));
 
-import { BG_PRESET, CHAR_PRESET, DEFAULT_EDGE_LINES, DEFAULT_EXCLUDE_TOKENS, DEFAULT_PRESETS, isValidLineColor, loadPresets, parsePresets, savePresets } from "./presets";
+import { BG_PRESET, CHAR_PRESET, PROP_PRESET, DEFAULT_EDGE_LINES, DEFAULT_EXCLUDE_TOKENS, DEFAULT_PRESETS, isValidLineColor, loadPresets, parsePresets, savePresets } from "./presets";
 import type { Preset } from "./types";
 
 const APP_DATA_DIR = "/mock/appdata";
@@ -41,8 +41,8 @@ beforeEach(() => {
 
 /**
  * 파일에 들어 있던 그 프리셋을 집어온다. **인덱스로 집으면 안 된다** —
- * loadPresets는 빠진 기본 프리셋을 목록 앞에 끼우므로(withDefaultPresets)
- * `[0]`은 파일에 있던 것이 아닐 수 있다. 못 찾으면 조용히 다른 것을 검사하는
+ * loadPresets는 빠진 기본 프리셋을 목록 끝에 붙이므로(withDefaultPresets)
+ * 위치는 파일 내용에 따라 달라진다. 못 찾으면 조용히 다른 것을 검사하는
  * 대신 여기서 터뜨린다.
  */
 async function loadStored(name = "BG"): Promise<Preset> {
@@ -100,11 +100,11 @@ test("CHAR_PRESET은 BG와 **두 가지만** 다르다", () => {
   expect(CHAR_PRESET.edgeLines.width).toBe(0);
 });
 
-test("loadPresets returns both built-ins when the file does not exist", async () => {
+test("loadPresets returns the built-ins when the file does not exist", async () => {
   existsMock.mockResolvedValue(false);
   const result = await loadPresets();
-  expect(result).toEqual([BG_PRESET, CHAR_PRESET]);
-  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR"]);
+  expect(result).toEqual([BG_PRESET, CHAR_PRESET, PROP_PRESET]);
+  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR", "PROP"]);
   expect(readTextFileMock).not.toHaveBeenCalled();
 });
 
@@ -117,8 +117,8 @@ test("loadPresets가 돌려준 기본 프리셋을 고쳐도 원본이 안 바�
 });
 
 test("loadPresets reads and parses existing JSON (round trip)", async () => {
-  // 기본 둘이 다 들어 있는 파일이라 채워 넣을 것이 없다 — 읽은 그대로 나와야 한다.
-  const stored: Preset[] = [BG_PRESET, CHAR_PRESET, { ...BG_PRESET, name: "second" }];
+  // 기본이 다 들어 있는 파일이라 채워 넣을 것이 없다 — 읽은 그대로 나와야 한다.
+  const stored: Preset[] = [BG_PRESET, CHAR_PRESET, PROP_PRESET, { ...BG_PRESET, name: "second" }];
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify(stored));
 
@@ -139,7 +139,9 @@ test("loadPresets tops up defaults that a legacy presets.json never had", async 
 
   const result = await loadPresets();
 
-  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR", "line 추출"]);
+  // 빠진 기본은 **끝에** 붙는다 — 첫 프리셋이 바뀌면 배치가 조용히 다른
+  // 프리셋으로 돈다(BatchPanel은 드롭다운 첫 번째로 돈다).
+  expect(result.map((p) => p.name)).toEqual(["line 추출", "BG", "CHAR", "PROP"]);
   // 끼워 넣기는 메모리에서만 한다 — 저장은 아티스트가 누를 때만이다.
   expect(writeTextFileMock).not.toHaveBeenCalled();
 });
@@ -153,8 +155,34 @@ test("loadPresets does not overwrite a default the artist has edited", async () 
 
   const result = await loadPresets();
 
-  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR"]);
+  expect(result.map((p) => p.name)).toEqual(["CHAR", "BG", "PROP"]);
   expect(result.find((p) => p.name === "CHAR")?.lineColor).toBeNull();
+});
+
+/**
+ * PROP은 CHAR에서 색경계선 검출 방식 하나만 바꾼 프리셋이다. 소품 판은 색
+ * 그림이 통째로 구워져 있고 광택이 램프로 번져 있어 기본 검출(region)이
+ * 게이트 사슬로 경계를 통째로 기각한다 — 근거 실측은 PROP_PRESET 주석에.
+ */
+test("PROP differs from CHAR only in the edge detection mode", () => {
+  expect(PROP_PRESET).toEqual({
+    ...CHAR_PRESET,
+    name: "PROP",
+    edgeLines: { ...CHAR_PRESET.edgeLines, edgeMode: "change" },
+  });
+});
+
+test("topping up a new default never changes which preset is first", async () => {
+  // 배치는 자기 드롭다운의 첫 번째 프리셋으로 돈다. 기본 프리셋이 새로
+  // 추가되는 버전에서 그 첫자리가 바뀌면 배치 결과가 조용히 달라진다.
+  const stored: Preset[] = [BG_PRESET, CHAR_PRESET];
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify(stored));
+
+  const result = await loadPresets();
+
+  expect(result[0].name).toBe("BG");
+  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR", "PROP"]);
 });
 
 test("loadPresets throws on corrupted JSON instead of absorbing the error", async () => {
