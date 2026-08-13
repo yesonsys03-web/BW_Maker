@@ -181,7 +181,9 @@ def store(session, layer_id, scale, entry):
 #: 2: _visible_reduce — 사라질 획만 최소 가시성까지 올린다(판 1은 전부 최댓값).
 #: 3: 알파를 최댓값이 아니라 **평균 × 배수**로 낸다 — 판 1·2는 획이 블록 경계에
 #:    걸리면 양쪽을 다 채워 1px 획이 2px로 굵어졌다(내보내기와 대조해 확인).
-SCALED_OVERLAY_FORMAT = 3
+#: 4: 이미 보이는 획은 아예 안 건드리고, 안 보일 판만 최대치를 끌어올린다 —
+#:    판 3의 무조건 배수는 흐린 가장자리까지 진하게 만들어 여전히 굵어 보였다.
+SCALED_OVERLAY_FORMAT = 4
 
 
 def _scaled_overlay_path(path, mtime, view_key, scale, rgb):
@@ -366,7 +368,8 @@ def store_overlays(session, key, plans):
 #:    화면에 남는 다른 그림이 된다. 프런트 판도 함께 올렸다.
 #: 10: 축소 보정이 굵기를 안 건드린다(알파에 배수만) — 생성 라인이 내보내기보다
 #:    두 배 굵게 보이던 것이 사라진 다른 그림이다. 프런트 판도 함께 올렸다.
-PREVIEW_FORMAT = 10
+#: 11: 축소 보정이 필요한 판에만 걸린다(_visible_reduce 판 4).
+PREVIEW_FORMAT = 11
 
 
 def preview_key(material):
