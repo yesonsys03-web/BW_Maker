@@ -1210,6 +1210,31 @@ def _redness(png):
     return int(((a[..., 0] - np.maximum(a[..., 1], a[..., 2])) * a[..., 3] // 255).max())
 
 
+def test_render_preview_lifts_a_faint_stroke_without_flattening_a_strong_one(fixture_psd, tmp_path):
+    """
+    "사라지지 않게"와 "무조건 진하게"는 다르다.
+
+    전부 최댓값으로 올리면 굵기·농도 차이가 화면에서 사라져 실제보다 굵고 진해
+    보이고, 아티스트는 그것을 결함으로 읽는다 — 생성된 라인이 진해 보인다고
+    실제로 신고됐다(2026-08-13). 얇은 획은 안개가 되지 않아야 하고, 굵은 획은
+    그보다 진하게 남아야 한다.
+    """
+    def render(stroke_px):
+        # 세션을 따로 연다 — 줄여 둔 오버레이 캐시가 모양이 같은 둘을 한 그림으로
+        # 묶지 않게(테스트에는 viewKey가 없다).
+        s = _session(fixture_psd)
+        ov = np.zeros((48, 64, 4), np.uint8)
+        ov[24:24 + stroke_px, :, :3] = [255, 0, 0]
+        ov[24:24 + stroke_px, :, 3] = 255
+        return _redness(render_preview(s, [4], max_size=8, out_dir=tmp_path,
+                                       edge_overlays=[{"rgba": ov, "left": 0, "top": 0,
+                                                       "lineIds": [4]}]))
+
+    thin, thick = render(1), render(8)
+    assert thin >= 100, f"얇은 획이 안개가 됐다 — {thin}"
+    assert thick > thin, f"굵기 차이가 화면에서 사라졌다 — 얇은 {thin}, 굵은 {thick}"
+
+
 def test_render_preview_scales_an_overlay_once_and_reuses_it(fixture_psd, tmp_path, monkeypatch):
     """
     줄여 놓은 오버레이는 (뷰, 배율, 색)만의 함수인데 원본 해상도 배열을 훑는
@@ -1224,8 +1249,8 @@ def test_render_preview_scales_an_overlay_once_and_reuses_it(fixture_psd, tmp_pa
     ov = [{"rgba": overlay, "left": 0, "top": 0, "lineIds": [4]}]
 
     ks = []
-    real = render_mod._max_reduce
-    monkeypatch.setattr(render_mod, "_max_reduce",
+    real = render_mod._visible_reduce
+    monkeypatch.setattr(render_mod, "_visible_reduce",
                         lambda a, k: (ks.append(k), real(a, k))[1])
 
     first = render_preview(s, [4], max_size=8, out_dir=tmp_path, edge_overlays=ov)
@@ -1246,8 +1271,8 @@ def test_render_preview_rescales_the_overlay_when_the_scale_changes(fixture_psd,
     ov = [{"rgba": overlay, "left": 0, "top": 0, "lineIds": [4]}]
 
     ks = []
-    real = render_mod._max_reduce
-    monkeypatch.setattr(render_mod, "_max_reduce",
+    real = render_mod._visible_reduce
+    monkeypatch.setattr(render_mod, "_visible_reduce",
                         lambda a, k: (ks.append(k), real(a, k))[1])
 
     render_preview(s, [4], max_size=8, out_dir=tmp_path, edge_overlays=ov)

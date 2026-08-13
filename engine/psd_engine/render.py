@@ -1191,6 +1191,16 @@ def warm_preview_tiles(session, layer_ids, max_size, budget_s):
 OVERLAY_SCALED_CACHE = 64
 
 
+#: 축소 후 획에 보장하는 최소 알파. "사라지지 않는다"가 목적이지 "진하다"가
+#: 목적이 아니다 — 이 값을 넘는 획은 손대지 않으므로, 화면에서 진해 보이는
+#: 획은 실제로 진한 획이다.
+#:
+#: 보정이 없던 때 2px 획이 축소 후 알파 50(20%)이라 안 보였고("생성이 안 됐다"
+#: 신고 두 건), 1cc4b4f는 그걸 212(83%)까지 올려 이번엔 실제보다 굵고 진해
+#: 보인다는 반대 신고가 왔다(2026-08-13 아티스트). 그 사이를 잡는다.
+OVERLAY_MIN_ALPHA = 110
+
+
 def _max_reduce(arr, k):
     """
     k×k 블록의 채널별 최댓값으로 줄인다. 블록 안에 획이 한 픽셀이라도 있으면
@@ -1214,6 +1224,35 @@ def _max_reduce(arr, k):
         arr = np.pad(arr, ((0, ph), (0, pw), (0, 0)))
     h2, w2 = arr.shape[0] // k, arr.shape[1] // k
     return arr.reshape(h2, k, w2, k, arr.shape[2]).max(axis=(1, 3))
+
+
+def _visible_reduce(arr, k):
+    """
+    k×k 블록으로 줄이되, **사라질 획만** 최소 가시성까지 올린다.
+
+    한 번의 reshape에서 최댓값과 평균을 함께 뽑는다:
+      색   — 최댓값. 획 색이 이웃 투명 픽셀과 섞여 흐려지지 않는다.
+      알파 — 평균(= 실제로 그렇게 보이는 값)을 쓰되, 블록에 획이 있는데도
+             OVERLAY_MIN_ALPHA에 못 미치면 거기까지만 올린다.
+
+    그래서 **원래 진한 획은 손대지 않는다.** 전부 최댓값으로 가면(1cc4b4f와
+    이 함수 이전의 방식) 굵기·농도 차이가 화면에서 사라져 실제보다 굵고 진해
+    보이고, 아티스트가 "뭔가 잘못됐다"고 읽는다 — 실제로 그렇게 신고됐다.
+    반대로 평균만 쓰면 몇 px짜리 획이 20% 알파 안개가 되어 안 보인다.
+    """
+    h, w = arr.shape[:2]
+    ph, pw = (-h) % k, (-w) % k
+    if ph or pw:
+        arr = np.pad(arr, ((0, ph), (0, pw), (0, 0)))
+    h2, w2 = arr.shape[0] // k, arr.shape[1] // k
+    blocks = arr.reshape(h2, k, w2, k, arr.shape[2])
+    mx = blocks.max(axis=(1, 3))
+    mean_a = blocks[..., 3].mean(axis=(1, 3))
+    # 획이 있는 곳(최댓값 알파가 0이 아닌 곳)에만 바닥을 깐다. 빈 곳은 0 그대로다.
+    floor = np.minimum(mx[..., 3], OVERLAY_MIN_ALPHA)
+    out = mx.copy()
+    out[..., 3] = np.maximum(mean_a, floor).round().astype(arr.dtype)
+    return out
 
 
 def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=None,
@@ -1295,8 +1334,13 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
         # 원본 해상도 배열을 훑는 일이라, 캐시가 없으면 **토글할 때마다** 같은 값을
         # 다시 만든다 — 실측으로 레이어 수와 무관하게 매 렌더 0.68초가 여기서
         # 고정으로 나갔다(2026-08-13, 색 판). 화면에 뜨는 것이 무엇이든 뷰는 그대로다.
-        skey = (tuple(overlay["lineIds"]), overlay["left"], overlay["top"],
-                (h, w), round(scale, 6), tuple(rgb) if recolour else None)
+        # viewKey에 뷰 구성과 **픽셀 설정**이 들어 있다(tilecache.overlay_key).
+        # 그것 없이 모양(lineIds·위치·크기)만으로 키를 만들면, 문턱이나 굵기를
+        # 바꿔 오버레이 내용이 달라져도 키가 같아 옛 그림이 그대로 나온다 —
+        # 설정을 고친 사람이 "차이 없음"이라는 틀린 판정을 얻는다.
+        skey = (overlay.get("viewKey"), tuple(overlay["lineIds"]),
+                overlay["left"], overlay["top"], (h, w),
+                round(scale, 6), tuple(rgb) if recolour else None)
         scaled = session.setdefault("_overlay_scaled", OrderedDict())
         img = scaled.get(skey)
         if img is None:
@@ -1316,7 +1360,7 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
             # 맞춘다. 획이 살아남는 것은 블록 최댓값이 보장하고, LANCZOS는 정수배로
             # 안 떨어지는 나머지만 다듬으므로 안개를 만들 여지가 없다.
             if scale < 0.5 and (k := max(1, min(w // tw, h // th))) >= 2:
-                arr = _max_reduce(arr, k)
+                arr = _visible_reduce(arr, k)
             img = Image.fromarray(arr, "RGBA")
             if (tw, th) != img.size:
                 img = img.resize((tw, th), Image.LANCZOS)

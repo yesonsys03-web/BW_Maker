@@ -122,7 +122,7 @@ export interface PreviewFileId {
  * tilecache.PREVIEW_FORMAT과 같은 역할의 프런트 판이고, 숫자를 맞출 필요는
  * 없지만 그쪽을 올릴 때 이쪽도 올려야 하는지 반드시 물을 것.
  */
-export const PREVIEW_PICTURE_VERSION = 8;
+export const PREVIEW_PICTURE_VERSION = 9;
 
 export function previewCacheKey(
   file: PreviewFileId,

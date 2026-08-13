@@ -348,7 +348,10 @@ def store_overlays(session, key, plans):
 #: 8: 판 4의 "미리 두껍게"를 블록 최댓값 축소로 바꿨다(render_preview._max_reduce)
 #:    — 목적(획이 안 사라진다)은 같지만 그림이 미세하게 달라진다. 프런트 판도
 #:    함께 올렸다. 타일 캐시는 안 바뀐다(레이어 원본 픽셀이라 무관).
-PREVIEW_FORMAT = 8
+#: 9: 축소 보정이 **사라질 획만** 최소 가시성까지 올린다(_visible_reduce) —
+#:    판 4·8은 획을 전부 최댓값으로 올려 실제보다 굵고 진해 보였다. 굵기 차이가
+#:    화면에 남는 다른 그림이 된다. 프런트 판도 함께 올렸다.
+PREVIEW_FORMAT = 9
 
 
 def preview_key(material):
