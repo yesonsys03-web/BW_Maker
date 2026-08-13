@@ -825,6 +825,74 @@ test("the line-only view shows one row for the group that holds the lines, not t
   expect(leafCheckboxes()).toHaveLength(2);
 });
 
+/** 트리 본체의 잎 행. 그 위에 얹히는 접힌 병합 줄과 섞이지 않게 트리 쪽만 본다. */
+function treeLeafRows(): HTMLElement[] {
+  return Array.from(document.querySelectorAll('.tree-body[role="tree"] .tree-row-leaf'));
+}
+
+/**
+ * 자동 병합은 라인이 한 장뿐인 그룹에도 merge를 낸다 — 그래야 그 시트가 그룹
+ * 이름(TRUNK)으로 나간다. 그런데 접힌 병합 줄은 소스가 둘 이상일 때만 생기는
+ * 반면(collapseMergedRows), 트리에서 잎을 빼는 판정은 "어떤 병합에든 묶였으면"
+ * 이었다. 그래서 한 장짜리 병합의 잎은 병합 줄에도 트리에도 없이 사라졌다.
+ *
+ * 행이 없으면 체크박스도 없고, 체크박스가 없으면 끌 방법이 없다 — 아티스트는
+ * "토글을 전부 껐는데 그림이 보인다"로 겪었다(2026-08-13). 내보내기 계획에는
+ * 처음부터 다 들어 있었으므로 이것은 표시와 조작만의 결함이다.
+ */
+test("a merge that holds a single layer keeps that layer's row in the tree", () => {
+  renderTree(
+    [
+      group(10, "BG", [leaf(1, "Line", "pixel"), leaf(2, "Line", "pixel")]),
+      group(20, "TRUNK", [leaf(3, "Line", "pixel")]),
+    ],
+    [1, 2, 3],
+    {
+      ops: [
+        { op: "merge", layerIds: [1, 2], name: "BG" },
+        { op: "merge", layerIds: [3], name: "TRUNK" },
+      ],
+    }
+  );
+  fireEvent.change(screen.getByPlaceholderText("레이어 이름 / 그룹 경로 검색"), {
+    target: { value: "line" },
+  });
+
+  // 2장 병합은 접힌 줄 하나로. 한 장짜리는 접을 것이 없으니 제 그룹의 잎으로 남는다.
+  expect(screen.getAllByRole("listitem")).toHaveLength(1);
+  expect(groupRows().map((r) => r.querySelector(".node-name")?.textContent)).toEqual(["TRUNK"]);
+
+  const rows = treeLeafRows();
+  expect(rows).toHaveLength(1);
+  expect((rows[0].querySelector("input.include-checkbox") as HTMLInputElement).checked).toBe(true);
+  // 어느 이름으로 나가는지는 라벨이 말한다 — 병합 줄이 없어도 알 수 있어야, 그
+  // 잎을 트리에 남기는 것이 정보를 잃지 않는다.
+  expect(rows[0].querySelector(".node-export-label")?.textContent).toBe("⤳ TRUNK");
+});
+
+test("that row's checkbox works, which is exactly what the missing row took away", () => {
+  const { onSetIncluded } = renderTree(
+    [
+      group(10, "BG", [leaf(1, "Line", "pixel"), leaf(2, "Line", "pixel")]),
+      group(20, "TRUNK", [leaf(3, "Line", "pixel")]),
+    ],
+    [1, 2, 3],
+    {
+      ops: [
+        { op: "merge", layerIds: [1, 2], name: "BG" },
+        { op: "merge", layerIds: [3], name: "TRUNK" },
+      ],
+    }
+  );
+  fireEvent.change(screen.getByPlaceholderText("레이어 이름 / 그룹 경로 검색"), {
+    target: { value: "line" },
+  });
+
+  fireEvent.click(treeLeafRows()[0].querySelector("input.include-checkbox")!);
+
+  expect(onSetIncluded).toHaveBeenCalledWith([1, 2]);
+});
+
 test("a group that only holds other groups gets no row of its own", () => {
   // 라인을 **직접** 가진 그룹에만 줄을 준다. 중간 그룹이 줄을 얻으면 그 체크박스가
   // 무엇을 켜는지 화면만 봐서는 알 수 없다.

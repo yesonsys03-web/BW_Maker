@@ -1732,21 +1732,64 @@ test("the warmup chain shows leaf-level progress while it runs", async () => {
   // 아무거나 누른다 — 그때마다 워밍업은 비켜서느라 더 안 끝난다. 그래서 이
   // 진행 표시는 장식이 아니라 기능이다. 첫 요청을 잡아 두고 막대가 떠 있는지,
   // 체인이 다 돌면 사라지는지 본다.
-  let release!: (v: { warmed: number[]; skipped: number[]; remaining: number[] }) => void;
-  engine.warmPreviewTiles.mockImplementationOnce(() => new Promise((r) => (release = r)));
+  const deferrals: ((v: { warmed: number[]; skipped: number[]; remaining: number[] }) => void)[] = [];
+  const defer = () => new Promise<never>((r) => deferrals.push(r as never));
+  engine.warmPreviewTiles.mockImplementationOnce(defer).mockImplementationOnce(defer);
   render(<App />);
   await addFiles({ click });
   await finishOpen(0, 1);
   await finishOpen(1, 2);
   await finishOpen(2, 3);
 
-  // 드로잉 레이어 단위 합계다: 자동 구간은 활성+다음 두 파일 × 3장 = 6. 파일
-  // 단위로 세면 큰 파일에서 몇 분씩 안 움직여 "멈췄다"로 읽힌다. 문구는 전체
-  // 캐시("전체 캐시 만드는 중")와 달라야 한다 — 같으면 파일 전환마다 뜨는 이
-  // 짧은 표시가 "전체 캐시가 안 됐다"로 읽힌다.
-  await waitFor(() => expect(screen.getByText(/레이어 불러오는 중\.\.\. 0\/6/)).toBeTruthy());
-  release({ warmed: [1, 2, 3], skipped: [], remaining: [] });
-  await waitFor(() => expect(screen.queryByText(/레이어 불러오는 중/)).toBeNull());
+  // 1단계는 **활성 파일의 라인만** 센다(픽스처의 잎 셋은 전부 "line N"이다).
+  // 파일 단위로 세면 큰 파일에서 몇 분씩 안 움직여 "멈췄다"로 읽히므로 잎
+  // 단위다. 문구는 전체 캐시("전체 캐시 만드는 중")와 달라야 한다 — 같으면
+  // 파일 전환마다 뜨는 이 짧은 표시가 "전체 캐시가 안 됐다"로 읽힌다.
+  await waitFor(() => expect(screen.getByText(/라인 준비 중\.\.\. 0\/3/)).toBeTruthy());
+
+  // 라인이 끝나면 문구가 바뀐다. 여기부터는 다음 파일을 데우는 뒷정리라
+  // 기다릴 필요가 없고, 그 사실이 화면에 드러나야 아티스트가 막대 끝까지
+  // 기다리지 않는다(2026-08-13 아티스트와 정한 표시 방식).
+  deferrals[0]({ warmed: [1, 2, 3], skipped: [], remaining: [] });
+  await waitFor(() => expect(screen.getByText(/나머지 레이어 준비 중\.\.\. 0\/3/)).toBeTruthy());
+
+  deferrals[1]({ warmed: [1, 2, 3], skipped: [], remaining: [] });
+  await waitFor(() => expect(screen.queryByText(/준비 중/)).toBeNull());
+});
+
+test("the warmup warms the active file's lines before anything else", async () => {
+  // 순서가 이 기능의 전부다. 라인이 뒤로 밀리면 문구만 둘로 나뉘고 아티스트가
+  // 기다리는 시간은 그대로다.
+  const deferrals: ((v: { warmed: number[]; skipped: number[]; remaining: number[] }) => void)[] = [];
+  engine.warmPreviewTiles.mockImplementation(
+    () => new Promise<never>((r) => deferrals.push(r as never))
+  );
+  render(<App />);
+  await addFiles({ click });
+  // 활성 파일의 잎 넷 중 라인은 둘(2, 4)뿐이다.
+  opens[0].d.resolve({
+    sessionId: 1,
+    width: 10,
+    height: 10,
+    colorMode: "RGB",
+    depth: 8,
+    mtime: 1,
+    tree: [
+      { ...treeOf([1])[0], name: "fill 1" },
+      treeOf([2])[0],
+      { ...treeOf([3])[0], name: "grain 3" },
+      treeOf([4])[0],
+    ],
+  });
+  await waitFor(() => expect(screen.queryAllByText("열림").length).toBeGreaterThanOrEqual(1));
+  // 워밍업 체인은 로드 큐가 다 끝난 뒤에야 돈다.
+  await finishOpen(1, 2);
+  await finishOpen(2, 3);
+
+  await waitFor(() => expect(engine.warmPreviewTiles).toHaveBeenCalled());
+  // 첫 요청에 라인 둘만 실려 나간다 — fill·grain은 2단계로 밀린다.
+  expect(engine.warmPreviewTiles.mock.calls[0][1]).toEqual([2, 4]);
+  await waitFor(() => expect(screen.getByText(/라인 준비 중\.\.\. 0\/2/)).toBeTruthy());
 });
 
 /**

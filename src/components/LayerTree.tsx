@@ -5,6 +5,7 @@ import {
   applyBulkInclude,
   bulkTogglableIds,
   collapseMergedRows,
+  collapsedSourceIds,
   filterLeaves,
   flattenLeaves,
   isFiltering,
@@ -247,8 +248,11 @@ export function LayerTree({
     [allLeaves, ops.ops]
   );
   const exportLabels = useMemo(() => exportLabelsBySourceId(planEntries), [planEntries]);
-  // "병합에서 빼기"의 대상 판정용.
+  // "병합에서 빼기"의 대상 판정용. 한 장짜리 병합도 대상이다 — 빼내면 원래
+  // 이름으로 돌아가므로 그것도 되돌릴 것이 있는 상태다.
   const mergedSourceIds = useMemo(() => mergedSourceIdsOf(planEntries), [planEntries]);
+  // 트리에서 뺄 잎의 판정용. 위와 달리 **접힌 줄이 실제로 생기는 병합**만이다.
+  const collapsedSources = useMemo(() => collapsedSourceIds(planEntries), [planEntries]);
   const filtering = isFiltering(filterMode, query);
   const filteredLeaves = useMemo(
     () => filterLeaves(allLeaves, {
@@ -268,18 +272,21 @@ export function LayerTree({
   /**
    * 필터를 통과한 잎을 원래 구조 그대로 남긴 트리(pruneTree 주석 참고).
    *
-   * **병합에 묶인 잎은 뺀다.** 그것은 트리 위의 접힌 병합 줄이 대표하므로, 여기
-   * 남겨두면 같은 레이어가 화면에 두 번 나온다 — 한 번은 병합 줄로, 한 번은 제
-   * 그룹 자리에. 그러면 "몇 장을 지정했는가"를 세는 눈과 손이 갈린다.
+   * **접힌 병합 줄이 대표하는 잎은 뺀다.** 남겨두면 같은 레이어가 화면에 두 번
+   * 나온다 — 한 번은 병합 줄로, 한 번은 제 그룹 자리에. 그러면 "몇 장을
+   * 지정했는가"를 세는 눈과 손이 갈린다.
+   *
+   * 판정은 collapsedSourceIds 하나뿐이다. "병합에 묶였는가"로 물었을 때는 줄이
+   * 생기지 않는 한 장짜리 병합의 잎까지 빠져 화면에서 사라졌다.
    */
   const filteredTree = useMemo(() => {
     if (!tree) return [];
     if (!filtering) return tree;
     const keep = new Set(
-      filteredLeaves.map((l) => l.node.id).filter((id) => !mergedSourceIds.has(id))
+      filteredLeaves.map((l) => l.node.id).filter((id) => !collapsedSources.has(id))
     );
     return pruneTree(tree, keep);
-  }, [tree, filtering, filteredLeaves, mergedSourceIds]);
+  }, [tree, filtering, filteredLeaves, collapsedSources]);
 
   // 행 id → 그 행이 대표하는 소스 레이어 id들. 병합 행의 체크박스·눈·제외는
   // 묶인 소스 전체에 적용돼야 한다.

@@ -3,13 +3,16 @@ import {
   applyBulkInclude,
   bulkTogglableIds,
   collapseMergedRows,
+  collapsedSourceIds,
   filterLeaves,
   flattenLeaves,
   isFiltering,
   isLineFallbackActive,
+  splitLineLeafIds,
   suggestMergeName,
   lineLeafIds,
 } from "./layerFilter";
+import { pixelLeafIds } from "./preview";
 import type { TreeNode } from "./types";
 
 function leaf(id: number, name: string, path: string[], kind = "pixel"): TreeNode {
@@ -97,6 +100,31 @@ test("the name fallback keeps underscore and camel case names", () => {
   expect(lineLeafIds(joined, [])).toEqual([9, 10]);
 });
 
+// splitLineLeafIds: 워밍업이 라인을 먼저 데우도록 가른다. 색 판은 드로잉 레이어가
+// 백 장 넘어서 전부 데우는 데 몇 분이 걸리는데, 아티스트가 토글하는 것은 라인뿐이다.
+
+test("splitLineLeafIds puts the line leaves first and the rest after", () => {
+  expect(splitLineLeafIds(tree, [])).toEqual({ line: [2, 4], rest: [1, 5] });
+});
+
+test("splitLineLeafIds follows the preset's matches, like the line-only view", () => {
+  expect(splitLineLeafIds(tree, [5])).toEqual({ line: [5], rest: [1, 2, 4] });
+});
+
+test("splitLineLeafIds counts hand-designated leaves as lines", () => {
+  expect(splitLineLeafIds(tree, [5], [1])).toEqual({ line: [1, 5], rest: [2, 4] });
+});
+
+/**
+ * 워밍업 대상은 pixelLeafIds다. 이 분류에서 한 장이라도 새면 그 잎은 어느 단계에도
+ * 안 실려 영영 안 데워지고, 그 잎의 첫 토글만 몇십 초씩 걸리는 채로 남는다.
+ */
+test("the two lists together are exactly the leaves the warmup would have warmed", () => {
+  const { line, rest } = splitLineLeafIds(tree, [5], [1]);
+  expect([...line, ...rest].sort((a, b) => a - b)).toEqual(pixelLeafIds(tree).sort((a, b) => a - b));
+  expect(line.filter((id) => rest.includes(id))).toEqual([]);
+});
+
 test("isLineFallbackActive only reports the fallback in line mode without matches", () => {
   expect(isLineFallbackActive("line", [])).toBe(true);
   expect(isLineFallbackActive("line", [2])).toBe(false);
@@ -178,6 +206,23 @@ test("a merged row carries its sources and the merge's total source count", () =
   if (merged?.kind !== "merged") throw new Error("unreachable");
   expect(merged.leaves.map((l) => l.node.id)).toEqual([2, 4]);
   expect(merged.sourceCount).toBe(2);
+});
+
+/**
+ * 트리에서 잎을 빼는 판정(collapsedSourceIds)과 병합 줄을 만드는 판정
+ * (collapseMergedRows)이 갈라지면, 한쪽이 "줄이 대표한다"고 빼는데 다른 쪽은
+ * 줄을 안 만들어 그 레이어가 화면에서 통째로 사라진다. 자동 병합이 라인 한 장인
+ * 요소에도 merge를 내므로 실제로 일어났던 일이다(2026-08-13).
+ */
+test("collapsedSourceIds names exactly the leaves the merged rows swallow", () => {
+  const entries = [entry(-1, [2, 4], "BG"), entry(-2, [5], "TRUNK"), entry(6, [6], null)];
+  const swallowed = collapseMergedRows(leaves, entries)
+    .flatMap((r) => (r.kind === "merged" ? r.leaves.map((l) => l.node.id) : []))
+    .sort((a, b) => a - b);
+
+  expect([...collapsedSourceIds(entries)].sort((a, b) => a - b)).toEqual(swallowed);
+  // 한 장짜리 병합은 접히지 않으므로 여기 없다 — 그 잎은 트리에 제 행으로 남는다.
+  expect(collapsedSourceIds(entries).has(5)).toBe(false);
 });
 
 test("collapseMergedRows leaves plain and renamed entries as their own rows", () => {

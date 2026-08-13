@@ -85,6 +85,33 @@ export function lineLeafIds(
     .map((l) => l.node.id);
 }
 
+/**
+ * 워밍업 순서를 정하려고 파일의 **픽셀 잎**을 "라인"과 "나머지"로 가른다.
+ *
+ * 아티스트가 실제로 토글하는 것은 라인 레이어다. 그런데 워밍업은 드로잉 레이어를
+ * 전부 데우므로, 색 판(레이어 144장, 283MB)에서는 정작 쓸 라인이 언제 준비됐는지
+ * 알 수 없이 몇 분을 기다리게 된다 — 라인을 먼저 데우고 그 구간을 따로 알리기
+ * 위한 분류다.
+ *
+ * 기준은 '라인만' 목록과 **같은 함수**(lineLeafIds)다. 갈라지면 화면이 라인이라
+ * 부르는 것과 먼저 데우는 것이 서로 다른 집합이 된다.
+ *
+ * 두 목록을 합치면 pixelLeafIds(preview.ts)와 같은 집합이다 — 워밍업이 그것을
+ * 대상으로 삼으므로, 여기서 한 장이라도 새면 그 잎은 영영 안 데워진다.
+ */
+export function splitLineLeafIds(
+  tree: TreeNode[],
+  matchedIds: number[],
+  manualLineIds: number[] = []
+): { line: number[]; rest: number[] } {
+  const leaves = flattenLeaves(tree).filter((l) => l.node.kind === "pixel");
+  const isLine = new Set(lineLeafIds(leaves, matchedIds, manualLineIds));
+  const line: number[] = [];
+  const rest: number[] = [];
+  for (const l of leaves) (isLine.has(l.node.id) ? line : rest).push(l.node.id);
+  return { line, rest };
+}
+
 /** "라인만"이 프리셋 매칭이 아니라 이름 규칙으로 대체 동작 중인지. */
 export function isLineFallbackActive(mode: LayerFilterMode, matchedIds: number[]): boolean {
   return mode === "line" && matchedIds.length === 0;
@@ -150,6 +177,37 @@ export type FlatRow =
   | { kind: "merged"; entryId: number; name: string; leaves: FlatLeaf[]; sourceCount: number };
 
 /**
+ * 병합 줄로 접히는 항목인지 — **소스가 둘 이상일 때만**이다.
+ *
+ * 자동 병합은 라인이 한 장뿐인 요소에도 merge를 낸다. 그래야 그 시트가 요소
+ * 이름(TRUNK)으로 나가기 때문이다. 그런 항목은 접을 것이 없으니 줄을 만들지
+ * 않고 잎을 제자리에 둔다 — 어느 이름으로 나가는지는 행의 ⤳ 라벨이 말한다.
+ */
+function isCollapsible(entry: Entry): boolean {
+  return entry.sourceIds.length > 1;
+}
+
+/**
+ * 접힌 병합 줄이 대표하는 소스 leaf.
+ *
+ * 트리에서 이 잎들을 빼는 데 쓴다 — 안 빼면 같은 레이어가 병합 줄과 제 그룹
+ * 자리에 두 번 나온다.
+ *
+ * **collapseMergedRows와 같은 조건이어야 한다.** 트리에서 빼는 판정이 "어떤
+ * 병합에든 묶였으면"이던 때, 한 장짜리 병합의 잎은 줄도 못 얻고 트리에서도
+ * 빠져 화면에서 통째로 사라졌다. 행이 없으면 체크박스도 없어서 미리보기에서
+ * 끌 수 없었다(2026-08-13 아티스트 보고). 그래서 두 규칙이 한 함수를 본다.
+ */
+export function collapsedSourceIds(entries: Entry[]): Set<number> {
+  const out = new Set<number>();
+  for (const entry of entries) {
+    if (!isCollapsible(entry)) continue;
+    for (const sourceId of entry.sourceIds) out.add(sourceId);
+  }
+  return out;
+}
+
+/**
  * 병합된 소스들을 한 행으로 접는다.
  *
  * 트리 보기는 원본 PSD 구조를 그대로 비춰야 해서 병합을 접을 수 없다 — 서로 다른
@@ -162,7 +220,7 @@ export type FlatRow =
 export function collapseMergedRows(leaves: FlatLeaf[], entries: Entry[]): FlatRow[] {
   const entryBySource = new Map<number, Entry>();
   for (const entry of entries) {
-    if (entry.sourceIds.length < 2) continue;
+    if (!isCollapsible(entry)) continue;
     for (const sourceId of entry.sourceIds) entryBySource.set(sourceId, entry);
   }
   if (entryBySource.size === 0) return leaves.map((leaf) => ({ kind: "leaf", leaf }));

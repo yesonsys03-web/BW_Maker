@@ -29,6 +29,7 @@ import {
   clampTreePanelWidth,
   parseTreePanelWidth,
 } from "./lib/layout";
+import { splitLineLeafIds } from "./lib/layerFilter";
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY, loadPresets } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError } from "./lib/preview";
@@ -50,6 +51,18 @@ import { drainWarmupQueue } from "./lib/warmupQueue";
 import type { EdgeLines, Preset } from "./lib/types";
 
 type BottomTab = "history" | "batch";
+
+/**
+ * 워밍업 막대가 지금 무엇을 데우는 중인지. 문구가 이걸로 갈린다.
+ *
+ *   line — 활성 파일의 라인 레이어. 아티스트가 실제로 토글하는 것들이다.
+ *   rest — 그 밖의 드로잉 레이어(+ 다음 파일·스윕). 안 기다려도 되는 뒷정리다.
+ *   all  — 라인 구간이 없어 나눌 것도 없다(프리셋 미적용, 라인 없는 파일).
+ *
+ * "나머지"라는 말은 앞선 구간이 있었을 때만 참이다. 라인 구간이 없었는데 그렇게
+ * 부르면 아티스트는 못 본 단계를 놓친 줄로 읽는다 — 그래서 all이 따로 있다.
+ */
+type WarmPhase = "line" | "rest" | "all";
 
 /**
  * 썸네일을 한 번에 몇 장씩 요청할지. 엔진은 stdin 큐를 순서대로 처리하므로 이
@@ -564,7 +577,9 @@ function AppShell() {
    * 눈에 보이는 진행이 없으면 사용자는 앱이 멈췄다고 보고 아무거나 누르고,
    * 그때마다 워밍업은 비켜서느라 더 안 끝난다 — 그래서 이 표시가 기능이다.
    */
-  const [warmProgress, setWarmProgress] = useState<{ done: number; total: number } | null>(null);
+  const [warmProgress, setWarmProgress] = useState<
+    { done: number; total: number; phase: WarmPhase } | null
+  >(null);
   /**
    * "전체 캐시" 요청이 켜져 있는지. 나머지 파일 전체 스윕은 몇 시간짜리 작업이라
    * 자동으로 돌지 않는다 — 사용자가 버튼으로 시작하고, 버튼으로 멈춘다(활성·다음
@@ -1287,22 +1302,48 @@ function AppShell() {
     // 진행은 잎 단위로 센다 — 파일 단위는 큰 파일에서 몇 분씩 안 움직여
     // "멈췄다"로 읽힌다. 이미 핫인 잎은 엔진이 첫 응답에서 한꺼번에 걸러
     // 주므로, 데워진 파일 구간은 막대가 빠르게 지나간다.
-    const chainFiles = [
-      ...(needsWarm(active) ? [active] : []),
+    //
+    // **활성 파일의 라인을 먼저 데운다.** 아티스트가 토글하는 것은 라인뿐인데
+    // 워밍업은 드로잉 레이어를 전부 데운다 — 색 판(NAS의 283MB, 드로잉 레이어
+    // 144장)에서는 정작 쓸 라인이 언제 준비됐는지 모른 채 몇 분을 기다리게 된다.
+    // 라인을 앞으로 빼고 막대 문구도 함께 나눠, "라인은 준비됐다"를 화면이 말할
+    // 수 있게 한다(2026-08-13 아티스트 요청).
+    //
+    // 라인 판정은 '라인만' 목록과 같은 함수를 쓴다(splitLineLeafIds) — 갈라지면
+    // 화면이 라인이라 부르는 것과 먼저 데우는 것이 서로 다른 집합이 된다.
+    const activeSplit = needsWarm(active)
+      ? splitLineLeafIds(
+          active.tree!,
+          matchedIdsByPathRef.current[active.path] ?? [],
+          opsByPathRef.current[active.path]?.manualLineIds ?? []
+        )
+      : { line: [], rest: [] };
+    const restFiles = [
       ...(next !== undefined && needsWarm(next) ? [next] : []),
       ...sweep,
     ];
-    const totalLeaves = chainFiles.reduce((n, f) => n + pixelLeafIds(f.tree!).length, 0);
-    let doneLeaves = 0;
-    if (totalLeaves > 0) setWarmProgress({ done: 0, total: totalLeaves });
+    const lineTotal = activeSplit.line.length;
+    const restTotal =
+      activeSplit.rest.length + restFiles.reduce((n, f) => n + pixelLeafIds(f.tree!).length, 0);
 
-    const warmFile = async (file: FileEntry, alsoCancelled?: () => boolean): Promise<boolean> => {
-      let sid = file.sessionId!;
-      const leafIds = pixelLeafIds(file.tree!);
-      if (leafIds.length === 0) {
-        warmedSessionsRef.current.add(sid);
-        return true;
-      }
+    // 단계마다 0부터 다시 센다. 두 단계를 하나의 총량으로 이어 세면 문구가
+    // 바뀌는 순간 숫자가 안 맞아 보인다(라인 41/41 뒤에 42/144가 오는 식).
+    let phase: WarmPhase = lineTotal > 0 ? "line" : "all";
+    let phaseTotal = lineTotal > 0 ? lineTotal : restTotal;
+    let doneLeaves = 0;
+    if (lineTotal + restTotal > 0) setWarmProgress({ done: 0, total: phaseTotal, phase });
+
+    // 세션 id를 받고 돌려준다. 활성 파일은 두 단계로 나뉘어 두 번 불리는데,
+    // 1단계 도중 축출-재오픈이 있었으면 file.sessionId는 이미 낡은 값이다 —
+    // 그대로 2단계에 넘기면 재오픈을 한 번 더 하게 된다.
+    const warmIds = async (
+      file: FileEntry,
+      sid0: number,
+      leafIds: number[],
+      alsoCancelled?: () => boolean
+    ): Promise<{ ok: boolean; reopened: boolean; sid: number }> => {
+      if (leafIds.length === 0) return { ok: true, reopened: false, sid: sid0 };
+      let sid = sid0;
       const base = doneLeaves;
       let reopened = false;
       const summary = await drainWarmupQueue({
@@ -1322,21 +1363,56 @@ function AppShell() {
         cancelled: () => chainCancelled() || (alsoCancelled?.() ?? false),
         onProgress: (w, s) => {
           doneLeaves = base + w + s;
-          setWarmProgress({ done: doneLeaves, total: totalLeaves });
+          setWarmProgress({ done: doneLeaves, total: phaseTotal, phase });
         },
       });
       if (summary !== null) {
         doneLeaves = base + leafIds.length;
-        setWarmProgress({ done: doneLeaves, total: totalLeaves });
+        setWarmProgress({ done: doneLeaves, total: phaseTotal, phase });
       }
-      if (summary !== null && !reopened) warmedSessionsRef.current.add(sid);
-      return summary !== null;
+      return { ok: summary !== null, reopened, sid };
+    };
+
+    /** 파일 하나를 통째로 데운다(활성 파일 말고는 나눌 이유가 없다). */
+    const warmFile = async (file: FileEntry, alsoCancelled?: () => boolean): Promise<boolean> => {
+      const leafIds = pixelLeafIds(file.tree!);
+      if (leafIds.length === 0) {
+        warmedSessionsRef.current.add(file.sessionId!);
+        return true;
+      }
+      const r = await warmIds(file, file.sessionId!, leafIds, alsoCancelled);
+      if (r.ok && !r.reopened) warmedSessionsRef.current.add(r.sid);
+      return r.ok;
     };
 
     warmingRef.current = true;
     void (async () => {
       try {
-        if (needsWarm(active) && !(await warmFile(active))) return true;
+        // 1단계 — 활성 파일의 라인. 여기까지 끝나면 아티스트가 쓰는 토글은
+        // 전부 즉시 반응한다.
+        let activeSid = active.sessionId!;
+        let activeReopened = false;
+        if (needsWarm(active)) {
+          const r = await warmIds(active, activeSid, activeSplit.line);
+          if (!r.ok) return true;
+          activeSid = r.sid;
+          activeReopened = r.reopened;
+        }
+        // 2단계 — 나머지. 여기부터는 안 기다려도 되는 뒷정리다. 데울 것이
+        // 없으면 문구를 바꾸지 않는다 — 0/0 막대가 한 번 스칠 뿐이다.
+        if (phase === "line" && restTotal > 0) {
+          phase = "rest";
+          phaseTotal = restTotal;
+          doneLeaves = 0;
+          setWarmProgress({ done: 0, total: restTotal, phase });
+        }
+        if (needsWarm(active)) {
+          const r = await warmIds(active, activeSid, activeSplit.rest);
+          if (!r.ok) return true;
+          // 두 단계를 다 마쳤을 때만 데운 것으로 적는다. 어느 쪽에서든 재오픈이
+          // 끼었으면 그전에 데운 타일은 새 세션에 없다.
+          if (!activeReopened && !r.reopened) warmedSessionsRef.current.add(r.sid);
+        }
         if (next !== undefined && needsWarm(next) && !chainCancelled()) {
           if (!(await warmFile(next))) return true;
         }
@@ -1411,7 +1487,9 @@ function AppShell() {
     // 총량으로 자라며 채워진다(진행바가 100%를 넘지 않게 max로 합친다).
     const estimated = targets.reduce(
       (n, f) => n + (f.tree ? pixelLeafIds(f.tree).length : 0), 0);
-    setWarmProgress({ done: 0, total: estimated });
+    // 워커 스윕은 폴더 전체를 한 덩어리로 돈다 — 라인/나머지로 나누지 않는다.
+    // 문구도 fullCacheOn이 "전체 캐시 만드는 중"으로 덮으므로 단계는 all이다.
+    setWarmProgress({ done: 0, total: estimated, phase: "all" });
     // 프리셋 목록을 함께 보낸다 — 워커가 각 파일의 뷰 오버레이(뷰당 9~36초)와
     // 프리셋마다 갓 적용한 화면의 미리보기 PNG까지 미리 구워 디스크에 쌓아야,
     // "전체 캐시 완료 = 어떤 파일이든 즉시"가 BG·CHAR 어느 프리셋을 골라도
@@ -1441,6 +1519,7 @@ function AppShell() {
         setWarmProgress({
           done: p.doneLeaves,
           total: Math.max(estimated, p.totalLeavesKnown, p.doneLeaves),
+          phase: "all",
         }),
     });
     void handle.finished.then((result) => {
@@ -1712,12 +1791,24 @@ function AppShell() {
         warmProgress={
           warmProgress
             ? {
-                ...warmProgress,
-                // 두 가지 다른 일이 같은 바를 쓴다: 전체 캐시(디스크에 쌓기,
+                done: warmProgress.done,
+                total: warmProgress.total,
+                // 세 가지 다른 일이 같은 바를 쓴다: 전체 캐시(디스크에 쌓기,
                 // 오래 걸릴 수 있음)와 파일 전환 시 자동 워밍업(디스크→RAM,
                 // 초 단위). 문구가 같으면 후자가 뜰 때마다 "전체 캐시가 안
                 // 됐나"로 읽힌다 — 실제로 그렇게 읽혔다.
-                label: fullCacheOn ? "전체 캐시 만드는 중" : "레이어 불러오는 중",
+                //
+                // 워밍업은 다시 둘로 갈린다. 라인 구간은 **기다릴 값이 있는**
+                // 시간이고(끝나면 토글이 즉시 반응한다), 나머지는 안 기다려도
+                // 되는 뒷정리다 — 한 문구로 묶으면 아티스트가 그 둘을 구분할
+                // 방법이 없어 끝까지 기다리게 된다.
+                label: fullCacheOn
+                  ? "전체 캐시 만드는 중"
+                  : warmProgress.phase === "line"
+                    ? "라인 준비 중"
+                    : warmProgress.phase === "rest"
+                      ? "나머지 레이어 준비 중"
+                      : "레이어 불러오는 중",
               }
             : null
         }
