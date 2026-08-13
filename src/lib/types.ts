@@ -10,6 +10,12 @@ export interface TreeNode {
   opacity: number;
   bbox: [number, number, number, number];
   hasMask: boolean;
+  /**
+   * 실제로 그려진 채널을 들고 있는지(엔진 tree.py가 채운다). 이 필드가 생기기
+   * 전에 저장된 프로젝트의 트리에는 없으므로 선택적이다 — 없으면 kind가 pixel인
+   * 것만 그릴 수 있다고 본다(엔진 matching._leaf_skip_reason과 같은 규칙).
+   */
+  hasPixels?: boolean;
   path: string[];
   children?: TreeNode[];
 }

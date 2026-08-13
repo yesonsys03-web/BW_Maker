@@ -43,6 +43,7 @@ import {
 } from "./lib/project";
 import { loadProjectFrom, saveProjectTo } from "./lib/projectFs";
 import { undrawableReport } from "./lib/skippedReport";
+import { suggestLineLayers } from "./lib/suggestLines";
 import { missingFromChunk, nextThumbnailChunk } from "./lib/thumbnailQueue";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
 import { drainWarmupQueue } from "./lib/warmupQueue";
@@ -1495,6 +1496,33 @@ function AppShell() {
     return out;
   }, [state.files, state.opsByPath]);
 
+  /** FilePanel의 "라인필요" 배지와 같은 조건. 막대와 배지가 다른 수를 말하면 안 된다. */
+  const needsLineCount = useMemo(
+    () => state.files.filter((f) => entryCounts[f.path] === 0).length,
+    [state.files, entryCounts]
+  );
+
+  /**
+   * "라인필요" 파일 전부에 라인 후보를 일괄 지정한다. 규칙과 측정 근거는
+   * lib/suggestLines.ts — 군중 판에는 획 선화가 없어서 이름 규칙이 원리적으로
+   * 못 잡고, 납품에는 실루엣 그림이 그대로 나가야 한다.
+   *
+   * setManualLine 액션을 파일별로 그대로 쓰므로 미리보기·내보내기·프로젝트
+   * 저장이 전부 일반 수동 지정과 같은 길을 탄다. 지정이 끝나면 entries가 0이
+   * 아니게 되어 "라인필요" 배지와 이 버튼이 함께 사라진다 — 남아 있다면 후보를
+   * 한 장도 못 찾은 파일이 있다는 뜻이라, 그 파일은 여전히 사람 몫이다.
+   */
+  const handleApplyLineSuggestions = useCallback(() => {
+    const preset = selectedPreset;
+    if (!preset) return;
+    for (const file of state.files) {
+      if (entryCounts[file.path] !== 0 || !file.tree) continue;
+      const ids = suggestLineLayers(file.tree, preset);
+      if (ids.length === 0) continue;
+      dispatch({ type: "setManualLine", path: file.path, layerIds: ids, on: true });
+    }
+  }, [state.files, entryCounts, selectedPreset, dispatch]);
+
   /**
    * 진행바 자리에 띄울 "중지됨" 문구. 도는 큐가 있으면 진행바가 우선이라 null이다.
    *
@@ -1700,6 +1728,8 @@ function AppShell() {
         onCacheWorkersChange={handleCacheWorkersChange}
         stopped={stoppedLabel}
         entryCounts={entryCounts}
+        needsLineCount={needsLineCount}
+        onApplyLineSuggestions={handleApplyLineSuggestions}
         staleProjectPaths={staleProjectPaths}
         onResizeStart={handleFileResizeStart}
         onResizeMove={handleFileResizeMove}

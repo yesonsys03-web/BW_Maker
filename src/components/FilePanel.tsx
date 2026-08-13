@@ -61,6 +61,15 @@ interface FilePanelProps {
    * 이상한지를 임계값으로 정해두는 것보다 낫다.
    */
   entryCounts: Record<string, number>;
+  /** "라인필요"(내보낼 장수 0) 파일 수. 0이면 후보 지정 막대를 그리지 않는다. */
+  needsLineCount: number;
+  /**
+   * 라인필요 파일 전부에 라인 후보를 일괄 지정한다(lib/suggestLines.ts의 규칙 —
+   * 그림이 아닌 것만 빼고 전부. 군중 판의 실루엣도 납품 대상이다). 파일마다
+   * 열어 손으로 지정하는 것이 오래 걸린다고 지목된 작업이라 목록 단위 버튼으로
+   * 둔다. 결과는 일반 수동 지정과 같아서 트리에서 보이고 낱장으로 해제할 수 있다.
+   */
+  onApplyLineSuggestions: () => void;
   /**
    * 프로젝트를 열 때 수정시각이 달라 저장돼 있던 작업을 버린 파일. 조용히 버리면
    * 아티스트는 자기가 한 지정이 왜 없는지 알 수 없다(설계 4절). 파일은 목록에
@@ -145,6 +154,8 @@ export function FilePanel({
   onCacheWorkersChange,
   stopped,
   entryCounts,
+  needsLineCount,
+  onApplyLineSuggestions,
   staleProjectPaths,
   onResizeStart,
   onResizeMove,
@@ -356,6 +367,21 @@ export function FilePanel({
           </select>
         </div>
       </div>
+      {needsLineCount > 0 && (
+        // "라인필요" 판(대부분 군중 실루엣 판)은 한 장씩 열어 지정하는 것이
+        // 오래 걸린다고 지목된 작업이다. 여기서 한 번에 지정하고, 확인은
+        // 트리에서 한다 — 지정은 낱장으로 해제할 수 있다.
+        <div className="needs-line-bar">
+          <span>라인필요 {needsLineCount}개</span>
+          <button
+            type="button"
+            onClick={onApplyLineSuggestions}
+            title="프리셋이 라인을 못 잡은 파일 전부에서 그림 레이어를 찾아 한 번에 '라인으로 지정'합니다. 참고자료(REFS·BORDERS·LABELS·Paper)와 글자, 발광(glow) 레이어는 빼고 담습니다 — 군중 실루엣 판도 이것으로 내보낼 수 있게 됩니다. 결과는 각 파일의 레이어 트리에서 확인하고 해제할 수 있습니다."
+          >
+            후보 일괄 지정
+          </button>
+        </div>
+      )}
       {loadProgress ?? prefetchProgress ? (
         <ProgressBar progress={(loadProgress ?? prefetchProgress)!} onCancel={onCancelLoad} />
       ) : stopped ? (

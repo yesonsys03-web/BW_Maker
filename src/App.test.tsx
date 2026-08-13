@@ -1748,3 +1748,30 @@ test("the warmup chain shows leaf-level progress while it runs", async () => {
   release({ warmed: [1, 2, 3], skipped: [], remaining: [] });
   await waitFor(() => expect(screen.queryByText(/레이어 불러오는 중/)).toBeNull());
 });
+
+/**
+ * "후보 일괄 지정" — 프리셋이 라인을 못 잡은 파일(군중 실루엣 판)을 버튼 한
+ * 번으로 내보낼 수 있는 상태로 만든다. 규칙과 측정 근거는 lib/suggestLines.ts.
+ * 지정은 setManualLine과 같은 액션이라 이후의 미리보기·내보내기·저장은 일반
+ * 수동 지정과 같은 길을 탄다.
+ */
+test("bulk-apply turns a needs-line file into exportable entries", async () => {
+  vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
+  engine.applyPreset.mockResolvedValue({ matchedLayerIds: [], operations: [] });
+
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+
+  // 매칭 0 → 배지와 일괄 지정 막대가 함께 뜬다.
+  await waitFor(() => expect(screen.getByText("라인필요 1개")).toBeTruthy());
+  expect(screen.getByText("라인필요")).toBeTruthy();
+
+  click(screen.getByText("후보 일괄 지정"));
+
+  // treeOf의 픽셀 잎 셋이 전부 후보다(merge 없음 → 3장). 배지와 막대는 함께
+  // 사라진다 — 막대가 남아 있다면 후보를 못 찾은 파일이 남았다는 뜻이어야 한다.
+  await waitFor(() => expect(screen.getByText("3장")).toBeTruthy());
+  expect(screen.queryByText("라인필요")).toBeNull();
+  expect(screen.queryByText("후보 일괄 지정")).toBeNull();
+});

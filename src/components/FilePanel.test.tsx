@@ -30,8 +30,11 @@ function fileAt(path: string): FileEntry {
 function renderPanel(
   files: FileEntry[],
   entryCounts: Record<string, number>,
-  staleProjectPaths: string[] = []
+  staleProjectPaths: string[] = [],
+  onApplyLineSuggestions = vi.fn(),
 ) {
+  // 막대의 수는 배지와 같은 조건(내보낼 장수 0)으로 App이 세서 내려준다.
+  const needsLineCount = files.filter((f) => entryCounts[f.path] === 0).length;
   return render(
     <FilePanel
       files={files}
@@ -46,6 +49,8 @@ function renderPanel(
       onCacheWorkersChange={vi.fn()}
       stopped={null}
       entryCounts={entryCounts}
+      needsLineCount={needsLineCount}
+      onApplyLineSuggestions={onApplyLineSuggestions}
       staleProjectPaths={staleProjectPaths}
       onResizeStart={vi.fn()}
       onResizeMove={vi.fn()}
@@ -111,4 +116,29 @@ test("a file with no preset applied yet is not called out", () => {
 
   expect(screen.queryByText("라인필요")).toBeNull();
   expect(rowOf("pending.psd").classList.contains("needs-line")).toBe(false);
+});
+
+/**
+ * "라인필요" 파일이 있으면 목록 위에 일괄 지정 막대가 뜬다. 군중 판은 파일마다
+ * 열어 손으로 지정하는 것이 오래 걸린다고 지목된 작업이라, 목록 단위 버튼이
+ * 이 기능의 핵심이다(규칙은 lib/suggestLines.ts).
+ */
+test("files needing lines get a bulk-apply bar; the button calls the handler", () => {
+  const onApply = vi.fn();
+  renderPanel(
+    [fileAt("/cuts/crowd1.psd"), fileAt("/cuts/crowd2.psd"), fileAt("/cuts/ok.psd")],
+    { "/cuts/crowd1.psd": 0, "/cuts/crowd2.psd": 0, "/cuts/ok.psd": 5 },
+    [],
+    onApply,
+  );
+
+  expect(screen.getByText("라인필요 2개")).toBeTruthy();
+  screen.getByText("후보 일괄 지정").click();
+  expect(onApply).toHaveBeenCalledTimes(1);
+});
+
+test("the bulk-apply bar stays hidden while nothing needs a line", () => {
+  renderPanel([fileAt("/cuts/ok.psd")], { "/cuts/ok.psd": 5 });
+
+  expect(screen.queryByText("후보 일괄 지정")).toBeNull();
 });
