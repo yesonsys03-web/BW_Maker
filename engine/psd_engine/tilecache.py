@@ -171,9 +171,20 @@ def store(session, layer_id, scale, entry):
         pass
 
 
+#: 줄인 오버레이의 형식 판. **축소 보정을 바꾸면 반드시 올린다.**
+#:
+#: view_key는 오버레이 *원본*이 무엇인가만 말한다 — 그것을 어떻게 줄였는지는
+#: 안 담긴다. 그래서 축소 방식을 바꿔도 키가 그대로였고, 획을 전부 최댓값으로
+#: 올리던 옛 파일이 디스크에서 그대로 나왔다. 아티스트는 고친 뒤에도 "여전히
+#: 진하다"를 봤다(2026-08-13). PREVIEW_FORMAT·OVERLAY_FORMAT과 같은 역할이다.
+#:
+#: 2: _visible_reduce — 사라질 획만 최소 가시성까지 올린다(판 1은 전부 최댓값).
+SCALED_OVERLAY_FORMAT = 2
+
+
 def _scaled_overlay_path(path, mtime, view_key, scale, rgb):
     tag = hashlib.sha1(json.dumps(
-        [view_key, round(scale, 6), list(rgb) if rgb else None],
+        [SCALED_OVERLAY_FORMAT, view_key, round(scale, 6), list(rgb) if rgb else None],
         separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
     return _file_dir(path, mtime) / f"s{tag}.png"
 
