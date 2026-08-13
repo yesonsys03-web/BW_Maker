@@ -271,7 +271,10 @@ def store_overlays(session, key, plans):
 #: 3: find_views가 colors류 **잎**도 뷰 표식으로 받는다 — 같은 입력(레이어
 #:    조합·설정)에서 경계선이 새로 생기는 파일들이 있으므로 옛 미리보기를
 #:    버려야 한다. 프런트의 PREVIEW_PICTURE_VERSION도 같은 이유로 함께 올렸다.
-PREVIEW_FORMAT = 3
+#: 4: 배율 0.5 미만으로 줄일 때 오버레이 획을 미리 두껍게 만든다(render_preview)
+#:    — 큰 소품 시트에서 획이 안개가 되던 미리보기가 같은 키에서 다른 그림이
+#:    된다. 프런트 판도 함께 올렸다.
+PREVIEW_FORMAT = 4
 
 
 def preview_key(material):

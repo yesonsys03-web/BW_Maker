@@ -1179,3 +1179,26 @@ def test_thumbnailing_does_not_shrink_the_cached_tile(fixture_psd, tmp_path):
     w = render_mod._preview_tile(s, 2, 1.0)[0].width
     render_thumbnails(s, [2], max_size=16, out_dir=tmp_path)
     assert render_mod._preview_tile(s, 2, 1.0)[0].width == w
+
+
+def test_render_preview_keeps_a_thin_stroke_visible_at_a_small_scale(fixture_psd, tmp_path):
+    # 12,000px짜리 소품 시트는 미리보기 배율이 ~0.125라, 자동 굵기 몇 px짜리
+    # 획이 LANCZOS 평균에 녹아 사라져 보였다 — "생성됐는데 화면에 없다"로 두 번
+    # 신고된 증상. 축소 전에 획을 두껍게 만들어 축소 후에도 진한 획이 남아야
+    # 한다. 64px 캔버스에 max_size=8이면 배율 0.125로 그 조건이 재현된다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    overlay = np.zeros((48, 64, 4), np.uint8)
+    overlay[24, :, :3] = [255, 0, 0]      # 폭 1px짜리 가로 획
+    overlay[24, :, 3] = 255
+    png = render_preview(s, [4], max_size=8, out_dir=tmp_path,
+                         edge_overlays=[{"rgba": overlay, "left": 0, "top": 0,
+                                         "lineIds": [4]}])
+    arr = np.array(Image.open(png).convert("RGBA")).astype(np.int32)
+    # 캔버스에는 레이어 픽셀(알파 255)도 있으므로 알파만으로는 획을 못 집고,
+    # 투명 배경 위 안개 픽셀도 RGB는 순빨강이라 색만으로도 못 집는다 — 눈에
+    # 보이는 양은 (빨강 우세) × 알파다. 무보정이면 알파가 ~22라 이 값이 22에
+    # 머문다(실측).
+    redness = (arr[..., 0] - np.maximum(arr[..., 1], arr[..., 2])) * arr[..., 3] // 255
+    assert int(redness.max()) >= 100, \
+        f"축소 후 획이 안개가 됐다 — 보이는 빨강 {int(redness.max())}"

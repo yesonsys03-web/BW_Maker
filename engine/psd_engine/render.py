@@ -16,7 +16,7 @@ import time
 from collections import OrderedDict
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from . import tilecache
 
@@ -1256,6 +1256,15 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
         tw = max(1, round((overlay["left"] + w) * scale) - x0)
         th = max(1, round((overlay["top"] + h) * scale) - y0)
         img = Image.fromarray(arr, "RGBA")
+        if scale < 0.5:
+            # 축소가 획을 지우는 것을 막는다. 12,000px짜리 소품 시트는 미리보기
+            # 배율이 ~0.125라, 획(자동 굵기 몇 px)이 LANCZOS 평균에 녹아 알파
+            # 1할짜리 안개가 된다 — "생성됐는데 화면에 없다"로 두 번 신고된
+            # 그 증상이다(2026-08-13). 줄이기 전에 축소율만큼 두껍게 만들어
+            # 축소 후 최소 ~1px의 진한 획이 남게 한다. 내보내기는 원본 배율
+            # 그대로라 이 보정과 무관하다.
+            size = 2 * int(round(0.5 / scale)) + 1
+            img = img.filter(ImageFilter.MaxFilter(size))
         if (tw, th) != img.size:
             img = img.resize((tw, th), Image.LANCZOS)
         sx0, sy0 = max(0, -x0), max(0, -y0)
