@@ -171,6 +171,66 @@ def store(session, layer_id, scale, entry):
         pass
 
 
+def _scaled_overlay_path(path, mtime, view_key, scale, rgb):
+    tag = hashlib.sha1(json.dumps(
+        [view_key, round(scale, 6), list(rgb) if rgb else None],
+        separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    return _file_dir(path, mtime) / f"s{tag}.png"
+
+
+def load_scaled_overlay(session, view_key, scale, rgb):
+    """
+    미리보기 배율로 줄여 둔 오버레이. 미스·손상·꺼짐이면 None.
+
+    원본 오버레이는 캔버스 해상도라 색 판에서 한 장이 수백 MB고, 그걸 줄이는 일이
+    뷰당 ~0.7초다(실측 2026-08-13: 뷰 9개 = 6.3초, 토글마다). 결과는 (뷰, 배율, 색)
+    만의 함수인데 세션 메모리에만 있어서 앱을 껐다 켜거나 파일을 다녀오면 다시
+    계산했다 — 타일과 같은 이유로 디스크에 남긴다.
+    """
+    key = _session_key(session)
+    if not ENABLED or key is None or view_key is None:
+        return None
+    f = _scaled_overlay_path(key[0], key[1], view_key, scale, rgb)
+    try:
+        img = Image.open(f)
+        img.load()
+        return img.convert("RGBA")
+    except FileNotFoundError:
+        return None
+    except Exception:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        return None
+
+
+def store_scaled_overlay(session, view_key, scale, rgb, img):
+    """줄인 오버레이를 디스크에 떨군다. 원자성·청소 규약은 store(타일)와 같다."""
+    key = _session_key(session)
+    if not ENABLED or key is None or view_key is None:
+        return
+    d = _file_dir(key[0], key[1])
+    try:
+        fresh = not d.is_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                img.save(fh, format="PNG")
+            os.replace(tmp, _scaled_overlay_path(key[0], key[1], view_key, scale, rgb))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        if fresh:
+            _prune(keep=d)
+    except OSError:
+        pass
+
+
 #: 오버레이 캐시의 형식·알고리즘 판. 키에 들어간다 — 경계 검출이나 합성
 #: 알고리즘이 바뀌어 **같은 설정에서 다른 그림**이 나오게 되면 이 값을 올려야
 #: 한다. 안 올리면 옛 그림이 디스크에서 그대로 나와, 알고리즘을 고친 사람이
@@ -285,7 +345,10 @@ def store_overlays(session, key, plans):
 #:    바뀐다. 프런트 판도 함께 올렸다.
 #: 6: 오버레이 형식 4와 함께(블러 감쇠 문턱 보정). 프런트 판도 함께 올렸다.
 #: 7: 오버레이 형식 5와 함께(change 획 다듬기). 프런트 판도 함께 올렸다.
-PREVIEW_FORMAT = 7
+#: 8: 판 4의 "미리 두껍게"를 블록 최댓값 축소로 바꿨다(render_preview._max_reduce)
+#:    — 목적(획이 안 사라진다)은 같지만 그림이 미세하게 달라진다. 프런트 판도
+#:    함께 올렸다. 타일 캐시는 안 바뀐다(레이어 원본 픽셀이라 무관).
+PREVIEW_FORMAT = 8
 
 
 def preview_key(material):

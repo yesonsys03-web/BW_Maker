@@ -134,6 +134,12 @@ def _cached_plan_overlays(session, views, opts):
             made = plan_overlays(session, [view], opts)
             _perf(perf="overlay_view", s=round(time.perf_counter() - t0, 4))
             tilecache.store_overlays(session, vkey, made)
+        # 뷰 키를 각 오버레이에 달아 둔다. render_preview가 "줄여 놓은 오버레이"를
+        # 디스크에서 찾을 때 쓰는 키다 — 거기서는 뷰 구성·픽셀 설정을 알 수 없고,
+        # 모양만으로 키를 만들면 설정을 바꿔도 옛 그림이 그대로 나온다.
+        # store_overlays 뒤에 다는 것이 중요하다(npz에 실리면 안 된다).
+        for m in made:
+            m["viewKey"] = vkey
         cache[key] = made
         while len(cache) > OVERLAY_CACHE_PER_SESSION:
             victim = next((k for k in cache if k not in wanted), None)

@@ -1202,3 +1202,54 @@ def test_render_preview_keeps_a_thin_stroke_visible_at_a_small_scale(fixture_psd
     redness = (arr[..., 0] - np.maximum(arr[..., 1], arr[..., 2])) * arr[..., 3] // 255
     assert int(redness.max()) >= 100, \
         f"축소 후 획이 안개가 됐다 — 보이는 빨강 {int(redness.max())}"
+
+
+def _redness(png):
+    from PIL import Image
+    a = np.array(Image.open(png).convert("RGBA")).astype(np.int32)
+    return int(((a[..., 0] - np.maximum(a[..., 1], a[..., 2])) * a[..., 3] // 255).max())
+
+
+def test_render_preview_scales_an_overlay_once_and_reuses_it(fixture_psd, tmp_path, monkeypatch):
+    """
+    줄여 놓은 오버레이는 (뷰, 배율, 색)만의 함수인데 원본 해상도 배열을 훑는
+    일이다. 캐시가 없으면 **토글할 때마다** 같은 값을 다시 만들고, 실측으로 그
+    비용이 레이어 수와 무관하게 매 렌더 0.68초로 고정이었다(2026-08-13 색 판:
+    n=3이든 14든 렌더가 0.71초).
+    """
+    s = _session(fixture_psd)
+    overlay = np.zeros((48, 64, 4), np.uint8)
+    overlay[24, :, :3] = [255, 0, 0]
+    overlay[24, :, 3] = 255
+    ov = [{"rgba": overlay, "left": 0, "top": 0, "lineIds": [4]}]
+
+    ks = []
+    real = render_mod._max_reduce
+    monkeypatch.setattr(render_mod, "_max_reduce",
+                        lambda a, k: (ks.append(k), real(a, k))[1])
+
+    first = render_preview(s, [4], max_size=8, out_dir=tmp_path, edge_overlays=ov)
+    assert len(ks) == 1
+    second = render_preview(s, [4], max_size=8, out_dir=tmp_path, edge_overlays=ov)
+    assert len(ks) == 1, "같은 뷰·배율인데 축소를 다시 했다"
+    # 재사용한 그림이 처음과 같아야 캐시가 의미가 있다.
+    assert _redness(second) == _redness(first) >= 100
+
+
+def test_render_preview_rescales_the_overlay_when_the_scale_changes(fixture_psd, tmp_path,
+                                                                    monkeypatch):
+    # 캐시 키에 배율이 빠지면 창 크기가 달라져도 옛 크기 오버레이를 그대로 얹는다.
+    s = _session(fixture_psd)
+    overlay = np.zeros((48, 64, 4), np.uint8)
+    overlay[24, :, :3] = [255, 0, 0]
+    overlay[24, :, 3] = 255
+    ov = [{"rgba": overlay, "left": 0, "top": 0, "lineIds": [4]}]
+
+    ks = []
+    real = render_mod._max_reduce
+    monkeypatch.setattr(render_mod, "_max_reduce",
+                        lambda a, k: (ks.append(k), real(a, k))[1])
+
+    render_preview(s, [4], max_size=8, out_dir=tmp_path, edge_overlays=ov)
+    render_preview(s, [4], max_size=16, out_dir=tmp_path, edge_overlays=ov)
+    assert len(ks) == 2, "배율이 달라졌는데 옛 크기를 재사용했다"

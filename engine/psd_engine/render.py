@@ -16,7 +16,7 @@ import time
 from collections import OrderedDict
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image
 
 from . import tilecache
 
@@ -35,6 +35,10 @@ if PERF == "0":
 def _perf(**kv):
     if not PERF:
         return
+    # 벽시계 시각을 함께 찍는다. 단계별 시간만 있으면 **그 사이에 흐른 시간**이
+    # 안 보인다 — 토글 한 번이 6초인데 렌더 호출은 0.7초로 찍히던 때, 남은 5초가
+    # 엔진 밖인지 요청 사이 대기인지 로그만으로는 가릴 수 없었다(2026-08-13).
+    kv["t"] = round(time.time(), 3)
     line = json.dumps(kv)
     if PERF.startswith("/") or PERF.startswith("\\") or ":" in PERF[:3]:
         try:
@@ -1180,6 +1184,38 @@ def warm_preview_tiles(session, layer_ids, max_size, budget_s):
     return {"warmed": warmed, "skipped": skipped, "remaining": remaining}
 
 
+#: 줄여 놓은 오버레이를 세션에 몇 장까지 들고 있을지. 한 장이 미리보기 크기
+#: (최대 1500px)라 수십 장이어도 메모리는 몇 MB다. 뷰가 15개인 판이 실측으로
+#: 있었고(rpc._cached_plan_overlays 주석), 색 통일을 켜고 끄면 같은 뷰가 색마다
+#: 하나씩 생기므로 뷰 수의 두 배는 들어가야 토글마다 미스가 나지 않는다.
+OVERLAY_SCALED_CACHE = 64
+
+
+def _max_reduce(arr, k):
+    """
+    k×k 블록의 채널별 최댓값으로 줄인다. 블록 안에 획이 한 픽셀이라도 있으면
+    그 색이 결과 픽셀에 그대로 남는다.
+
+    LANCZOS 평균이 몇 px짜리 획을 안개로 만드는 것을 막는 것이 목적이고, 그
+    판단을 **줄이면서 한 번에** 한다. 예전에는 원본 해상도에서 MaxFilter로
+    획을 먼저 두껍게 만든 뒤 줄였는데, 그 필터가 픽셀당 k²번을 비교한다 —
+    11,700px 캔버스에 배율 0.128인 색 판에서 오버레이 6장 합성이 **137초**였다
+    (계측 2026-08-13, 토글 한 번 138초 중 99.3%). 블록 최댓값은 배열을 한 번만
+    훑으므로 같은 목적을 자릿수 싼 값에 이룬다.
+
+    채널별로 따로 최댓값을 잡는 것은 MaxFilter가 밴드별로 돌던 것과 같다 —
+    그림이 바뀌는 지점이 아니다.
+    """
+    h, w = arr.shape[:2]
+    ph, pw = (-h) % k, (-w) % k
+    # 0으로 채운다(투명). 최댓값이라 채운 자리는 결과에 영향을 주지 않는다 —
+    # edge로 채우면 가장자리 획이 바깥으로 번진다.
+    if ph or pw:
+        arr = np.pad(arr, ((0, ph), (0, pw), (0, 0)))
+    h2, w2 = arr.shape[0] // k, arr.shape[1] // k
+    return arr.reshape(h2, k, w2, k, arr.shape[2]).max(axis=(1, 3))
+
+
 def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=None,
                    line_color_ids=None, edge_overlays=None):
     """
@@ -1249,24 +1285,50 @@ def render_preview(session, visible_layer_ids, max_size, out_dir, line_color=Non
         # 원본색을 지킨다) — 여기서는 엔트리 대신 뷰의 lineIds에 같은 전부-포함
         # 조건을 적용한다. 어차피 lineIds가 한 장뿐인 흔한 경우에는 레이어별
         # 루프의 `lid in ids`와 똑같아진다.
-        if rgb is not None and (ids is None or line_ids <= ids):
-            arr = apply_line_color(arr, rgb)
+        recolour = rgb is not None and (ids is None or line_ids <= ids)
         h, w = arr.shape[:2]
         x0, y0 = round(overlay["left"] * scale), round(overlay["top"] * scale)
         tw = max(1, round((overlay["left"] + w) * scale) - x0)
         th = max(1, round((overlay["top"] + h) * scale) - y0)
-        img = Image.fromarray(arr, "RGBA")
-        if scale < 0.5:
+
+        # 줄여 놓은 오버레이를 세션에 기억한다. 결과는 (뷰, 배율, 색)만의 함수인데
+        # 원본 해상도 배열을 훑는 일이라, 캐시가 없으면 **토글할 때마다** 같은 값을
+        # 다시 만든다 — 실측으로 레이어 수와 무관하게 매 렌더 0.68초가 여기서
+        # 고정으로 나갔다(2026-08-13, 색 판). 화면에 뜨는 것이 무엇이든 뷰는 그대로다.
+        skey = (tuple(overlay["lineIds"]), overlay["left"], overlay["top"],
+                (h, w), round(scale, 6), tuple(rgb) if recolour else None)
+        scaled = session.setdefault("_overlay_scaled", OrderedDict())
+        img = scaled.get(skey)
+        if img is None:
+            # 세션에 없으면 디스크를 본다. 뷰마다 최초 한 번만 줄이고, 그 뒤로는
+            # 앱을 껐다 켜도 작은 PNG 읽기로 끝난다(타일 캐시와 같은 규약).
+            img = tilecache.load_scaled_overlay(
+                session, overlay.get("viewKey"), scale, tuple(rgb) if recolour else None)
+        if img is None:
+            if recolour:
+                arr = apply_line_color(arr, rgb)
             # 축소가 획을 지우는 것을 막는다. 12,000px짜리 소품 시트는 미리보기
             # 배율이 ~0.125라, 획(자동 굵기 몇 px)이 LANCZOS 평균에 녹아 알파
             # 1할짜리 안개가 된다 — "생성됐는데 화면에 없다"로 두 번 신고된
-            # 그 증상이다(2026-08-13). 줄이기 전에 축소율만큼 두껍게 만들어
-            # 축소 후 최소 ~1px의 진한 획이 남게 한다. 내보내기는 원본 배율
-            # 그대로라 이 보정과 무관하다.
-            size = 2 * int(round(0.5 / scale)) + 1
-            img = img.filter(ImageFilter.MaxFilter(size))
-        if (tw, th) != img.size:
-            img = img.resize((tw, th), Image.LANCZOS)
+            # 그 증상이다(2026-08-13). 내보내기는 원본 배율 그대로라 무관하다.
+            #
+            # 목표 크기까지 **블록 최댓값으로 먼저 줄인 뒤** 남은 차이만 LANCZOS로
+            # 맞춘다. 획이 살아남는 것은 블록 최댓값이 보장하고, LANCZOS는 정수배로
+            # 안 떨어지는 나머지만 다듬으므로 안개를 만들 여지가 없다.
+            if scale < 0.5 and (k := max(1, min(w // tw, h // th))) >= 2:
+                arr = _max_reduce(arr, k)
+            img = Image.fromarray(arr, "RGBA")
+            if (tw, th) != img.size:
+                img = img.resize((tw, th), Image.LANCZOS)
+            tilecache.store_scaled_overlay(
+                session, overlay.get("viewKey"), scale,
+                tuple(rgb) if recolour else None, img)
+        if skey in scaled:
+            scaled.move_to_end(skey)
+        else:
+            scaled[skey] = img
+            while len(scaled) > OVERLAY_SCALED_CACHE:
+                scaled.popitem(last=False)
         sx0, sy0 = max(0, -x0), max(0, -y0)
         sx1 = img.width - max(0, x0 + img.width - pw)
         sy1 = img.height - max(0, y0 + img.height - ph)
