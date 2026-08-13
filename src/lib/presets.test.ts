@@ -78,7 +78,7 @@ test("BG_PRESET matches the brief contract", () => {
     // BG에서는 경계선 생성을 끈다 — 캐릭터 모델 전용 기능이다
     edgeLines: {
       enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
-      colourMode: "composite", edgeMode: "region",
+      colourMode: "composite", edgeMode: "region", widthScale: 1,
     },
   });
 });
@@ -160,15 +160,17 @@ test("loadPresets does not overwrite a default the artist has edited", async () 
 });
 
 /**
- * PROP은 CHAR에서 색경계선 검출 방식 하나만 바꾼 프리셋이다. 소품 판은 색
- * 그림이 통째로 구워져 있고 광택이 램프로 번져 있어 기본 검출(region)이
- * 게이트 사슬로 경계를 통째로 기각한다 — 근거 실측은 PROP_PRESET 주석에.
+ * PROP은 CHAR에서 색경계선 설정 두 가지만 바꾼 프리셋이다: 검출 방식(change)과
+ * 문턱(12). 소품 판은 색 그림이 통째로 구워져 있고 광택이 램프로 번져 있어
+ * 기본 검출(region)이 게이트 사슬로 경계를 통째로 기각한다. 굵기는 자동
+ * 그대로다(0.5배 실험은 아티스트가 철회 — 얇으면 능선 흔들림이 노이즈로
+ * 드러난다). 값들의 실측 근거는 PROP_PRESET 주석에.
  */
-test("PROP differs from CHAR only in the edge detection mode", () => {
+test("PROP differs from CHAR only in its edge detection settings", () => {
   expect(PROP_PRESET).toEqual({
     ...CHAR_PRESET,
     name: "PROP",
-    edgeLines: { ...CHAR_PRESET.edgeLines, edgeMode: "change" },
+    edgeLines: { ...CHAR_PRESET.edgeLines, edgeMode: "change", threshold: 12 },
   });
 });
 
@@ -232,11 +234,11 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
     splitLayers: true,
     outputFormat: "jpg",
     excludeTokens: ["fx", "temp"],
-    // colourMode·edgeMode는 기본값이 아닌 쪽을 넣는다 — 기본값이면 파서가 메워
-    // 넣은 것과 구분이 안 되어 "그대로 보존한다"를 실제로 재지 못한다.
+    // colourMode·edgeMode·widthScale은 기본값이 아닌 쪽을 넣는다 — 기본값이면
+    // 파서가 메워 넣은 것과 구분이 안 되어 "그대로 보존한다"를 실제로 재지 못한다.
     edgeLines: {
       enabled: true, threshold: 30, gap: 6, width: 7, minLength: 10, lineAlpha: 70,
-      colourMode: "paste", edgeMode: "change",
+      colourMode: "paste", edgeMode: "change", widthScale: 0.75,
     },
   };
   existsMock.mockResolvedValue(true);

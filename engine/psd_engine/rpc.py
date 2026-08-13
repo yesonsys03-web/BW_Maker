@@ -75,7 +75,7 @@ OVERLAY_CACHE_PER_SESSION = 8
 #: region/change 두 검출을 같은 세션에서 비교하려고 만든 옵션이니, 키에서 빠지면
 #: 그 비교 자체가 막힌다.
 _PIXEL_SETTINGS = ("threshold", "gap", "width", "minLength", "lineAlpha",
-                   "colourMode", "edgeMode")
+                   "colourMode", "edgeMode", "widthScale")
 
 
 def _edge_settings_key(opts):

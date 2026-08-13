@@ -179,7 +179,14 @@ def store(session, layer_id, scale, entry):
 #:
 #: 2: 검출용 색 합성이 불투명도를 무시한다(edges._opacity_neutralised) —
 #:    반투명 색 참조 판에서 획이 0이던 것이 생성되게 바뀌었다.
-OVERLAY_FORMAT = 2
+#: 3: change 검출 입력에 블러(edges.CHANGE_BLUR_RADIUS) — 같은 설정 키에서
+#:    획의 지터가 사라진 다른 그림이 나온다(PROP 프리셋 첫 실사용 기각 건).
+#: 4: 블러 감쇠만큼 문턱 보정(edges.CHANGE_BLUR_ATTENUATION) — 형식 3이
+#:    지운 광택 경계가 되살아난다. 3으로 구워진 캐시가 이미 있는 기계에서
+#:    보정만 넣고 스탬프를 안 올렸다가 "여전히 안 나온다"를 만들었다 —
+#:    그림이 바뀌면 스탬프도 반드시 함께 올릴 것.
+#: 5: change 획 다듬기(edges._smoothed_stroke) — 혹·가시가 사라진 다른 그림.
+OVERLAY_FORMAT = 5
 
 
 def overlay_key(colour_ids, line_ids, settings_key):
@@ -274,7 +281,11 @@ def store_overlays(session, key, plans):
 #: 4: 배율 0.5 미만으로 줄일 때 오버레이 획을 미리 두껍게 만든다(render_preview)
 #:    — 큰 소품 시트에서 획이 안개가 되던 미리보기가 같은 키에서 다른 그림이
 #:    된다. 프런트 판도 함께 올렸다.
-PREVIEW_FORMAT = 4
+#: 5: 오버레이 형식 3과 함께(change 입력 블러) — 미리보기에 구워지는 획이
+#:    바뀐다. 프런트 판도 함께 올렸다.
+#: 6: 오버레이 형식 4와 함께(블러 감쇠 문턱 보정). 프런트 판도 함께 올렸다.
+#: 7: 오버레이 형식 5와 함께(change 획 다듬기). 프런트 판도 함께 올렸다.
+PREVIEW_FORMAT = 7
 
 
 def preview_key(material):

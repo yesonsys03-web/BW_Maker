@@ -32,6 +32,10 @@ EDGE_DEFAULTS = {
                          # 맞는 상수가 없다. width=5 고정이었을 때 생성 획 중앙값은
                          # 8.0(기존 LINES 중앙값 5.0 대비 60% 굵음)이었다.
     "minLength": 8,     # 이보다 짧은 조각은 선이 아니라 점이다
+    "widthScale": 1.0,  # 자동 굵기에 곱하는 배율. 소품 판(PROP)은 0.5 — 생성
+                         # 획이 원본 라인과 같은 굵기면 소품에선 둔해 보인다는
+                         # 아티스트 요구(2026-08-13, "지금보다 50% 얇게").
+                         # 뷰마다 자동 굵기가 3~7로 달라 고정값 대신 배율로 둔다.
     "lineAlpha": 64,    # 기존 라인으로 칠 알파 문턱. LINES가 79.7% 반투명이라 낮게 잡는다
     "colourMode": "composite",  # 색 그림을 만드는 방법. "paste"는 A/B 비교용 — COLOUR_MODES 참고
     "edgeMode": "region",       # 색 경계를 찾는 방법. EDGE_MODES 참고
@@ -127,6 +131,43 @@ FLAT_COLOUR_FLOOR = 0.0005
 #: 5를 보내서 자동이 한 번도 안 돌았고, 그런데도 테스트 양쪽 다 통과했다.
 REGION_GATE_SCALE = 2 / 3
 
+#: change 검출 입력에 거는 블러 반경. 픽셀 걸음 검출은 능선이 픽셀 단위로
+#: 흔들려 획 가장자리가 들쭉날쭉해진다 — PROP 프리셋의 첫 실사용에서 아티스트가
+#: "노이즈가 있어 사용할 수 없다"로 기각한 그 증상이다(2026-08-13, region
+#: 익스포트와 확대 대조로 확인). 검출 **입력**을 블러하면 지터의 원천(질감·
+#: 압축 잔여·안티에일리어싱 흔들림)이 사라져 능선이 매끈해진다.
+#:
+#: 반경은 같은 판 스윕으로 정했다: 0 = 지터(기각), 1 = 잔거침 남음, 2 = 매끈
+#: + 광택 대각선 보존(획 375k→339k px, 지터 질량만 빠짐), 3 = 짧은 램프
+#: 구간이 사라지기 시작. region 경로에는 걸지 않는다 — 분할 검출은 원리상
+#: 지터가 없고, 블러는 걸음 수를 늘려 게이트 사슬만 악화시킨다.
+CHANGE_BLUR_RADIUS = 2
+
+#: 블러가 단차를 감쇠시키는 비율 — 문턱을 같은 비율로 낮춰 블러 전과 같은
+#: 민감도를 유지한다. σ = CHANGE_BLUR_RADIUS(2)로 뭉갠 계단을 중앙차분이
+#: ±k(=ANTIALIAS_RADIUS 3)에서 재면 단차의 Φ(k/σ)−Φ(−k/σ) = 2Φ(1.5)−1
+#: ≈ 0.866배만 남는다. 반경이나 k를 바꾸면 이 값도 다시 계산해야 한다.
+#:
+#: 보정이 없으면: 무늬 가장자리(단차 100+)는 감쇠돼도 문턱(24)을 훌쩍 넘지만
+#: 광택 경계(단차 24~34)는 21~29로 떨어져 대부분 문턱 아래가 된다 — 블러
+#: 도입 직후 실사용 2차 기각("노이즈는 제거됐는데 라인이 생성되지 않았어")의
+#: 원인이 정확히 이것이었다. 반점 부활 위험은 없다: 한 픽셀 반점(단차 80)은
+#: 블러 후 최고점이 ~3이라 어떤 합리적 문턱에도 안 걸린다.
+CHANGE_BLUR_ATTENUATION = 0.866
+
+#: change 획 다듬기(가우시안 튜브)의 블러 반경과 되자름 문턱. 능선의 불규칙한
+#: 1~2px 요동이 굵히기에서 혹·가시로 증폭되는 것을(아티스트 3차 신고 "라인에
+#: 노이즈") 획 알파를 뭉갠 뒤 되잘라 평균화한다. 실측 비교(신고 판 확대):
+#: 열림/닫힘 모폴로지는 획이 뭉툭해지고, 가우시안 튜브가 region급으로 고르다.
+#:
+#: 문턱 110의 기하: 긴 획의 가장자리에서 뭉갠 값이 ~127(코어 255의 절반)이라
+#: 110은 굵기를 거의 보존하고(+0.5px), 획 끝에서도 127이라 끝이 물러나지
+#: 않아 reconnect가 만든 라인 겹침(RECONNECT_OVERLAP)이 살아남는다. 반면
+#: 옆으로 튄 혹 끝은 71~97로 떨어져 잘린다. 굵기 3px 미만이면 코어 자체가
+#: 문턱 아래로 뭉개지므로 다듬기를 건너뛴다(가는 획은 혹도 없다).
+STROKE_SMOOTH_RADIUS = 2
+STROKE_SMOOTH_CUT = 110
+
 
 def _pack_rgb(rgb):
     return ((rgb[..., 0].astype(np.uint32) << 16)
@@ -213,6 +254,30 @@ def region_boundary(labels, flats, threshold):
         mask[ys, xs] = True
         colour[ys, xs] = darker[av, bv]
     return mask, colour
+
+
+def _blurred_colour(rgba, radius):
+    """
+    change 검출 입력용 블러(CHANGE_BLUR_RADIUS 주석 참고). 알파는 원본 유지.
+
+    색은 **알파 가중**으로 블러한다(프리멀티플라이 후 정규화). RGBA를 통째로
+    블러하면 실루엣 밖 투명 픽셀의 검정 RGB가 안쪽 색으로 스며 테두리 안쪽에
+    어두운 띠가 생기고, 그 띠의 걸음이 문턱을 넘어 **실루엣을 따라 유령
+    경계**가 선다 — 실루엣은 이미 라인이 그리는 자리라 잡으면 안 된다
+    (colour_change가 투명 상대 쌍을 무시하는 것과 같은 규칙).
+    """
+    a = rgba[..., 3].astype(np.float32) / 255.0
+    pm = (rgba[..., :3].astype(np.float32) * a[..., None]).astype(np.uint8)
+    pm_b = np.asarray(
+        Image.fromarray(pm, "RGB").filter(ImageFilter.GaussianBlur(radius)),
+        np.float32)
+    a_b = np.asarray(
+        Image.fromarray(rgba[..., 3], "L").filter(ImageFilter.GaussianBlur(radius)),
+        np.float32)
+    rgb = pm_b * 255.0 / np.maximum(a_b[..., None], 1.0)
+    out = rgba.copy()
+    out[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    return out
 
 
 def colour_change(rgba, threshold):
@@ -612,7 +677,9 @@ def build_overlay(colour_rgba, line_alpha, opts):
     """
     o = {**EDGE_DEFAULTS, **(opts or {})}
     if o.get("edgeMode") == "change":
-        raw_mask, colour = colour_change(colour_rgba, o["threshold"])
+        raw_mask, colour = colour_change(
+            _blurred_colour(colour_rgba, CHANGE_BLUR_RADIUS),
+            o["threshold"] * CHANGE_BLUR_ATTENUATION)
     else:
         # region의 게이트는 threshold를 그대로 쓰지 않는다 — REGION_GATE_SCALE
         # 주석 참고.
@@ -634,8 +701,35 @@ def build_overlay(colour_rgba, line_alpha, opts):
     labels, count = label_components(mask)
     # width=0(기본값)은 자동 — 이 뷰 자신의 라인 굵기에서 유도한다(_auto_width
     # 문서 참고). 0이 아닌 값은 그대로 강제한다 — 지금까지의 동작 그대로다.
-    width = o["width"] or _auto_width(line_alpha, o["lineAlpha"])
-    return stroke_rgba(mask, labels, colour, width)
+    # 배율은 자동 굵기에만 건다 — 명시한 width는 아티스트가 강제한 값이므로
+    # 그대로 쓴다(예측 가능성이 배율보다 중요하다).
+    width = o["width"] or max(
+        1, round(_auto_width(line_alpha, o["lineAlpha"]) * o["widthScale"]))
+    out = stroke_rgba(mask, labels, colour, width)
+    if o.get("edgeMode") == "change" and width >= 3:
+        # region의 라벨 경계는 규칙적인 계단이라 굵혀도 고른데, change의 능선은
+        # 불규칙 요동이 남아 혹·가시가 된다 — 획을 다듬는다(상수 주석 참고).
+        out = _smoothed_stroke(out)
+    return out
+
+
+def _smoothed_stroke(overlay):
+    """change 획의 요동 다듬기 — 알파를 뭉갠 뒤 되잘라 혹·가시를 평균화한다."""
+    alpha = overlay[..., 3]
+    g = np.asarray(Image.fromarray(alpha, "L").filter(
+        ImageFilter.GaussianBlur(STROKE_SMOOTH_RADIUS)))
+    mask = g > STROKE_SMOOTH_CUT
+    out = overlay.copy()
+    # 다듬으며 살짝 넓어진 자리(원래 알파 0)는 획 색이 없다 — 이웃 획 색을
+    # 끌어다 채운다. 어차피 색 통일이 검정으로 덮는 흐름이지만, 색 통일을 끈
+    # 프리셋에서도 테두리가 검정 부스러기로 보이면 안 된다.
+    grow = mask & (alpha == 0)
+    if grow.any():
+        rgb = np.asarray(Image.fromarray(overlay[..., :3], "RGB").filter(
+            ImageFilter.MaxFilter(5)))
+        out[..., :3][grow] = rgb[grow]
+    out[..., 3] = np.where(mask, 255, 0).astype(np.uint8)
+    return out
 
 
 def _union_bbox(layers):

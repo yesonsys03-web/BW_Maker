@@ -144,6 +144,13 @@ export interface EdgeLines {
    * 그게 진짜 경계인지는 사람이 봐야 하므로 당분간 고를 수 있게 둔다.
    */
   edgeMode: "region" | "change";
+  /**
+   * 자동 굵기(width=0일 때)에 곱하는 배율. 소품 판(PROP)은 0.5 — 생성 획이
+   * 원본 라인과 같은 굵기면 소품에선 둔해 보인다는 아티스트 요구. 뷰마다
+   * 자동 굵기가 3~7px로 달라 고정 width 대신 배율로 둔다. 명시한 width에는
+   * 걸리지 않는다(엔진 build_overlay).
+   */
+  widthScale: number;
 }
 
 export interface EngineError {

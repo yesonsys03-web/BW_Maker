@@ -38,7 +38,7 @@ test("collectPsdFiles hands folders and files to the Rust scanner as one list", 
 // 프리셋에 저장하지 않기 위해서다(파일마다 다른 사실이라 프리셋과 무관).
 // 엔진이 기대하는 모양(edgeLines.manualColourIds, task-8a report 참고)으로
 // 여기서만 얹는다.
-const EDGE: EdgeLines = { enabled: true, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64, colourMode: "composite", edgeMode: "region" };
+const EDGE: EdgeLines = { enabled: true, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64, colourMode: "composite", edgeMode: "region", widthScale: 1 };
 
 test("renderPreview merges manualColourIds into the edgeLines payload the engine expects", async () => {
   invokeMock.mockResolvedValue({ pngPath: "/tmp/p.png" });

@@ -25,7 +25,7 @@ export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color", "height"];
  */
 export const DEFAULT_EDGE_LINES: EdgeLines = {
   enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
-  colourMode: "composite", edgeMode: "region",
+  colourMode: "composite", edgeMode: "region", widthScale: 1,
 };
 
 /**
@@ -98,7 +98,19 @@ export const PROP_PRESET: Preset = {
   ...SHARED,
   name: "PROP",
   excludeGroupPrefixes: ["-", "HEIGHTS", "TEMPLATE", "COLOR PALETTE"],
-  edgeLines: { ...DEFAULT_EDGE_LINES, enabled: true, edgeMode: "change" },
+  // threshold 12: 광택 띠 경계는 단차 24~34 언저리에다 자리마다 더 약해서,
+  // 기본 24로는 아티스트가 화살표로 짚은 구간 절반이 빠졌다. 신고 판 실측
+  // 스윕(24/16/12/8)에서 12가 화살표 전 구간을 덮고 잡선이 없는 값.
+  // 블러(CHANGE_BLUR_RADIUS)가 반점·지터 바닥을 ~3까지 눌러줘서 가능한
+  // 여유다.
+  //
+  // 굵기는 자동(원본 라인과 동일) 그대로 둔다. "50% 얇게"를 실측(widthScale
+  // 0.5)까지 갔다가 아티스트가 철회했다 — 얇아지면 능선의 미세한 흔들림이
+  // 드러나 "라인에 노이즈"로 보인다. 굵기가 그 흔들림을 덮는 것까지가
+  // 자동 굵기의 역할이다.
+  edgeLines: {
+    ...DEFAULT_EDGE_LINES, enabled: true, edgeMode: "change", threshold: 12,
+  },
 };
 
 /** 처음 실행할 때 깔리는 프리셋. 고르면 바로 작업할 수 있어야 한다. */
@@ -264,6 +276,16 @@ export function validatePreset(value: unknown, index: number, prefix?: string): 
     ) {
       throw new Error(`${msgPrefix}.edgeLines.${key}: 0 이상의 정수가 아닙니다.`);
     }
+  }
+  // 정수가 아닌 배율이라 위 목록과 따로 검사한다. 0은 "획 없음"이 아니라
+  // 실수로만 나올 값이라 막는다(끄려면 enabled가 있다).
+  if (
+    typeof edge.widthScale !== "number" ||
+    !Number.isFinite(edge.widthScale) ||
+    edge.widthScale <= 0 ||
+    edge.widthScale > 4
+  ) {
+    throw new Error(`${msgPrefix}.edgeLines.widthScale: 0 초과 4 이하의 수가 아닙니다.`);
   }
   // 저장된 프리셋에는 이 두 키가 없다(각 옵션이 생기기 전에 저장된 것들). 위의
   // 스프레드가 둘 다 기본값으로 메운다 — colourMode는 composite라 예전 프리셋이

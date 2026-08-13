@@ -140,17 +140,38 @@ def test_edge_mode_defaults_to_region():
     assert set(EDGE_MODES) == {"region", "change"}
 
 
+def _swallowed_gradient():
+    """
+    두 검출이 갈리는 판(2026-08-13 소품 판의 축소 재현): 왼쪽은 색마다 픽셀
+    수가 바닥값(cut = 0.0005 × solid = 20px) 미만인 그라데이션 — 열마다
+    (R, G)를 다르게(1600색), 행 홀짝으로 B를 흔들어(×2) 색마다 10px로 누른다.
+    분할은 이것을 통째로 오른쪽 평평한 띠의 대표색에 흡수해 라벨이 하나가
+    되고, 띠와의 단차(G ~100)가 라벨 위에서 사라진다. 픽셀 걸음 검출은 단차를
+    그대로 본다 — PROP 프리셋이 change를 쓰는 이유가 이 판별 그 자체다.
+    """
+    h, w, split = 20, 2000, 1600
+    rgba = np.zeros((h, w, 4), np.uint8)
+    rgba[..., 3] = 255
+    xs = np.arange(split)
+    for y in range(h):
+        rgba[y, :split, 0] = (150 + xs % 14).astype(np.uint8)
+        rgba[y, :split, 1] = (40 + xs // 14).astype(np.uint8)
+        rgba[y, :split, 2] = 68 + (y % 2)
+    rgba[:, split:, :3] = (200, 52, 80)
+    return rgba
+
+
 def test_edge_mode_picks_which_detection_runs():
-    # 중앙차분(k=3)은 문턱을 넘는 고지의 왼쪽 끝인 x=3에, 라벨 경계는 두 색이 실제로
-    # 맞닿는 x=5에 획을 세운다. 어느 자리에 섰는지로 어느 검출이 돌았는지 갈린다.
-    red, black = [200, 20, 40], [10, 10, 10]
-    rgba = _rgba([[red] * 6 + [black] * 6] * 8)
-    line = np.zeros((8, 12), np.uint8)
+    # 위치가 아니라 **갈리는 판**으로 판별한다. 예전에는 획이 서는 x 좌표로
+    # 갈랐지만(중앙차분의 고지 왼끝 vs 라벨 경계), change 입력 블러가 능선을
+    # 진짜 경계 자리로 옮기면서 두 모드의 자리가 같아졌다.
+    rgba = _swallowed_gradient()
+    line = np.zeros(rgba.shape[:2], np.uint8)
     opts = {**EDGE_DEFAULTS, "width": 1, "gap": 0, "minLength": 1}
     change = build_overlay(rgba, line, {**opts, "edgeMode": "change"})
     region = build_overlay(rgba, line, {**opts, "edgeMode": "region"})
-    assert int(change[..., 3].sum(0).argmax()) == 3, "change가 옛 검출을 안 썼다"
-    assert int(region[..., 3].sum(0).argmax()) == 5, "region이 라벨 경계를 안 썼다"
+    assert change[:, 1580:1620, 3].any(), "change가 흡수된 단차를 못 잡았다"
+    assert not region[..., 3].any(), "region이 흡수된 단차를 잡았다 — 판별자 붕괴"
 
 
 def test_edge_mode_absent_behaves_as_region():
@@ -1164,3 +1185,109 @@ def test_overlay_restores_opacities_afterwards(tmp_path):
     before = [(l.name, l.opacity) for l in layers]
     overlay_for_view(s, view["colourIds"], view["lineIds"], EDGE_DEFAULTS)
     assert [(l.name, l.opacity) for l in layers] == before
+
+
+def test_change_mode_ignores_single_pixel_speckles():
+    # 질감·압축 잔여 같은 한 픽셀짜리 튐은 선이 아니다. 입력 블러(CHANGE_BLUR_RADIUS)
+    # 가 능선 지터와 함께 이런 반점을 지운다 — 블러 전에는 반점마다 문턱(24)을
+    # 넘는 걸음이 생겨 획 부스러기가 됐고, PROP 첫 실사용에서 아티스트가
+    # "노이즈가 있어 사용할 수 없다"로 기각한 증상의 재현이다.
+    rgba = np.zeros((60, 60, 4), np.uint8)
+    rgba[..., :3] = (170, 40, 70)
+    rgba[..., 3] = 255
+    for y, x in ((10, 12), (20, 40), (33, 25), (45, 50), (50, 8)):
+        rgba[y, x, :3] = (250, 120, 150)          # 단독 픽셀, 걸음 80
+    line = np.zeros((60, 60), np.uint8)
+    opts = {**EDGE_DEFAULTS, "edgeMode": "change", "width": 1, "gap": 0, "minLength": 1}
+    overlay = build_overlay(rgba, line, opts)
+    assert not overlay[..., 3].any(), "반점이 획이 됐다 — 입력 블러가 안 물려 있다"
+
+
+def test_blurred_colour_does_not_bleed_transparency_into_the_rim():
+    # 실루엣 밖 투명 픽셀의 검정 RGB가 블러로 안쪽에 스미면 테두리 안쪽에
+    # 어두운 띠가 생긴다 — _blurred_colour의 알파 가중(프리멀티플라이 정규화)이
+    # 그것을 막는다. 직선 테두리에서는 비최대 억제가 우연히 유령 획을 막아
+    # 주지만(차이 프로필이 테두리 쪽으로 단조증가라 내부 봉우리가 없다), 그건
+    # 기하학의 호의이지 계약이 아니다 — 굽은 실루엣에서는 기대할 수 없으므로
+    # 색이 스미지 않는 것 자체를 단위로 잰다.
+    from psd_engine.edges import CHANGE_BLUR_RADIUS, _blurred_colour
+    rgba = np.zeros((40, 40, 4), np.uint8)
+    rgba[10:30, 10:30] = (200, 20, 40, 255)       # 투명 바탕 위 빨간 사각형
+    out = _blurred_colour(rgba, CHANGE_BLUR_RADIUS)
+    rim = out[20, 10, :3]                          # 왼쪽 테두리 안쪽 첫 픽셀
+    assert int(rim[0]) >= 190, f"테두리 색이 어두워졌다 — 투명이 스몄다: {tuple(int(v) for v in rim)}"
+    # 알파는 원본 그대로여야 한다 — solid 판정이 흔들리면 실루엣 규칙이 무너진다.
+    assert (out[..., 3] == rgba[..., 3]).all()
+
+
+def test_change_mode_keeps_borderline_steps_despite_the_blur():
+    # 블러는 단차를 ~0.866배로 감쇠시킨다(CHANGE_BLUR_ATTENUATION 주석).
+    # 문턱을 같은 비율로 보정하지 않으면 단차 24~34짜리 광택 경계가 통째로
+    # 사라진다 — 실사용 2차 기각("노이즈는 제거됐는데 라인이 생성되지
+    # 않았어")의 재현. 단차 26은 블러 후 ~22.5라 원래 문턱(24)엔 못 미치고
+    # 보정된 문턱(~20.8)에는 걸린다.
+    base, shine = (170, 40, 70), (196, 40, 70)     # 단차 26
+    rgba = np.zeros((20, 200, 4), np.uint8)
+    rgba[..., 3] = 255
+    rgba[:, :120, :3] = base
+    rgba[:, 120:, :3] = shine
+    line = np.zeros((20, 200), np.uint8)
+    opts = {**EDGE_DEFAULTS, "edgeMode": "change", "width": 1, "gap": 0, "minLength": 1}
+    overlay = build_overlay(rgba, line, opts)
+    assert overlay[:, 110:130, 3].any(), "경계선 단차(26)가 블러 감쇠로 사라졌다"
+
+
+def test_width_scale_halves_the_auto_width():
+    # 소품 판 요구("지금보다 50% 얇게"). 뷰마다 자동 굵기가 3~7px로 달라 고정
+    # width가 아니라 배율(widthScale)로 줄인다 — 명시 width가 아닌 자동 경로에만
+    # 걸린다는 것까지가 계약이다.
+    red, navy = [200, 20, 40], [20, 24, 60]
+    rgba = _rgba([[red] * 100 + [navy] * 100] * 30)
+    line = np.zeros((30, 200), np.uint8)
+    line[2:8, :40] = 255                     # 굵기 6px짜리 기존 선 → 자동 굵기의 근거
+    opts = {**EDGE_DEFAULTS, "gap": 0, "minLength": 1}
+    full = build_overlay(rgba, line, opts)
+    half = build_overlay(rgba, line, {**opts, "widthScale": 0.5})
+    n_full, n_half = int((full[..., 3] > 0).sum()), int((half[..., 3] > 0).sum())
+    assert n_half > 0, "배율 0.5에서 획이 아예 사라졌다"
+    assert n_half < n_full * 0.75, f"획이 얇아지지 않았다: {n_half} vs {n_full}"
+    # 명시 width는 배율을 무시한다 — 아티스트가 강제한 값이므로.
+    forced = build_overlay(rgba, line, {**opts, "width": 4, "widthScale": 0.5})
+    forced_full = build_overlay(rgba, line, {**opts, "width": 4})
+    assert (forced == forced_full).all(), "명시 width에 배율이 걸렸다"
+
+
+def test_smoothed_stroke_shaves_spurs_but_keeps_the_bar():
+    # change 능선의 요동이 굵히기에서 혹·가시로 증폭된 것("라인에 노이즈",
+    # 아티스트 3차 신고)을 다듬는다. 혹은 잘리고, 획 본체·굵기·끝은 남아야
+    # 한다(끝이 물러나면 reconnect가 만든 라인 겹침이 끊겨 흰 틈이 생긴다).
+    from psd_engine.edges import _smoothed_stroke
+    overlay = np.zeros((30, 60, 4), np.uint8)
+    overlay[12:19, 5:55, :3] = (10, 10, 30)
+    overlay[12:19, 5:55, 3] = 255                # 굵기 7px짜리 가로 획
+    overlay[10:12, 30:32, :3] = (10, 10, 30)
+    overlay[10:12, 30:32, 3] = 255               # 위로 튄 2px 혹
+    out = _smoothed_stroke(overlay)
+    assert not out[10, 30:32, 3].any(), "혹이 남았다"
+    assert out[15, 7:53, 3].all(), "획 본체가 끊겼다"
+    assert out[12, 40, 3] and out[18, 40, 3], "획 굵기가 줄었다"
+
+
+def test_build_overlay_smooths_only_wide_change_strokes(monkeypatch):
+    # 다듬기의 배선 계약: change 모드의 굵은 획(3px 이상)에만 걸린다.
+    # region은 라벨 경계가 규칙적이라 다듬을 것이 없고, 가는 획은 코어째
+    # 뭉개지므로 건너뛴다(STROKE_SMOOTH_CUT 주석).
+    import psd_engine.edges as E
+    called = []
+    monkeypatch.setattr(E, "_smoothed_stroke", lambda o: (called.append(1), o)[1])
+    red, navy = [200, 20, 40], [20, 24, 60]
+    rgba = _rgba([[red] * 20 + [navy] * 20] * 12)
+    line = np.zeros((12, 40), np.uint8)
+    base = {**EDGE_DEFAULTS, "gap": 0, "minLength": 1}
+    E.build_overlay(rgba, line, {**base, "edgeMode": "change", "width": 6})
+    assert called, "change 굵은 획에 다듬기가 안 걸렸다"
+    called.clear()
+    E.build_overlay(rgba, line, {**base, "edgeMode": "change", "width": 1})
+    assert not called, "가는 획에도 다듬기가 걸렸다"
+    E.build_overlay(rgba, line, {**base, "width": 6})
+    assert not called, "region 획에 다듬기가 걸렸다"
