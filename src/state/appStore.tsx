@@ -326,10 +326,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       const initial = buildInitialOpsState(result.tree);
       return {
         ...state,
-        // 아직 아무것도 안 보고 있으면 이 파일을 띄운다 — 로드 큐가 폴더의 첫
-        // 파일에 하는 것(openFileEffect의 activate)과 같은 규칙이다. 워커 모드에서는
-        // 그 큐가 비켜서 있으므로, 여기서 안 세우면 폴더를 열어도 화면이 "왼쪽에서
+        // 아직 아무것도 안 보고 있으면 이 파일을 띄운다. 워커 모드에서는 로드 큐가
+        // 통째로 비켜서 있으므로, 여기서 안 세우면 폴더를 열어도 화면이 "왼쪽에서
         // 파일을 선택하세요"에 머문다.
+        //
+        // 로드 큐와 **같은 규칙은 아니다.** 그쪽은 목록의 첫 파일을 띄우지만
+        // (openFileEffect의 activate), 워커는 여럿이 동시에 돌고 파일마다 걸리는
+        // 시간이 크게 달라서(실측 중앙 5초 대 최대 259초) 여기 먼저 닿는 것은
+        // **가장 먼저 끝난 파일**이다 — 목록 순서와 다를 수 있다. 그래도 되는
+        // 값이라 그대로 둔다: 아무것도 안 뜬 화면보다 낫고, 아티스트가 목록에서
+        // 다른 파일을 누르면 그 자리에서 바뀐다.
         activePath: state.activePath ?? path,
         // 세션 없이 "열림". 프로젝트 복원(restoreProject)이 만드는 것과 같은
         // 모양이고, 세션은 화면이 그 파일을 실제로 쓸 때 채워진다.
