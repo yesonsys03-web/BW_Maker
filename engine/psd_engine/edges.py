@@ -384,6 +384,28 @@ def _morph(mask, size, grow):
     return hit if grow else ~hit
 
 
+def _active_box(mask, margin):
+    """켜진 픽셀을 margin만큼 넉넉히 감싸는 사각형 `(y0, y1, x0, x1)`. 비었으면 None.
+
+    뷰포트 전체를 도는 단계를 "답이 정해질 수 있는 자리"로 좁히는 데 쓴다. margin은
+    그 단계가 이웃을 얼마나 멀리 읽는지(자라는 반지름)이고, 그만큼 넓히면 잘린
+    가장자리 바깥이 전부 꺼진 픽셀이라 답이 달라지지 않는다.
+
+    납품 폴더 100장 실측: 이 사각형은 뷰포트의 37~62%다. 경계 픽셀 자체는 0.1%뿐이지만
+    경계가 그림 전체에 퍼져 있어서 감싸면 그만큼 된다 — 그래도 절반은 덜 돈다.
+    """
+    rows = mask.any(axis=1)
+    if not rows.any():
+        return None
+    cols = mask.any(axis=0)
+    h, w = mask.shape
+    y0 = max(0, int(np.argmax(rows)) - margin)
+    y1 = min(h, int(rows.size - np.argmax(rows[::-1])) + margin)
+    x0 = max(0, int(np.argmax(cols)) - margin)
+    x1 = min(w, int(cols.size - np.argmax(cols[::-1])) + margin)
+    return y0, y1, x0, x1
+
+
 def subtract_lines(mask, line_alpha, gap, line_alpha_threshold):
     """
     이미 선이 있는 자리를 뺀다.
@@ -431,14 +453,30 @@ def reconnect_to_lines(mask_after_drop, removed, lines, gap):
     gap을 다 쓴 뒤에도 RECONNECT_OVERLAP만큼 더 자라게 둔다. 영역에 라인 코어
     자체가 포함되어 있으므로, 이 마지막 몇 단계는 lineAlpha 등고선을 넘어 라인
     안쪽까지 살짝 겹친다(모듈 상수 설명 참고).
+
+    되살리기는 **살아남은 조각에서 한 겹씩** 자라므로, 답이 달라질 수 있는 자리는
+    ``mask_after_drop``에서 그 걸음 수 안쪽뿐이다. 그 사각형만 돌고 나머지는 원본
+    그대로 둔다 — 실측에서 이 함수의 `_morph`가 경계선 시간의 9.7%(138초)였고,
+    그 대부분이 아무것도 자랄 수 없는 자리를 도는 값이었다.
     """
     target = removed | lines
     if not target.any():
         return mask_after_drop
-    grown = mask_after_drop
-    for _ in range(gap + RECONNECT_OVERLAP):
-        grown = mask_after_drop | (_morph(grown, 3, grow=True) & target)
-    return grown
+    steps = gap + RECONNECT_OVERLAP
+    # 걸음마다 1px씩만 자라므로 steps보다 멀리는 못 간다. +1은 마지막 걸음의
+    # `_morph`가 창을 한 칸 더 내다보는 몫이다.
+    box = _active_box(mask_after_drop, steps + 1)
+    if box is None:
+        return mask_after_drop
+    y0, y1, x0, x1 = box
+    seed = mask_after_drop[y0:y1, x0:x1]
+    tgt = target[y0:y1, x0:x1]
+    grown = seed
+    for _ in range(steps):
+        grown = seed | (_morph(grown, 3, grow=True) & tgt)
+    out = mask_after_drop.copy()
+    out[y0:y1, x0:x1] = grown
+    return out
 
 
 def label_components(mask):
@@ -567,7 +605,32 @@ def stroke_rgba(mask, labels, colour, width):
     width로는 갈 수 없는 중간값이 필요했다. 아래 라벨 키우기는 **정사각 그대로**
     둔다: 정사각은 마름모를 포함하므로 색이 항상 획을 덮고, 덜 덮어서 생기는 검은
     후광(BLUR_REACH 주석)이 이 변경으로 되살아나지 않는다.
+
+    **마스크 둘레만 돈다.** 나오는 알파도 색도 마스크에서 자란 만큼 안쪽에서만
+    정해지므로, 그 사각형 밖은 계산해봐야 0이다. 실측에서 이 함수가 경계선 시간의
+    13.6%(195초)였는데 그 대부분이 빈 자리를 도는 값이었다 — 뷰포트가 33 Mpx인데
+    획이 닿는 자리는 그 일부다.
     """
+    out = np.zeros(mask.shape + (4,), np.uint8)
+    # 마스크에서 무언가 써지는 가장 먼 거리로 사각형을 정한다. 두 갈래가 있고
+    # **라벨 쪽이 언제나 더 멀다**:
+    #   알파 = 굵히기(width//2) + 블러가 번지는 1px
+    #   라벨 = size//2 + BLUR_REACH        (size는 width를 홀수로 올림한 값)
+    # size//2 >= width//2 이고 BLUR_REACH(2) > 1이므로 라벨 쪽이 항상 크다.
+    # 그 부등식은 test_the_stroke_crop_margin_covers_the_blur_too가 못박는다 —
+    # STROKE_BLUR를 키우면 이 논증이 깨지고 그 테스트가 빨개진다.
+    size_ = width if width % 2 else width + 1
+    box = _active_box(mask, size_ // 2 + BLUR_REACH)
+    if box is None:
+        return out
+    y0, y1, x0, x1 = box
+    out[y0:y1, x0:x1] = _stroke_rgba_in(
+        mask[y0:y1, x0:x1], labels[y0:y1, x0:x1], colour[y0:y1, x0:x1], width)
+    return out
+
+
+def _stroke_rgba_in(mask, labels, colour, width):
+    """`stroke_rgba`의 알맹이 — 잘라낸 사각형 안에서만 돈다."""
     thick = _grow_diamond(mask, width // 2)
     alpha = np.array(
         Image.fromarray((thick * 255).astype(np.uint8))

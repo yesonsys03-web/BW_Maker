@@ -1488,3 +1488,152 @@ def test_stroke_rgba_does_not_scan_the_whole_canvas_once_per_component():
     assert t_narrow * 2 < t_full, (
         f"조각마다 캔버스 전체를 도는 비용이 그대로다 "
         f"(좁힘 {t_narrow*1000:.0f}ms, 전체 {t_full*1000:.0f}ms)")
+
+
+# ── 자라는 만큼만 도는 것 (C2/C3) ─────────────────────────────────────────
+#
+# `reconnect_to_lines`도 `stroke_rgba`도 답은 마스크 주변에서만 정해지는데
+# 뷰포트 전체 배열을 돌았다. 100장 조사에서 이 둘이 경계선 시간의 23.3%(333초)다.
+# 자르는 사각형은 "여기서 얼마나 자랄 수 있나"로 정해지므로 자르기가 정확해야 한다.
+
+def _reconnect_full_canvas(mask_after_drop, removed, lines, gap):
+    """자르기 전 구현 그대로 — 자로 쓴다."""
+    from psd_engine.edges import RECONNECT_OVERLAP, _morph
+
+    target = removed | lines
+    if not target.any():
+        return mask_after_drop
+    grown = mask_after_drop
+    for _ in range(gap + RECONNECT_OVERLAP):
+        grown = mask_after_drop | (_morph(grown, 3, grow=True) & target)
+    return grown
+
+
+def _reconnect_fixture(h=48, w=64):
+    """라인을 가로지르는 경계 — 지워진 자리를 따라 되살아나야 하는 모양."""
+    lines = np.zeros((h, w), bool)
+    lines[:, 30:34] = True                       # 세로 라인 띠
+    removed = np.zeros((h, w), bool)
+    removed[20, 28:36] = True                    # 라인에 가려 지워진 경계
+    mask_after_drop = np.zeros((h, w), bool)
+    mask_after_drop[20, 10:28] = True            # 왼쪽에 살아남은 조각
+    mask_after_drop[20, 36:56] = True            # 오른쪽에 살아남은 조각
+    return mask_after_drop, removed, lines
+
+
+def test_reconnect_to_lines_cropped_matches_the_full_canvas_answer():
+    from psd_engine.edges import reconnect_to_lines
+
+    m, removed, lines = _reconnect_fixture()
+    for gap in (0, 1, 2, 4, 8):
+        got = reconnect_to_lines(m, removed, lines, gap)
+        want = _reconnect_full_canvas(m, removed, lines, gap)
+        assert np.array_equal(got, want), (
+            f"gap={gap}에서 자른 답이 캔버스 전체로 돈 답과 다르다 "
+            f"({int((got != want).sum())}px)")
+
+
+def test_reconnect_to_lines_still_reaches_across_the_line_it_was_cut_by():
+    # 자르기가 너무 좁으면 되살리기가 죽는다 — 그러면 교차점마다 흰 틈이 남는다.
+    # 이 픽스처는 실제로 무언가 되살아나야 의미가 있다.
+    from psd_engine.edges import reconnect_to_lines
+
+    m, removed, lines = _reconnect_fixture()
+    out = reconnect_to_lines(m, removed, lines, 4)
+    assert out.sum() > m.sum(), "되살아난 픽셀이 하나도 없다 — 픽스처가 무의미하다"
+    assert (out & removed).any(), "지워진 자리가 하나도 안 되살아났다"
+
+
+def test_reconnect_to_lines_keeps_a_seed_that_sits_at_the_canvas_edge():
+    # 사각형을 캔버스 밖으로 넓히면 안 되고, 가장자리 씨앗이 잘려도 안 된다.
+    from psd_engine.edges import reconnect_to_lines
+
+    h, w = 24, 24
+    lines = np.zeros((h, w), bool)
+    lines[0, :] = True
+    removed = np.zeros((h, w), bool)
+    removed[0, 5:9] = True
+    m = np.zeros((h, w), bool)
+    m[0, 0:5] = True                              # 캔버스 맨 위 가장자리
+    got = reconnect_to_lines(m, removed, lines, 4)
+    want = _reconnect_full_canvas(m, removed, lines, 4)
+    assert np.array_equal(got, want), "가장자리에서 갈렸다"
+
+
+def test_reconnect_to_lines_with_nothing_to_grow_from_is_unchanged():
+    from psd_engine.edges import reconnect_to_lines
+
+    h, w = 16, 16
+    lines = np.zeros((h, w), bool)
+    lines[8, :] = True
+    empty = np.zeros((h, w), bool)
+    got = reconnect_to_lines(empty, empty.copy(), lines, 4)
+    assert not got.any(), "씨앗이 없는데 무언가 자랐다"
+
+
+def test_stroke_rgba_cropped_to_the_mask_matches_the_full_canvas_answer():
+    # C1(조각 사각형)에 더해 겉껍질까지 자른 뒤에도 답이 같아야 한다. 여기서
+    # 위험한 것은 블러다 — 자른 가장자리에서 PIL이 바깥을 다르게 보면 갈린다.
+    from psd_engine.edges import stroke_rgba
+
+    mask, labels, colour = _scattered_components()
+    for width in (1, 3, 5, 9, 15):
+        got = stroke_rgba(mask, labels, colour, width)
+        want = _stroke_rgba_full_canvas(mask, labels, colour, width)
+        assert np.array_equal(got, want), (
+            f"width={width}에서 자른 답이 다르다 "
+            f"({int((got != want).any(2).sum())}px)")
+
+
+def test_stroke_rgba_on_a_mostly_empty_canvas_does_not_scan_it_all():
+    # 큰 캔버스 구석에 획 하나. 자르기 전에는 캔버스 크기에 비례해 들었다.
+    import time
+
+    from psd_engine.edges import label_components, stroke_rgba
+
+    small = np.zeros((200, 200), bool)
+    small[100, 90:110] = True
+    big = np.zeros((2400, 2400), bool)
+    big[1200, 1190:1210] = True
+
+    def run(mask):
+        labels, _ = label_components(mask)
+        colour = np.zeros(mask.shape + (3,), np.uint8)
+        colour[mask] = [200, 100, 50]
+        t = time.perf_counter()
+        stroke_rgba(mask, labels, colour, 5)
+        return time.perf_counter() - t
+
+    t_small, t_big = run(small), run(big)
+    # 캔버스는 144배인데 그릴 것은 같다. 여전히 전체를 돌면 그 배수가 그대로 나온다.
+    assert t_big < t_small * 20 + 0.05, (
+        f"캔버스가 144배로 커지자 {t_big/max(t_small,1e-9):.0f}배 들었다 — "
+        "그릴 것은 같은데 전체를 돌고 있다")
+
+
+def test_the_stroke_crop_margin_covers_the_blur_too():
+    # `stroke_rgba`는 자르는 여유를 **라벨이 자라는 거리**로 정한다. 알파 쪽이
+    # 그보다 멀리 가면 잘린 가장자리에서 답이 갈리는데, 그 논증은 두 상수의
+    # 부등식에 기대고 있다. 그러니 상수를 바꾸면 여기서 잡혀야 한다.
+    #
+    # 알파가 가는 거리 = 굵히기(width//2) + 블러가 번지는 거리.
+    # 번지는 거리는 상수에서 유도할 수 없어 실제로 잰다 — STROKE_BLUR=0.4는 1px.
+    from PIL import Image, ImageFilter
+
+    from psd_engine.edges import BLUR_REACH, STROKE_BLUR
+
+    dot = np.zeros((41, 41), np.uint8)
+    dot[20, 20] = 255
+    blurred = np.array(Image.fromarray(dot)
+                       .filter(ImageFilter.GaussianBlur(STROKE_BLUR)))
+    ys, xs = np.nonzero(blurred)
+    spread = int(max(np.abs(ys - 20).max(), np.abs(xs - 20).max()))
+    assert spread >= 1, "블러가 아예 안 번진다 — 이 테스트가 재는 게 없다"
+
+    for width in range(1, 32):
+        size = width if width % 2 else width + 1
+        label_reach = size // 2 + BLUR_REACH
+        alpha_reach = width // 2 + spread
+        assert alpha_reach <= label_reach, (
+            f"width={width}에서 알파가 라벨보다 멀리 간다 "
+            f"({alpha_reach} > {label_reach}) — stroke_rgba의 자르기 여유가 모자라다")
