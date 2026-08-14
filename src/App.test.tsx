@@ -66,7 +66,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 }));
 
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import App from "./App";
+import App, { CACHE_WORKERS_STORAGE_KEY, DEFAULT_CACHE_WORKERS } from "./App";
 import { PreviewCanvas } from "./components/PreviewCanvas";
 import { loadPresets } from "./lib/presets";
 import { PreviewCache, previewRenderSpec } from "./lib/previewCache";
@@ -196,7 +196,9 @@ beforeEach(() => {
   // 기본은 "전부 한 번에 데워짐" — 워밍업 큐가 한 번 부르고 끝난다. 워밍업의
   // 반복·양보 규약 자체는 lib/warmupQueue.test.ts가 잠근다.
   engine.warmPreviewTiles.mockResolvedValue({ warmed: [], skipped: [], remaining: [] });
-  // 워커 모드 기본 대역 — 워커 수가 1(기본)이면 아무 테스트도 여기 안 온다.
+  // 워커 모드 기본 대역. 앱의 기본 작업 프로세스 수가 2라 이 대역은 **기본으로**
+  // 밟힌다 — 프리셋이 걸린 채 파일이 들어오는 테스트는 전부 여기로 온다. 워커 수를
+  // 1로 못박은 테스트(seedWorkerCount 참고)만 이 자리를 안 지난다.
   engine.warmWorkersStart.mockResolvedValue({ generation: 1, ids: [0] });
   engine.warmWorkerSend.mockResolvedValue(undefined);
   engine.warmWorkersStop.mockResolvedValue(undefined);
@@ -211,6 +213,47 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
+
+/**
+ * 앱을 띄우기 **전에** 이 테스트가 재는 작업 프로세스 수를 못박는다.
+ *
+ * 앱의 기본은 2다(App.tsx의 DEFAULT_CACHE_WORKERS). 그래서 프리셋이 걸린 폴더를
+ * 열면 파일 준비가 워커로 나가고, 로드 큐는 통째로 비켜서서 open_psd가 한 번도
+ * 안 나간다. 이 헬퍼를 1로 부르는 테스트 여덟 개는 그 병렬 경로가 생기기 전에 쓴
+ * 것이라 **메인 엔진 하나가 순서대로 여는** 경로를 잰다.
+ *
+ * 그 여덟 개는 지금까지 "기본이 1"이라는 말을 한 번도 적지 않은 채 그 위에 얹혀
+ * 있었다. 기본을 1에서 2로 올리자 여덟 개가 한꺼번에 빨간불이 됐는데, 그 빨간불이
+ * 말한 것은 "기능이 깨졌다"가 아니라 **"이 테스트가 무엇을 재는지 안 적었다"**였다.
+ * 그래서 판정을 무르게 하는 대신 재는 경로를 테스트가 스스로 말하게 한다. 기본값이
+ * 또 바뀌어도 이 여덟 개는 안 흔들리고, 흔들린다면 그때는 진짜 회귀다.
+ *
+ * **render보다 먼저 불러야 한다.** cacheWorkers는 useState 초기화에서 이 키를 한
+ * 번만 읽으므로, 뜬 뒤에 넣으면 아무 일도 안 일어난다. 아래 setWorkers와 목적이
+ * 다르다: 이쪽은 "앱이 이 값으로 떠 있었다", 저쪽은 "사용자가 도중에 바꿨다"이다.
+ */
+function seedWorkerCount(n: number) {
+  window.localStorage.setItem(CACHE_WORKERS_STORAGE_KEY, String(n));
+}
+
+/**
+ * 화면의 워커 수 드롭다운. 이 select에는 접근성 이름이 없어 title로 찾는다 —
+ * FilePanel의 그 title 문구가 바뀌면 여기가 같이 바뀌어야 하므로, 문장 전체가
+ * 아니라 이 컨트롤을 유일하게 가리키는 조각만 본다.
+ */
+function workerSelect() {
+  return screen.getByTitle(/작업 프로세스로 나눠 돌릴지/) as HTMLSelectElement;
+}
+
+/**
+ * 워커 수 드롭다운을 돌린다 — **뜬 뒤에** 사용자가 바꾸는 쪽(위 seedWorkerCount와
+ * 짝). 파일 준비도 전체 캐시와 **같은 설정**을 쓴다.
+ */
+function setWorkers(n: number) {
+  const select = workerSelect();
+  select.value = String(n);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
 
 /** 파일 목록에 PATHS를 넣는다. "+ 추가"가 도는 경로를 그대로 쓴다. */
 async function addFiles(user: { click: (el: Element) => void }) {
@@ -299,6 +342,7 @@ test("resume picks the remaining files back up", async () => {
 // openSuccess가 presetApplied를 정직하게 세워도, 이 큐가 그것을 확인하지 않으면
 // 아무 소용이 없다 — 둘이 같이 맞아야 한다.
 test("the load queue skips auto-apply for a restored file but still applies it to a plain one", async () => {
+  seedWorkerCount(1); // 여기서 재는 것은 로드 큐(순차 경로)의 자동 적용 판정이다
   vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
   engine.applyPreset.mockResolvedValue({ matchedLayerIds: [], operations: [] });
 
@@ -369,6 +413,7 @@ test("the load queue skips auto-apply for a restored file but still applies it t
 // 프리셋을 걸어주지만(App의 "그물" useEffect), 나머지는 아무도 안 걸어준다 —
 // 폴더 전체가 조용히 프리셋 없이 남는 것이 실제 증상이다.
 test("files that were never restored still get the preset when the engine reports no mtime", async () => {
+  seedWorkerCount(1); // 위와 같은 판정의 반대편 — 역시 로드 큐(순차 경로)의 것이다
   vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
   engine.applyPreset.mockResolvedValue({ matchedLayerIds: [1], operations: [] });
 
@@ -405,6 +450,7 @@ test("files that were never restored still get the preset when the engine report
 // 이 순간 그 대리 지표가 사라져 판정이 뒤집히고, 큐가 파일을 재오픈할 때
 // applyPresetEffect를 또 걸어 복원해 지킨 편집을 덮는다.
 test("re-processing a restored file after an engine restart still skips auto-apply", async () => {
+  seedWorkerCount(1); // 세 번째 경로도 로드 큐가 재오픈하는 순차 경로의 것이다
   let deadCallback: ((payload: { stderrTail?: string[] }) => void) | undefined;
   engine.onEngineDead.mockImplementation((cb: (payload: { stderrTail?: string[] }) => void) => {
     deadCallback = cb;
@@ -971,6 +1017,9 @@ test("a restored preview shows before the file is open", async () => {
  * 쪽이라 눈에 안 띈다. 이 줄이 그 빈자리의 표식이다.
  */
 test("changing the preset holds the prefetch queue until the artist stops", async () => {
+  // 여기서 재는 것은 **미리보기 준비 큐**(순차 경로)가 서는 것이다. 워커로 준비한
+  // 폴더에서는 그 큐가 애초에 할 일이 없어 "안 나갔다"가 공짜로 참이 된다.
+  seedWorkerCount(1);
   // 두 번째 프리셋은 **라인색이 다르다**. 이름만 다르고 설정이 같으면 키가 하나도
   // 안 갈려 큐가 애초에 할 일이 없고, 그러면 이 테스트는 아무것도 재지 못한다.
   vi.mocked(loadPresets).mockResolvedValueOnce([
@@ -1660,6 +1709,10 @@ test("after the queues settle, the active file's leaf tiles are warmed", async (
 });
 
 test("the full-folder sweep waits for the artist to start it, then reports completion", async () => {
+  // 워커 수 1 = 스윕을 **이 체인**(warmPreviewTiles)이 맡는 경로. 2 이상이면 스윕은
+  // 워커 무리로 넘어가고(App.tsx의 `fullCacheOn && cacheWorkers > 1` 게이트) 그쪽은
+  // 바로 아래 "with multiple workers…"가 잠근다.
+  seedWorkerCount(1);
   // 폴더 전체 스윕은 몇 시간짜리 작업이라 자동으로 돌지 않는다 — 자동은
   // 활성·다음 파일까지만이고, 나머지는 "전체 캐시" 버튼으로 시작한다. 순서는
   // 활성 → 다음 → 나머지 스윕 → 스윕에 밀려났을 다음 파일 재데움(방금 디스크에
@@ -1684,6 +1737,47 @@ test("the full-folder sweep waits for the artist to start it, then reports compl
   await waitFor(() => expect(screen.queryByText("전체 캐시 완료")).toBeNull());
 });
 
+/**
+ * 출고되는 기본 작업 프로세스 수를 못박는다.
+ *
+ * 이 값은 **세 군데가 동시에 맞아야** 한다: App.tsx의 DEFAULT_CACHE_WORKERS,
+ * FilePanel 드롭다운이 "(기본)"이라고 써 붙인 항목, 그리고 저장된 값이 없는 채로
+ * 뜬 앱이 실제로 고르는 값. 셋은 서로 다른 파일에 흩어져 있어 하나만 고쳐도 아무도
+ * 안 말린다 — 드롭다운은 "워커 1 (기본)"이라 말하는데 앱은 2로 도는 화면이 그렇게
+ * 만들어진다. 기본을 1에서 2로 올릴 때 실제로 셋 다 손대야 했고, 그때 이 대조를
+ * 해주는 테스트가 하나도 없었다.
+ *
+ * **그래서 숫자를 여기 적지 않는다.** 적으면 맞춰야 할 자리가 넷이 된다.
+ */
+test("the shipped default worker count is what the dropdown calls 기본, and what the app starts on", () => {
+  // 저장된 값이 없는 상태 = 이 앱을 처음 켠 사람. beforeEach의 localStorage 대역은
+  // 매번 새로 세우므로 비어 있다 — 그 전제부터 확인한다.
+  expect(window.localStorage.getItem(CACHE_WORKERS_STORAGE_KEY)).toBeNull();
+  render(<App />);
+
+  const select = workerSelect();
+  // (1) 앱이 실제로 쓰는 값.
+  expect(Number(select.value)).toBe(DEFAULT_CACHE_WORKERS);
+  // (2) 드롭다운이 "(기본)"이라 표시한 항목. 하나뿐이어야 한다 — 둘이면 어느 쪽이
+  //     기본인지 화면이 말해주지 못한다.
+  const marked = [...select.options].filter((o) => o.textContent?.includes("(기본)"));
+  expect(marked).toHaveLength(1);
+  expect(Number(marked[0].value)).toBe(DEFAULT_CACHE_WORKERS);
+});
+
+/**
+ * 그리고 **저장된 값이 기본값을 이긴다.** 기본을 올리는 변경이 사람이 골라둔 값을
+ * 덮으면, 16GB 기계에서 일부러 1로 내려둔 사람이 다음 업데이트에서 말없이 2로
+ * 돌아간다. 이 판정이 없으면 그 회귀는 "왜 갑자기 메모리가 터지지" 로만 보인다.
+ */
+test("a worker count the user already chose survives a change to the default", () => {
+  const chosen = DEFAULT_CACHE_WORKERS === 1 ? 2 : 1;
+  seedWorkerCount(chosen);
+  render(<App />);
+
+  expect(Number(workerSelect().value)).toBe(chosen);
+});
+
 test("with multiple workers the full cache covers files the app has not opened yet", async () => {
   // 워커 수를 올리면 전체 캐시는 별도 워커 프로세스로 돈다(디스패치 규칙은
   // lib/warmWorkers.test.ts가 잠근다). 대상은 **목록 전체**여야 한다 — 앱에서
@@ -1701,9 +1795,7 @@ test("with multiple workers the full cache covers files the app has not opened y
   await addFiles({ click });
   await finishOpen(0, 1); // 나머지 두 파일은 아직 열리지 않았다
 
-  const workers = screen.getByTitle(/전체 캐시를 몇 개의 작업 프로세스/) as HTMLSelectElement;
-  workers.value = "2";
-  workers.dispatchEvent(new Event("change", { bubbles: true }));
+  setWorkers(2);
   click(screen.getByRole("button", { name: "전체 캐시" }));
 
   await waitFor(() => expect(engine.warmWorkersStart).toHaveBeenCalledWith(2, expect.any(Number)));
@@ -1787,13 +1879,6 @@ function nameOf(path: string) {
   return path.split("/").pop()!;
 }
 
-/** 워커 수 드롭다운을 돌린다. 준비도 전체 캐시와 **같은 설정**을 쓴다. */
-function setWorkers(n: number) {
-  const select = screen.getByTitle(/전체 캐시를 몇 개의 작업 프로세스/) as HTMLSelectElement;
-  select.value = String(n);
-  select.dispatchEvent(new Event("change", { bubbles: true }));
-}
-
 /**
  * 워커에 나간 잡 중 **전체 캐시 스윕**의 것만. 두 큐가 같은 채널을 쓰므로 잡
  * 모양으로만 갈린다: 스윕은 {path, presets}, 파일 준비는 {path, prepare}다.
@@ -1851,13 +1936,41 @@ test("raising the worker count spreads file preparation across processes", async
 });
 
 test("with one worker file preparation stays on the current sequential path", async () => {
-  // 기본값 1에서는 아무것도 안 바뀐다 — 전체 캐시가 이미 쓰는 규칙과 같다.
+  // 이 테스트의 주제가 곧 워커 수다: **1로 내려두면** 아무것도 안 바뀐다 — 전체
+  // 캐시가 이미 쓰는 규칙과 같다. 앱 기본이 2라 명시하지 않으면 이 자리에서
+  // 병렬 경로가 도는데, 그러면 "안 나갔다"를 재려던 판정이 뒤집힌다.
+  seedWorkerCount(1);
   await renderWithPreset();
   await addFiles({ click });
   await finishOpen(0, 1);
   await new Promise((r) => setTimeout(r, 20));
   expect(engine.warmWorkersStart).not.toHaveBeenCalled();
   expect(engine.warmWorkerSend).not.toHaveBeenCalled();
+});
+
+/**
+ * 그리고 **드롭다운을 한 번도 안 건드린 사람**에게도 병렬 경로가 간다.
+ *
+ * 위아래의 워커 테스트는 전부 자기가 쓸 워커 수를 스스로 정한다 — 그래서 기본값이
+ * 1로 되돌아가도 그 테스트들은 하나도 안 깨진다. 그러면 "설정을 한 번도 안 건드린
+ * 사용자가 100장짜리 폴더에서 28분을 그대로 기다린다"는 예전 상태로 조용히
+ * 돌아가도 아무도 안 말린다. 기본값을 올린 이유가 정확히 그것이라, 기본값만으로
+ * 워커가 뜨는지를 여기서 따로 잠근다.
+ */
+test("a folder opened with nobody touching the dropdown goes to the workers", async () => {
+  captureWorkerLines(9, [0, 1]);
+
+  // seedWorkerCount도 setWorkers도 부르지 않는다 — 안 부르는 것이 이 테스트의 전부다.
+  expect(window.localStorage.getItem(CACHE_WORKERS_STORAGE_KEY)).toBeNull();
+  await renderWithPreset();
+  await addFilesForPrepare();
+
+  await waitFor(() =>
+    expect(engine.warmWorkersStart).toHaveBeenCalledWith(DEFAULT_CACHE_WORKERS, expect.any(Number))
+  );
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBeGreaterThan(0));
+  // 그리고 그 잡은 파일 준비다 — 전체 캐시 스윕이 아니다.
+  expect((engine.warmWorkerSend.mock.calls[0][1] as { prepare?: unknown }).prepare).toBeDefined();
 });
 
 test("the load queue never opens a file that preparation is going to take", async () => {
@@ -1967,7 +2080,7 @@ test("the warmup chain reaches the next prepared file, which has no session of i
 });
 
 /**
- * 전체 캐시(워커 수 1 = 기본값)가 워커로 준비한 폴더를 실제로 쓸어야 한다.
+ * 전체 캐시가 **워커 수 1로 내려간 뒤에도** 워커로 준비한 폴더를 실제로 쓸어야 한다.
  *
  * 스윕 대상을 "세션이 있는 파일"로 고르면 준비된 폴더에서는 목록이 통째로 비고,
  * 그러면 이 체인은 **"다 됐다" 가지**로 떨어진다 — 한 장 남짓 쓸고 "전체 캐시
@@ -1993,8 +2106,9 @@ test("the full cache sweeps a worker-prepared folder instead of declaring it don
   await waitFor(() => expect(opens).toHaveLength(1));
   await finishOpen(0, 11);
 
-  // 워커 수를 기본값으로 되돌린다. 그러면 스윕은 워커 무리가 아니라 이 체인이
-  // 맡는다(위 게이트: fullCacheOn && cacheWorkers > 1이면 체인은 통째로 쉰다).
+  // 워커 수를 1로 내린다. 그러면 스윕은 워커 무리가 아니라 이 체인이 맡는다
+  // (위 게이트: fullCacheOn && cacheWorkers > 1이면 체인은 통째로 쉰다). 여기서
+  // 재려는 것이 그 체인의 대상 고르기라 1이어야 한다 — 앱 기본값과는 무관하다.
   setWorkers(1);
   click(screen.getByRole("button", { name: "전체 캐시" }));
 
@@ -2017,6 +2131,10 @@ test("the full cache sweeps a worker-prepared folder instead of declaring it don
  * 조용히 죽고 배치는 반쪽 PSD를 남긴다. 설계 9절이 검증 항목으로 못박은 둘이다.
  */
 test("file preparation stands aside while the full cache holds the workers", async () => {
+  // 워커 1로 떠서 순차 경로가 파일을 쥔 상태를 먼저 만든다. 그래야 아래에서 2로
+  // 올리는 것이 "전체 캐시가 워커를 잡고 있는 와중에 준비가 끼어들려는 순간"이
+  // 된다 — 2로 떠 버리면 준비가 전체 캐시보다 **먼저** 출발해 재려던 순간이 없다.
+  seedWorkerCount(1);
   await renderWithPreset();
   await addFiles({ click }); // 워커 1 — 현행 순차 경로가 첫 파일을 쥔다
   click(screen.getByRole("button", { name: "전체 캐시" }));
@@ -2033,6 +2151,8 @@ test("file preparation stands aside while the full cache holds the workers", asy
 });
 
 test("file preparation stands aside while a batch export holds the workers", async () => {
+  // 위와 같은 이유로 워커 1에서 출발한다 — 배치가 워커를 잡은 **뒤에** 2로 올린다.
+  seedWorkerCount(1);
   const batching = deferred<{ results: unknown[] }>();
   engine.batchRun.mockReturnValue(batching.promise);
   engine.pathsExist.mockResolvedValue(PATHS.map(() => false));

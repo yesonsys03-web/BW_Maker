@@ -378,11 +378,13 @@ export function FilePanel({
             value={String(cacheWorkers)}
             onChange={(e) => onCacheWorkersChange(Number(e.currentTarget.value))}
             disabled={fullCacheRunning}
-            title="전체 캐시를 몇 개의 작업 프로세스로 돌릴지. 1이면 엔진이 짬짬이 돌고(기본), 늘리면 그만큼 빨라지는 대신 CPU와 메모리를 더 씁니다."
+            title="폴더를 열 때의 파일 준비와 전체 캐시, 배치 내보내기를 몇 개의 작업 프로세스로 나눠 돌릴지. 1이면 나누지 않고 엔진 하나가 순서대로 합니다(파일 100장 폴더 실측 28분). 2면 약 절반, 4면 약 1/3로 줄지만 CPU와 메모리를 그만큼 더 씁니다."
           >
             {[1, 2, 4, 6].map((n) => (
               <option key={n} value={n}>
-                {n === 1 ? "워커 1 (기본)" : `워커 ${n}`}
+                {/* 기본 표시는 실제 기본값(App.tsx의 DEFAULT_CACHE_WORKERS)을 따라간다 —
+                    한쪽만 바꾸면 드롭다운이 거짓말을 한다. */}
+                {n === 1 ? "워커 1 (나누지 않음)" : n === 2 ? "워커 2 (기본)" : `워커 ${n}`}
               </option>
             ))}
           </select>

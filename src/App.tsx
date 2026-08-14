@@ -92,8 +92,36 @@ const PREFETCH_YIELD_MAX_MS = 60_000;
  */
 const PREFETCH_PRESET_HOLD_MS = 2_000;
 
-/** 전체 캐시 워커 수를 남기는 localStorage 키. 기본 1(현행 엔진 내 순차). */
-const CACHE_WORKERS_STORAGE_KEY = "bwMaker.cacheWorkers";
+/**
+ * 작업 프로세스 수를 남기는 localStorage 키.
+ *
+ * **기본 2.** 1이면 파일 준비가 병렬로 돌지 않는다 — 그 경우 폴더를 여는 일이
+ * 예전 그대로 메인 엔진 하나에서 순차로 도는데, 실측(CH 납품 폴더 100장, 콜드)이
+ * 순차 28.0분 대 작업 프로세스 2개 14.6분이었다. 설정을 한 번도 안 건드린
+ * 사용자가 그 28분을 그대로 기다리게 두지 않으려고 기본을 올렸다.
+ *
+ * 4가 아니라 2인 이유: 릴리스 대상 16GB급 기계에서 2개가 안전선이다(드로잉
+ * 레이어 하나의 디코드 피크가 실측 ~5GB). 더 쓸 수 있는 기계는 드롭다운으로
+ * 올린다 — 4개는 같은 폴더에서 8.6분(3.27배)이었다.
+ *
+ * 이미 저장된 값이 있으면 그것이 이긴다. 사람이 고른 값을 기본값 변경이 덮으면
+ * 안 된다.
+ */
+export const CACHE_WORKERS_STORAGE_KEY = "bwMaker.cacheWorkers";
+
+/**
+ * 저장된 값이 없을 때 쓰는 작업 프로세스 수. 위 주석 참고.
+ *
+ * `: number`를 붙인 것은 리터럴 타입 `2`로 좁혀지지 않게 하려는 것이다. 좁혀지면
+ * 이 값을 다른 수와 비교하는 테스트가 "겹치는 타입이 없다"는 컴파일 오류가 되어,
+ * 기본값을 바꿔야 알 수 있는 회귀를 타입 검사가 먼저 막아버린다.
+ *
+ * 내보내는 이유는 오직 테스트 때문이다. 이 값은 세 군데가 동시에 맞아야 하는데
+ * (여기, FilePanel 드롭다운의 "(기본)" 표시, 빈 localStorage로 뜬 앱이 실제로 쓰는
+ * 값) 셋을 한 자리에서 묶을 방법이 없다 — App.test.tsx의 "the shipped default…"가
+ * 이것을 들고 나머지 둘과 대조한다. 한쪽만 바꾸면 그 테스트가 빨간불이 된다.
+ */
+export const DEFAULT_CACHE_WORKERS: number = 2;
 
 function fileName(path: string): string {
   const parts = path.split(/[\\/]/);
@@ -644,13 +672,17 @@ function AppShell() {
   /** 전체 캐시가 끝났음을 알리는 팝업. 확인을 누르면 내린다. */
   const [fullCacheDone, setFullCacheDone] = useState(false);
   /**
-   * 전체 캐시 워커 수. 1이면 지금처럼 메인 엔진이 짬짬이 돈다(기본). 늘리면
-   * 별도 워커 프로세스들이 파일을 나눠 병렬로 돌아 그만큼 빨라진다 — 실측
-   * (i9-9900K)으로 4~6개면 4~5배. 마지막 선택은 저장한다.
+   * 작업 프로세스 수. 폴더 열기 직후의 파일 준비·전체 캐시·배치 내보내기가 함께
+   * 쓴다. 1이면 나누지 않고 메인 엔진이 짬짬이 돈다. 2 이상이면 별도 워커
+   * 프로세스들이 파일을 나눠 병렬로 돌아 그만큼 빨라진다 — 실측(i9-9900K)으로
+   * 4~6개면 4~5배. **기본은 2다**(DEFAULT_CACHE_WORKERS의 주석에 근거).
+   * 마지막 선택은 저장하고, 저장된 값은 기본값보다 세다.
    */
   const [cacheWorkers, setCacheWorkers] = useState<number>(() => {
-    const n = Number(window.localStorage.getItem(CACHE_WORKERS_STORAGE_KEY) ?? "1");
-    return Number.isInteger(n) && n >= 1 && n <= 8 ? n : 1;
+    const stored = window.localStorage.getItem(CACHE_WORKERS_STORAGE_KEY);
+    if (stored === null) return DEFAULT_CACHE_WORKERS;
+    const n = Number(stored);
+    return Number.isInteger(n) && n >= 1 && n <= 8 ? n : DEFAULT_CACHE_WORKERS;
   });
   const handleCacheWorkersChange = useCallback((n: number) => {
     setCacheWorkers(n);
