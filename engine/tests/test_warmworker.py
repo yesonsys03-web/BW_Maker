@@ -303,3 +303,43 @@ def test_worker_skips_overlay_warming_for_views_no_preset_will_check(tmp_path):
     plain = _run([json.dumps({"path": str(p)}) + "\n"])
     assert [e for e in events if e["event"] == "file"][0]["total"] == \
         [e for e in plain if e["event"] == "file"][0]["total"]
+
+
+# include는 dict 형태({"type","value",...})여야 한다 — 이 파일의 _PRESET,
+# test_matching.py, src/lib/presets.ts의 Preset["include"]와 같다. 브리프
+# 원문의 "include": []는 실제 프리셋 스키마와 맞지 않아(list라 "type" 접근에서
+# TypeError) 여기서 바로잡았다.
+_PREPARE_PRESET = {"name": "T",
+                    "include": {"type": "contains", "value": "line",
+                                "caseSensitive": False},
+                    "merge": "none"}
+
+
+def test_prepare_returns_the_tree_and_the_preset_match(fixture_psd):
+    events = _run([json.dumps(
+        {"path": str(fixture_psd),
+         "prepare": {"preset": _PREPARE_PRESET, "maxSize": 256}}
+    ) + "\n"])
+
+    done = [e for e in events if e["event"] == "file"]
+    assert len(done) == 1 and done[0]["ok"] is True
+    r = done[0]["result"]
+    # 메인 엔진 open_psd가 주던 것 — sessionId만 빠진다(워커는 세션을 못 만든다).
+    assert r["mtime"] == os.path.getmtime(fixture_psd)
+    assert r["width"] > 0 and r["height"] > 0
+    assert r["colorMode"] == "RGB"
+    assert isinstance(r["tree"], list) and len(r["tree"]) > 0
+    # apply_preset이 주던 것.
+    assert "matchedLayerIds" in r and "skippedLayers" in r and "operations" in r
+
+
+def test_prepare_reports_a_failure_without_killing_the_worker(tmp_path):
+    missing = tmp_path / "gone.psd"
+    events = _run([json.dumps(
+        {"path": str(missing),
+         "prepare": {"preset": _PREPARE_PRESET, "maxSize": 256}}
+    ) + "\n"])
+
+    done = [e for e in events if e["event"] == "file"]
+    assert len(done) == 1 and done[0]["ok"] is False
+    assert "message" in done[0]

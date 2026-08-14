@@ -32,6 +32,13 @@ batch._process_one을 그대로 돌리므로 산출물·검증·색 통일 규�
 같은 모양이라(실패면 error.traceback 포함) 프런트가 기존 배치 보고서에 그대로
 합친다.
 
+`prepare`가 있으면 그 줄은 워밍업도 내보내기도 아니라 **파일 하나 준비**다:
+  {"path", "prepare": {"preset", "maxSize"?}}
+메인 엔진의 open_psd + apply_preset이 주던 것에서 sessionId만 뺀 결과를
+{"event":"file","path","ok","result"}로 돌려준다 — 세션은 메인 엔진
+SessionStore의 것이라 워커가 만들 수 없다. 실패도 다른 두 잡과 같이
+{"ok":false,"message"}로 나가고 워커는 죽지 않는다.
+
 진행을 단위 작업 하나마다 알리는 것은 낭비가 아니다 — 진행이 안 보이면
 사용자는 멈췄다고 보고 아무거나 누른다. 파일 실패는 그 파일만 접고 다음 줄을
 기다린다: 한 장이 깨졌다고 폴더 전체 캐시가 끊기면 안 된다.
@@ -254,6 +261,56 @@ def export_file(path, job, out, store):
                                     "traceback": traceback.format_exc()}}}, out)
 
 
+def prepare_file(path, preset, max_size, out):
+    """
+    파일 하나의 "준비" — 앱이 폴더를 로드하며 파일마다 하던 일 전부를 워커가
+    한 번의 열기로 끝낸다. 지금까지는 메인 엔진이 "여는 중"(open_psd +
+    apply_preset)과 "미리보기 준비 중"(render_preview)을 **따로** 돌았고,
+    세션이 LRU 2칸이라 두 번째 패스에서 대개 파일을 다시 열었다.
+
+    돌려주는 것은 메인 엔진의 open_psd + apply_preset 응답에서 **sessionId만
+    뺀 것**이다. 세션은 메인 엔진 SessionStore의 것이라 워커가 만들 수 없다.
+    프런트는 세션 없이도 트리를 들 수 있다 — 프로젝트 복원이 이미 그 상태를
+    만든다(App.tsx의 restoreProject 주석).
+
+    한 파일의 실패로 워커를 죽이지 않는다 — 워밍업·내보내기와 같은 규율이다.
+    """
+    import traceback
+    from pathlib import Path as _Path
+
+    from .matching import match_preset, preset_operations
+
+    try:
+        mtime = os.path.getmtime(path)
+        psd = PSDImage.open(path)
+        # 메인 엔진(session.open)과 같은 제한 — 거기서 못 여는 파일을 여기서
+        # 준비해도 쓸 사람이 없다.
+        if psd.color_mode != ColorMode.RGB:
+            raise ValueError(f"unsupported color mode: {psd.color_mode!r} (RGB only)")
+        built = build_tree(psd)
+        tree = built["tree"]
+        matched, skipped = match_preset(tree, preset)
+        result = {
+            "tree": tree,
+            "mtime": mtime,
+            "width": psd.width,
+            "height": psd.height,
+            "colorMode": psd.color_mode.name,
+            "depth": psd.depth,
+            "matchedLayerIds": matched,
+            "skippedLayers": skipped,
+            "operations": preset_operations(tree, matched, preset,
+                                            source_stem=_Path(path).stem),
+            "pngPath": None,
+            "documentView": False,
+        }
+        _emit({"event": "file", "path": path, "ok": True, "result": result}, out)
+    except Exception as e:  # noqa: BLE001 — 항목별 기록 정책(warm_file과 같다)
+        _emit({"event": "file", "path": path, "ok": False,
+               "message": f"{type(e).__name__}: {e}",
+               "traceback": traceback.format_exc()}, out)
+
+
 def main(stdin=None, stdout=None, max_size=1500):
     """
     워커 루프. max_size는 앱의 미리보기 배율(PREVIEW_MAX_SIZE=1500)과 같아야
@@ -295,6 +352,11 @@ def main(stdin=None, stdout=None, max_size=1500):
             if export_store is None:
                 export_store = SessionStore(max_sessions=1)
             export_file(path, msg["export"], stdout, export_store)
+            continue
+        if "prepare" in msg:
+            # 실패 항목도 prepare_file이 만들어 보낸다 — 여기서 또 감싸지 않는다.
+            prepare_file(path, msg["prepare"]["preset"],
+                         msg["prepare"].get("maxSize", max_size), stdout)
             continue
         try:
             mtime = os.path.getmtime(path)
