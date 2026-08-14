@@ -61,7 +61,7 @@ from pathlib import Path
 from psd_tools import PSDImage
 from psd_tools.constants import ColorMode
 
-from .matching import match_preset
+from .matching import match_preset, preset_operations
 from .render import _preview_tile, preview_scale
 from .tree import build_tree
 
@@ -302,9 +302,17 @@ def prepare_file(path, job, max_size, out):
     세션이 LRU 2칸이라 두 번째 패스에서 대개 파일을 다시 열었다.
 
     돌려주는 것은 메인 엔진의 open_psd + apply_preset 응답에서 **sessionId만
-    뺀 것**이다. 세션은 메인 엔진 SessionStore의 것이라 워커가 만들 수 없다.
-    프런트는 세션 없이도 트리를 들 수 있다 — 프로젝트 복원이 이미 그 상태를
-    만든다(App.tsx의 restoreProject 주석).
+    뺀 것**에 두 칸을 더한 것이다. 세션은 메인 엔진 SessionStore의 것이라 워커가
+    만들 수 없다. 프런트는 세션 없이도 트리를 들 수 있다 — 프로젝트 복원이 이미
+    그 상태를 만든다(App.tsx의 restoreProject 주석).
+
+    더하는 두 칸이 "미리보기 준비 중" 패스를 대신한다:
+      - pngPath (str|None): "갓 적용한 화면"을 _preset_preview_args(전체 캐시의
+        미리 굽기와 같은 함수)로 구운 PNG 경로. 굽지 않았으면 None이고, 프런트가
+        file 이벤트 뒤에 읽으므로 곧바로 지우지 않는다(PREPARE_PNG_GENERATIONS).
+      - documentView (bool): pngPath가 None인 두 이유 중 어느 쪽인지. 매칭이
+        "파일을 연 직후 보이는 전부"와 같아 화면이 render_document_preview(저장된
+        병합 이미지, 즉시)로 가는 경우가 True고, 매칭 0장이면 False다.
 
     한 파일의 실패로 워커를 죽이지 않는다 — 워밍업·내보내기와 같은 규율이다.
     job(=msg["prepare"])을 통째로 받아 "preset" 접근까지 이 try 안에서 하는
@@ -313,9 +321,7 @@ def prepare_file(path, job, max_size, out):
     main()의 for 루프가 죽지 않는다.
     """
     import traceback
-    from pathlib import Path as _Path
 
-    from .matching import match_preset, preset_operations
     from .rpc import render_preview_cached
 
     try:
@@ -340,7 +346,7 @@ def prepare_file(path, job, max_size, out):
             "matchedLayerIds": matched,
             "skippedLayers": skipped,
             "operations": preset_operations(tree, matched, preset,
-                                            source_stem=_Path(path).stem),
+                                            source_stem=Path(path).stem),
             "pngPath": None,
             "documentView": False,
         }
