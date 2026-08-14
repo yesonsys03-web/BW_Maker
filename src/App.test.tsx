@@ -1794,6 +1794,16 @@ function setWorkers(n: number) {
   select.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+/**
+ * 워커에 나간 잡 중 **전체 캐시 스윕**의 것만. 두 큐가 같은 채널을 쓰므로 잡
+ * 모양으로만 갈린다: 스윕은 {path, presets}, 파일 준비는 {path, prepare}다.
+ */
+function sweepJobs() {
+  return engine.warmWorkerSend.mock.calls.filter(
+    (c) => (c[1] as { presets?: unknown }).presets !== undefined
+  );
+}
+
 /** warm-worker-line 구독을 가로채 테스트가 워커 이벤트를 직접 흘려보낸다. */
 function captureWorkerLines(generation: number, ids: number[]) {
   let lineCb: ((e: { generation: number; id: number; line: string }) => void) | undefined;
@@ -1955,10 +1965,17 @@ test("file preparation stands aside while a batch export holds the workers", asy
 
 /**
  * 반대 방향: 파일 준비가 도는 중에 "전체 캐시"를 누르면, 스윕은 준비가 끝날
- * 때까지 기다렸다 스스로 이어서 시작한다(사람이 다시 누를 필요가 없다). 즉시
- * 출발하면 워커 스폰(warmWorkersStart)이 이전 세대를 죽이므로(warm.rs의
- * kill_all) 준비하던 작업 프로세스가 몰살당하고, 준비 큐는 남은 파일을 실패로
- * 적어 가짜 오류 카드를 낸다.
+ * 때까지 기다렸다 스스로 이어서 시작한다(사람이 다시 누를 필요가 없다) — 설계
+ * 6.2가 "선점"이 아니라 "대기 후 인계"를 고른 이유는 사용자가 누르고 자리를
+ * 떠도 되게 하기 위해서다.
+ *
+ * 즉시 출발하면 워커 스폰(warmWorkersStart)이 이전 세대를 죽이므로(warm.rs의
+ * kill_all) 준비하던 작업 프로세스가 몰살당하고, 그때 워커에 나가 있던 파일
+ * (워커 수만큼)은 결과가 안 온 채로 버려져 나중에 처음부터 다시 디코드된다.
+ *
+ * **그래서 이 테스트는 버튼 문구가 아니라 워커에 나간 잡으로 잰다.** 문구만
+ * 재면 "누르는 순간 준비를 접고 곧바로 출발하는" 구현도 통과한다(3159f55가
+ * 그랬다: 문구는 한 프레임 떴다가 사라졌고 스윕은 100ms 안에 나갔다).
  */
 test("the full cache waits for file preparation, then takes over", async () => {
   // 워커 셋을 매핑해 목록 셋(PATHS)이 당겨 가기 없이 한 번에 나가게 한다 —
@@ -1976,29 +1993,87 @@ test("the full cache waits for file preparation, then takes over", async () => {
   click(screen.getByRole("button", { name: "전체 캐시" }));
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "파일 준비 후 시작" })).toBeTruthy());
-  // 준비가 도는 동안 스윕은 출발하지 않는다 — 워커에 나간 잡은 여전히 전부
-  // prepare뿐이다(presets 잡은 한 장도 없다).
-  expect(
-    engine.warmWorkerSend.mock.calls.every(
-      (c) => (c[1] as { prepare?: unknown }).prepare !== undefined
-    )
-  ).toBe(true);
 
-  // 준비가 끝나면(세 장 모두 결과를 돌려주면) 효과가 다시 돌아 스윕이 알아서
-  // 이어진다.
+  // **여기가 이 테스트의 심장이다.** 버튼 문구 한 프레임이 아니라, 넉넉히
+  // 기다린 뒤에도 스윕이 한 발도 안 나가 있어야 한다. 문구만 재면 "누르는 순간
+  // 준비를 접고 곧바로 출발하는" 구현도 통과한다 — 그때는 대기가 아니라
+  // 선점이고, 워커에 나가 있던 파일 몇 장이 통째로 버려져 나중에 다시
+  // 디코드된다(그렇게 3159f55가 통과했다).
+  await new Promise((r) => setTimeout(r, 200));
+  expect(sweepJobs()).toHaveLength(0);
+  // 워커 무리는 준비가 띄운 그 한 세대뿐이다. 스윕이 출발했다면 여기가 2다 —
+  // 그리고 그 스폰이 warm.rs의 kill_all로 준비 프로세스를 몰살했을 것이다.
+  expect(engine.warmWorkersStart).toHaveBeenCalledTimes(1);
+  // 준비가 쥔 세 장은 아직 한 장도 결과를 못 냈다(결과가 오면 "열림"이 된다).
+  // 즉 지금까지 기다린 것은 "이미 끝난 준비"가 아니다.
+  expect(screen.queryAllByText("열림")).toHaveLength(0);
+  // 대기가 한 틱 만에 풀리지도 않았다 — 버튼은 여전히 대기를 말한다.
+  expect(screen.getByRole("button", { name: "파일 준비 후 시작" })).toBeTruthy();
+
+  // 준비가 **실제로** 끝나면(쥐고 있던 세 장이 모두 결과를 돌려주면) 효과가
+  // 다시 돌아 스윕이 스스로 이어진다 — 사람이 버튼을 다시 누르지 않는다.
   for (const call of engine.warmWorkerSend.mock.calls.slice(0, 3)) {
     finish(call as [number, { path: string }], preparedResult([1]));
   }
+  await waitFor(() => expect(screen.queryAllByText("열림")).toHaveLength(3));
 
-  await waitFor(() =>
-    expect(
-      engine.warmWorkerSend.mock.calls.some(
-        (c) => (c[1] as { presets?: unknown }).presets !== undefined
-      )
-    ).toBe(true)
-  );
+  await waitFor(() => expect(sweepJobs().length).toBeGreaterThan(0));
+  // 그리고 그때 버튼은 "캐시 중지"다 — 대기가 아니라 진짜로 도는 중이다.
+  await waitFor(() => expect(screen.getByRole("button", { name: "캐시 중지" })).toBeTruthy());
   // 가짜 오류 카드가 뜨면 안 된다 — 대기는 실패가 아니다.
   expect(screen.queryByText(/준비하지 못한 파일/)).toBeNull();
+});
+
+/**
+ * 대기 상태에서 버튼을 다시 누르면 **요청만** 내려간다. 준비는 계속 돈다 —
+ * 스윕 요청을 접는 것과 준비를 죽이는 것은 다른 일이고, 여기서 준비까지
+ * 죽이면 워커에 나가 있던 파일이 통째로 버려진다.
+ */
+test("pressing the queued full cache button cancels the wait, not the preparation", async () => {
+  const finish = captureWorkerLines(5, [0, 1, 2]);
+
+  await renderWithPreset();
+  setWorkers(2);
+  await addFilesForPrepare();
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(3));
+
+  click(screen.getByRole("button", { name: "전체 캐시" }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "파일 준비 후 시작" })).toBeTruthy());
+  click(screen.getByRole("button", { name: "파일 준비 후 시작" }));
+  // 요청이 내려가 버튼이 처음 자리로 돌아온다.
+  await waitFor(() => expect(screen.getByRole("button", { name: "전체 캐시" })).toBeTruthy());
+
+  // 준비는 살아 있다: 워커에 나가 있던 세 장이 그대로 결과를 낸다.
+  for (const call of engine.warmWorkerSend.mock.calls.slice(0, 3)) {
+    finish(call as [number, { path: string }], preparedResult([1]));
+  }
+  await waitFor(() => expect(screen.queryAllByText("열림")).toHaveLength(3));
+  // 요청을 접었으므로 준비가 끝나도 스윕은 출발하지 않는다.
+  await new Promise((r) => setTimeout(r, 50));
+  expect(sweepJobs()).toHaveLength(0);
+});
+
+/**
+ * "중지"는 준비에도 닿는다 — 준비는 "여는 중"을 워커로 옮긴 것이라 사용자가
+ * 진행바에서 멈추라고 한 바로 그 일이다. 전체 캐시(요청)와 갈리는 지점이다:
+ * 이쪽은 돌던 회차를 그 자리에서 접는다.
+ */
+test("중지 stops file preparation where it stands", async () => {
+  captureWorkerLines(5, [0, 1, 2]);
+
+  await renderWithPreset();
+  setWorkers(2);
+  await addFilesForPrepare();
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(3));
+  // 진행바 라벨은 "파일 준비 중... 0/3" 꼴이라 부분 일치로 잡는다.
+  await waitFor(() => expect(screen.getByText(/파일 준비 중/)).toBeTruthy());
+
+  click(screen.getByRole("button", { name: "중지" }));
+
+  // 워커 무리가 거둬지고 진행 표시가 내려간다.
+  await waitFor(() => expect(engine.warmWorkersStop).toHaveBeenCalled());
+  await waitFor(() => expect(screen.queryByText(/파일 준비 중/)).toBeNull());
 });
 
 /**
