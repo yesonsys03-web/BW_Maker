@@ -34,20 +34,29 @@ batch._process_one을 그대로 돌리므로 산출물·검증·색 통일 규�
 
 `prepare`가 있으면 그 줄은 워밍업도 내보내기도 아니라 **파일 하나 준비**다:
   {"path", "prepare": {"preset", "maxSize"?}}
-메인 엔진의 open_psd + apply_preset이 주던 것에서 sessionId만 뺀 결과를
-{"event":"file","path","ok","result"}로 돌려준다 — 세션은 메인 엔진
-SessionStore의 것이라 워커가 만들 수 없다. 실패도 다른 두 잡과 같이
-{"ok":false,"message"}로 나가고 워커는 죽지 않는다.
+메인 엔진의 open_psd + apply_preset이 주던 것에서 sessionId만 뺀 결과에
+"pngPath"(str|None)와 "documentView"(bool)를 더해 {"event":"file","path","ok",
+"result"}로 돌려준다 — 세션은 메인 엔진 SessionStore의 것이라 워커가 만들 수
+없다. pngPath는 "갓 적용한 화면"을 _preset_preview_args(warm_file의 프리셋
+미리 굽기와 같은 함수)로 구운 PNG 경로다. args가 None이면(매칭 0장, 또는
+매칭이 파일을 연 직후 보이는 전부와 같아 저장된 병합 이미지로 가는 경우)
+pngPath는 None이고, documentView가 후자인지를 프런트에 알린다. 구운 PNG는
+프런트가 file 이벤트 뒤에 읽으므로 warm_file의 미리보기 사본과 달리 그 자리서
+지우지 않고, PREPARE_PNG_GENERATIONS 링으로 세대만 관리한다. 실패도 다른
+두 잡과 같이 {"ok":false,"message"}로 나가고 워커는 죽지 않는다.
 
 진행을 단위 작업 하나마다 알리는 것은 낭비가 아니다 — 진행이 안 보이면
 사용자는 멈췄다고 보고 아무거나 누른다. 파일 실패는 그 파일만 접고 다음 줄을
 기다린다: 한 장이 깨졌다고 폴더 전체 캐시가 끊기면 안 된다.
 """
+import atexit
 import json
 import os
 import shutil
 import sys
 import tempfile
+from collections import deque
+from pathlib import Path
 
 from psd_tools import PSDImage
 from psd_tools.constants import ColorMode
@@ -55,6 +64,30 @@ from psd_tools.constants import ColorMode
 from .matching import match_preset
 from .render import _preview_tile, preview_scale
 from .tree import build_tree
+
+
+#: 준비 잡이 만든 미리보기 PNG를 살려두는 개수. 프런트가 file 이벤트를 받은 뒤
+#: 그 경로를 읽으므로(loadPngDataUrl) 워밍업처럼 곧바로 지울 수 없고, 그렇다고
+#: 안 지우면 100장짜리 폴더마다 PNG가 쌓인다. 프런트는 항상 "방금 받은" 것을
+#: 읽으므로 원리상 1이면 되지만, 이벤트 처리가 늦어지는 최악을 감안해 넉넉히
+#: 둔다. 메인 엔진의 RENDER_DIR_GENERATIONS(rpc.py)와 같은 장치다.
+PREPARE_PNG_GENERATIONS = 8
+
+_prepare_dir = None
+_prepare_ring = deque()
+
+
+def _prepare_png_dir():
+    """준비 PNG를 놓을 새 디렉터리. 오래된 세대는 지운다."""
+    global _prepare_dir
+    if _prepare_dir is None:
+        _prepare_dir = tempfile.mkdtemp(prefix="psd_prepare_")
+        atexit.register(shutil.rmtree, _prepare_dir, ignore_errors=True)
+    d = Path(tempfile.mkdtemp(dir=_prepare_dir))
+    _prepare_ring.append(d)
+    while len(_prepare_ring) > PREPARE_PNG_GENERATIONS:
+        shutil.rmtree(_prepare_ring.popleft(), ignore_errors=True)
+    return d
 
 
 def _pixel_leaf_ids(nodes, included=None, initial=False):
@@ -283,6 +316,7 @@ def prepare_file(path, job, max_size, out):
     from pathlib import Path as _Path
 
     from .matching import match_preset, preset_operations
+    from .rpc import render_preview_cached
 
     try:
         preset = job["preset"]
@@ -310,6 +344,26 @@ def prepare_file(path, job, max_size, out):
             "pngPath": None,
             "documentView": False,
         }
+        # 무슨 그림을 구울지는 _preset_preview_args 하나가 정한다 — 전체 캐시가
+        # 쓰는 바로 그 함수다. 여기서 따로 계산하면 키를 만드는 곳이 네 번째로
+        # 늘고, rpc.py의 _preview_key_material이 경고하는 "세 곳" 문제가
+        # 여섯 쌍이 된다.
+        args = _preset_preview_args(tree, preset)
+        # documentView는 args가 None인 두 이유(매칭 0장 / 매칭이 초기 화면과
+        # 같음) 중 어느 쪽인지를 프런트에 알린다. 같은 원시 함수를 쓰므로 새
+        # 판단이 아니다.
+        visible = _pixel_leaf_ids(tree, set(matched))
+        initial = _pixel_leaf_ids(tree, initial=True)
+        result["documentView"] = bool(visible) and set(visible) == set(initial)
+        if args is not None:
+            session = {"psd": psd, "path": str(path), "mtime": mtime,
+                       "tree": tree, "layers_by_id": built["layers_by_id"]}
+            result["pngPath"] = render_preview_cached(
+                session, str(_prepare_png_dir()), args["visible"], max_size,
+                line_color=args["lineColor"],
+                line_color_ids=args["lineColorIds"],
+                edge_lines=args["edgeLines"],
+                included_ids=args["included"])
         _emit({"event": "file", "path": path, "ok": True, "result": result}, out)
     except Exception as e:  # noqa: BLE001 — 항목별 기록 정책(warm_file과 같다)
         _emit({"event": "file", "path": path, "ok": False,

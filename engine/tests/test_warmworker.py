@@ -361,3 +361,55 @@ def test_prepare_survives_a_malformed_job_and_continues(fixture_psd):
     assert len(files) == 2
     assert files[0]["ok"] is False and "message" in files[0]
     assert files[1]["ok"] is True and "result" in files[1]
+
+
+def test_prepare_bakes_the_preview_the_main_engine_would_render(fixture_psd, tmp_path):
+    """워커가 구운 그림을 메인 엔진의 렌더가 **디스크 히트로** 찾아야 한다.
+
+    이 테스트가 이 트랙의 계약이다 — 키가 어긋나면 워커가 100장을 구워도
+    클릭은 전부 다시 합성한다. rpc.py의 _preview_key_material 주석이 경고하는
+    "세 곳이 같은 키로 접혀야 한다"를 기계로 잠근다.
+    """
+    import psd_engine.tilecache as tc
+    from psd_engine.rpc import Engine, _preview_key_material
+    from psd_engine.warmworker import _preset_preview_args
+
+    preset = _PREPARE_PRESET   # Task 2가 모듈 상단에 둔 상수를 그대로 쓴다
+    events = _run([json.dumps(
+        {"path": str(fixture_psd), "prepare": {"preset": preset, "maxSize": 256}}
+    ) + "\n"])
+    r = [e for e in events if e["event"] == "file"][0]["result"]
+
+    args = _preset_preview_args(r["tree"], preset)
+    if args is None:          # 이 픽스처에 구울 것이 없으면 계약을 못 잰다
+        pytest.skip("fixture has nothing to bake")
+
+    assert r["pngPath"] is not None and os.path.exists(r["pngPath"])
+
+    # 메인 엔진이 같은 인자로 렌더하면 디스크 캐시에서 나와야 한다.
+    engine = Engine()
+    sid = engine.open_psd(str(fixture_psd))["sessionId"]
+    session = engine.store.get(sid)
+    key = tc.preview_key(_preview_key_material(
+        args["visible"], 256, args["lineColor"], args["lineColorIds"],
+        args["edgeLines"], args["included"]))
+    assert tc.load_preview(session, key, str(tmp_path / "hit.png")) is not None
+
+
+def test_prepare_flags_the_document_view_instead_of_baking(fixture_psd):
+    """매칭이 '파일을 연 직후 보이는 전부'와 같으면 화면은 저장된 병합
+    이미지로 간다(즉시) — 그 경우 구울 것이 없고 플래그만 준다."""
+    from psd_engine.warmworker import _pixel_leaf_ids
+
+    preset = _PREPARE_PRESET   # Task 2가 모듈 상단에 둔 상수를 그대로 쓴다
+    events = _run([json.dumps(
+        {"path": str(fixture_psd), "prepare": {"preset": preset, "maxSize": 256}}
+    ) + "\n"])
+    r = [e for e in events if e["event"] == "file"][0]["result"]
+
+    visible = _pixel_leaf_ids(r["tree"], set(r["matchedLayerIds"]))
+    initial = _pixel_leaf_ids(r["tree"], initial=True)
+    is_doc = bool(visible) and set(visible) == set(initial)
+    assert r["documentView"] is is_doc
+    if is_doc:
+        assert r["pngPath"] is None
