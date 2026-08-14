@@ -2065,25 +2065,57 @@ test("file preparation stands aside while a batch export holds the workers", asy
  * 카드**가 뜬다. 준비는 고장난 것이 아니라 자리를 내준 것이고, 남은 파일은
  * status가 "idle" 그대로라 현행 순차 경로가 이어받는다.
  *
- * 그래서 여기서는 warm.rs의 kill_all까지 흉내 낸다: 배치가 워커를 띄우면 이전
- * 세대가 통째로 죽고 그 exit이 준비 큐에 닿는다. 접힌 큐라면 그 exit은 아무
- * 데도 안 적히고, 안 접혔다면 "worker died"가 파일 수만큼 쌓인다.
+ * 그래서 여기서는 warm.rs의 kill_all까지 흉내 낸다: 배치가 워커를 띄우는 그
+ * 순간 이전 세대가 통째로 죽고, 그 exit이 준비 큐에 닿는다. 접힌 큐라면 그
+ * 죽음은 아무 데도 안 적히고, 안 접혔다면 "worker died"가 파일 수만큼 쌓여
+ * 카드가 뜬다.
+ *
+ * **흘리는 자리와 붙드는 핸들러가 이 테스트의 전부다.** 둘 중 하나만 어긋나도
+ * 이 테스트는 아무 일도 없는 자리를 보고 "실패가 없다"고 말한다:
+ *   - 붙들 것은 **준비 큐가 등록한** 구독이다. 배치도 워커를 쓰므로(BatchPanel의
+ *     workers={cacheWorkers}) 같은 채널에 두 번째로 등록하는데, 마지막 것을 들면
+ *     그 핸들러의 세대 필터(warmWorkers.ts)가 준비 세대(4)의 죽음을 통째로
+ *     버린다 — 이벤트가 준비 큐에 닿지도 못한다.
+ *   - 흘리는 자리는 **스폰 시점**이다. 접힌 것을 확인한 뒤에 흘리면 큐는 이미
+ *     결과를 내놓은 뒤라 무엇을 흘려도 카드가 안 뜬다.
  */
 test("a batch export starting mid-preparation folds the prepare queue as a cancel", async () => {
   engine.pathsExist.mockResolvedValue(PATHS.map(() => false));
   // BatchPanel도 프리셋 목록을 따로 읽는다 — 없으면 "배치 실행"이 비활성이다.
   vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
-  let exitCb: ((e: { generation: number; id: number }) => void) | undefined;
+  // 첫 등록 = 준비 큐의 것(아래에서 등록이 하나뿐임을 확인한다).
+  let prepareExit: ((e: { generation: number; id: number }) => void) | undefined;
   engine.onWarmWorkerExit.mockImplementation(
     async (cb: (e: { generation: number; id: number }) => void) => {
-      exitCb = cb;
+      prepareExit ??= cb;
       return () => {};
     }
   );
-  // 준비는 4세대, 배치는 5세대. 세대가 갈려야 아래 exit이 준비 큐에만 닿는다.
-  engine.warmWorkersStart
-    .mockResolvedValueOnce({ generation: 4, ids: [0, 1] })
-    .mockResolvedValue({ generation: 5, ids: [0, 1] });
+  // 준비는 4세대, 배치는 5세대. 배치가 자기 세대를 띄우는 그 자리에서 warm.rs의
+  // kill_all이 준비 세대를 죽인다.
+  //
+  // 죽음이 프런트에 **언제** 닿는지가 이 테스트의 시계다. 접는 일(batchRunning이
+  // React 커밋을 타고 준비 효과에 닿는 것)은 프런트 안에서 끝나지만, 죽음은
+  // 스폰 커맨드가 Rust를 왕복하고 프로세스를 죽였다 새로 띄운 **뒤에** Tauri
+  // 이벤트로 온다 — 워커가 뜨는 데 초 단위가 걸려서 무소식 워치독이 30초인 것과
+  // 같은 층이다. 그래서 실물에서는 접기가 크게 앞선다.
+  //
+  // 50ms는 그 층을 아주 보수적으로 줄여 잡은 값이다. 이 환경에서 접기까지
+  // 재보면 스폰 호출로부터 4.8ms이므로 10배 여유가 있다. 0ms로 두면(= 스폰 바로
+  // 다음 매크로태스크) 4.57ms 대 4.77ms로 사실상 동전 던지기가 되는데, 그것은
+  // 실물이 아니라 jsdom의 스케줄러를 재는 것이다(그 실측은 리포트에 적었다).
+  let killed = false;
+  let starts = 0;
+  engine.warmWorkersStart.mockImplementation(async () => {
+    starts += 1;
+    if (starts === 1) return { generation: 4, ids: [0, 1] };
+    setTimeout(() => {
+      prepareExit?.({ generation: 4, id: 0 });
+      prepareExit?.({ generation: 4, id: 1 });
+      killed = true;
+    }, 50);
+    return { generation: 5, ids: [0, 1] };
+  });
 
   await renderWithPreset();
   setWorkers(2);
@@ -2091,6 +2123,9 @@ test("a batch export starting mid-preparation folds the prepare queue as a cance
   // 세 장 중 둘이 워커에 나가 있고 한 장은 큐에 남아 있다 — 준비가 한 장도
   // 끝내지 못한 상태에서 배치가 들어온다.
   await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
+  // 지금 등록은 하나뿐이므로 위에서 붙든 것은 준비 큐의 구독이다. 이 줄이
+  // 없으면 배선이 바뀌었을 때 이 테스트가 조용히 빈 단언으로 돌아간다.
+  expect(engine.onWarmWorkerExit).toHaveBeenCalledTimes(1);
 
   click(screen.getByRole("button", { name: "배치" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "전체 선택" })).toBeTruthy());
@@ -2100,17 +2135,19 @@ test("a batch export starting mid-preparation folds the prepare queue as a cance
   );
   click(screen.getByRole("button", { name: "배치 실행" }));
 
-  // 준비가 접힌다: 진행 표시가 걷히고 워커를 놓는다.
-  await waitFor(() => expect(screen.queryByText(/파일 준비 중/)).toBeNull());
-  await waitFor(() => expect(engine.warmWorkersStop).toHaveBeenCalled());
+  // 배치가 자기 세대를 띄웠고(= kill_all), 준비 세대의 죽음이 실제로 흘렀다.
+  // **접힌 것을 확인하고 흘리지 않는다** — 그러면 큐가 이미 결과를 내놓은 뒤라
+  // 무엇을 흘려도 카드가 안 뜨고, 이 단언은 아무것도 재지 못한다.
+  await waitFor(() => expect(engine.warmWorkersStart).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(killed).toBe(true));
+  await new Promise((r) => setTimeout(r, 20));
 
-  // 그리고 kill_all이 준비 세대를 죽인다.
-  exitCb?.({ generation: 4, id: 0 });
-  exitCb?.({ generation: 4, id: 1 });
-  await new Promise((r) => setTimeout(r, 50));
-
-  // 가짜 오류 카드가 없다.
+  // **여기가 이 테스트의 심장이다.** 준비가 쥐고 있던 세 장은 실패가 아니다 —
+  // 자리를 내준 것이지 고장난 것이 아니다.
   expect(screen.queryByText(/준비하지 못한 파일/)).toBeNull();
+  // 그리고 실제로 접혔다: 워커를 놓고 진행 표시가 걷혔다.
+  expect(engine.warmWorkersStop).toHaveBeenCalled();
+  expect(screen.queryByText(/파일 준비 중/)).toBeNull();
   // 준비된 파일도 없다 — 한 장도 못 끝냈으므로 전부 현행 순차 경로의 몫이다.
   expect(screen.queryAllByText("열림")).toHaveLength(0);
 });
