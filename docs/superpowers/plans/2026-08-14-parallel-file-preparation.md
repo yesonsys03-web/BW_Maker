@@ -294,7 +294,7 @@ def test_prepare_bakes_the_preview_the_main_engine_would_render(fixture_psd, tmp
     "세 곳이 같은 키로 접혀야 한다"를 기계로 잠근다.
     """
     import psd_engine.tilecache as tc
-    from psd_engine.rpc import Engine
+    from psd_engine.rpc import Engine, _preview_key_material
     from psd_engine.warmworker import _preset_preview_args
 
     preset = {"name": "T", "include": [], "exclude": [], "merge": "none"}
@@ -313,11 +313,9 @@ def test_prepare_bakes_the_preview_the_main_engine_would_render(fixture_psd, tmp
     engine = Engine()
     sid = engine.open_psd(str(fixture_psd))["sessionId"]
     session = engine.store.get(sid)
-    key = tc.preview_key(__import__("psd_engine.rpc", fromlist=["x"])
-                         ._preview_key_material(
-                             args["visible"], 256, args["lineColor"],
-                             args["lineColorIds"], args["edgeLines"],
-                             args["included"]))
+    key = tc.preview_key(_preview_key_material(
+        args["visible"], 256, args["lineColor"], args["lineColorIds"],
+        args["edgeLines"], args["included"]))
     assert tc.load_preview(session, key, str(tmp_path / "hit.png")) is not None
 
 
