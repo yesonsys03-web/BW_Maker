@@ -408,7 +408,9 @@ Expected: PASS
 
 - [ ] **Step 5: 변이 확인 — 테스트가 진짜 잠그는지**
 
-`args["included"]`를 `None`으로 바꿔 키를 일부러 어긋내고 테스트를 돌린다.
+`max_size`를 `max_size + 1`로 바꿔 키를 일부러 어긋내고 테스트를 돌린다.
+
+> **`args["included"]`를 `None`으로 바꾸는 변이는 쓰지 말 것 — 무효다.** 경계선이 꺼진 프리셋에서는 `_preview_key_material`이 엣지 쪽을 통째로 `"off"`로 접고 `included_ids`를 아예 읽지 않는다(`rpc.py:174`). 그런 프리셋으로 이 변이를 넣으면 키가 그대로라 테스트가 초록 그대로고, "테스트가 쓸모없다"는 틀린 결론이 나온다.
 Expected: `test_prepare_bakes_the_preview_the_main_engine_would_render`가 FAIL.
 확인 후 **되돌린다.** (이 프로젝트에서 "변이를 정확히 넣지 않으면 아무것도 증명 못 한다"는 교훈이 여러 번 나왔다.)
 
