@@ -899,8 +899,8 @@ def test_drop_filled_removes_a_fill_and_keeps_the_real_line(monkeypatch):
     monkeypatch.setattr(edges_module, "_paste_alpha",
                         lambda layers, _box: alphas[layers[0].name])
 
-    kept = _drop_filled([_FakeLayer("thin", 0, 0, thin),
-                         _FakeLayer("fill", 0, 0, fill)], box, 64)
+    kept, _ = _drop_filled([_FakeLayer("thin", 0, 0, thin),
+                            _FakeLayer("fill", 0, 0, fill)], box, 64)
     assert [l.name for l in kept] == ["thin"], \
         f"채우기가 남았거나 선이 함께 버려졌다: {[l.name for l in kept]}"
 
@@ -915,7 +915,7 @@ def test_drop_filled_keeps_a_line_that_is_dense_but_under_the_bound(monkeypatch)
     dense[:int(FILL_COVERAGE * 100) - 5, :] = 255       # 문턱보다 5%p 아래
     monkeypatch.setattr(edges_module, "_paste_alpha", lambda layers, _box: dense)
 
-    kept = _drop_filled([_FakeLayer("dense", 0, 0, dense)], (0, 0, 100, 100), 64)
+    kept, _ = _drop_filled([_FakeLayer("dense", 0, 0, dense)], (0, 0, 100, 100), 64)
     assert len(kept) == 1, "문턱 아래인데 버려졌다"
 
 
@@ -1291,3 +1291,72 @@ def test_build_overlay_smooths_only_wide_change_strokes(monkeypatch):
     assert not called, "가는 획에도 다듬기가 걸렸다"
     E.build_overlay(rgba, line, {**base, "width": 6})
     assert not called, "region 획에 다듬기가 걸렸다"
+
+
+# ── 라인 드로잉 레이어를 두 번 디코드하던 것 ──────────────────────────────
+#
+# `_drop_filled`는 덮는 넓이를 재려고 드로잉 레이어를 디코드한 뒤 그 배열을 버렸고,
+# 호출부가 살아남은 레이어로 `_paste_alpha`를 **다시** 불러 같은 배열을 또 만들었다.
+# 납품 폴더 100장 전수 조사: 뷰 424개 중 실제로 뭔가 버린 뷰는 **1개**뿐인데
+# 이 두 번째 디코드가 미리보기 전체 시간의 12.0%(200초)였다.
+
+def test_a_line_drawing_layer_is_decoded_once_per_view(tmp_path, monkeypatch):
+    import psd_engine.edges as edges_module
+
+    s = _two_tone_session(tmp_path)
+    view = find_views(s)[0]
+    line_ids = view["lineIds"]
+    assert line_ids, "픽스처에 라인 레이어가 없다 — 테스트가 무의미하다"
+    line_layers = {id(s["layers_by_id"][i]) for i in line_ids}
+
+    seen = []
+    orig = edges_module.extract_rgba
+
+    def counting(layer):
+        seen.append(id(layer))
+        return orig(layer)
+
+    monkeypatch.setattr(edges_module, "extract_rgba", counting)
+    overlay_for_view(s, view["colourIds"], line_ids, EDGE_DEFAULTS)
+
+    n = sum(1 for x in seen if x in line_layers)
+    assert n == len(line_ids), (
+        f"라인 드로잉 레이어 {len(line_ids)}장을 {n}번 디코드했다 — "
+        "같은 배열을 두 번 만들고 있다")
+
+
+def test_drop_filled_hands_back_the_alpha_it_already_made(monkeypatch):
+    # 넓이를 재려고 만든 배열이 곧 호출부가 원하는 것이다. 합치는 규칙은
+    # `_paste_alpha`와 같아야 한다 — 최댓값 합성.
+    import psd_engine.edges as edges_module
+
+    box = (0, 0, 100, 100)
+    thin = np.zeros((100, 100), np.uint8)
+    thin[50, :] = 255
+    other = np.zeros((100, 100), np.uint8)
+    other[:, 10] = 200
+    fill = np.full((100, 100), 255, np.uint8)
+
+    alphas = {"thin": thin, "other": other, "fill": fill}
+    monkeypatch.setattr(edges_module, "_paste_alpha",
+                        lambda layers, _box: alphas[layers[0].name])
+
+    kept, alpha = _drop_filled([_FakeLayer("thin", 0, 0, thin),
+                                _FakeLayer("fill", 0, 0, fill),
+                                _FakeLayer("other", 0, 0, other)], box, 64)
+    assert [l.name for l in kept] == ["thin", "other"], \
+        f"채우기가 남았거나 선이 함께 버려졌다: {[l.name for l in kept]}"
+    assert np.array_equal(alpha, np.maximum(thin, other)), \
+        "돌려준 알파가 살아남은 레이어의 최댓값 합성이 아니다"
+
+
+def test_drop_filled_gives_an_empty_alpha_when_every_layer_is_a_fill(monkeypatch):
+    # 전부 버려지면 알파는 0으로 가득한 박스 크기 배열이어야 한다 —
+    # None이나 빈 배열이면 `subtract_lines`가 모양에서 터진다.
+    import psd_engine.edges as edges_module
+
+    fill = np.full((40, 60), 255, np.uint8)
+    monkeypatch.setattr(edges_module, "_paste_alpha", lambda layers, _box: fill)
+    kept, alpha = _drop_filled([_FakeLayer("fill", 0, 0, fill)], (0, 0, 60, 40), 64)
+    assert kept == []
+    assert alpha.shape == (40, 60) and not alpha.any()

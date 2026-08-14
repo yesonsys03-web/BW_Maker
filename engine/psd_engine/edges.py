@@ -606,6 +606,24 @@ def stroke_rgba(mask, labels, colour, width):
         rep = np.median(colour[src], axis=0).astype(np.uint8)
         out[(grown == lab) & painted, :3] = rep
     return out
+    labs = labels[ys, xs]
+    order = np.argsort(labs, kind="stable")
+    ys, xs, labs = ys[order], xs[order], labs[order]
+    uniq, starts = np.unique(labs, return_index=True)
+    ymin = np.minimum.reduceat(ys, starts)
+    ymax = np.maximum.reduceat(ys, starts)
+    xmin = np.minimum.reduceat(xs, starts)
+    xmax = np.maximum.reduceat(xs, starts)
+    for k, lab in enumerate(uniq.tolist()):
+        y0 = max(0, int(ymin[k]) - reach)
+        y1 = min(h, int(ymax[k]) + 1 + reach)
+        x0 = max(0, int(xmin[k]) - reach)
+        x1 = min(w, int(xmax[k]) + 1 + reach)
+        src = labels[y0:y1, x0:x1] == lab
+        rep = np.median(colour[y0:y1, x0:x1][src], axis=0).astype(np.uint8)
+        sel = (grown[y0:y1, x0:x1] == lab) & painted[y0:y1, x0:x1]
+        out[y0:y1, x0:x1][sel, :3] = rep
+    return out
 
 
 #: line_alpha에 잴 라인이 하나도 없을 때(뷰에 라인 레이어가 없는 경우) 쓰는
@@ -816,18 +834,30 @@ FILL_COVERAGE = 0.5
 def _drop_filled(line_layers, box, alpha_threshold):
     """뷰 박스를 너무 많이 덮는 라인 잎을 뺀다. 선화는 몇 %를 덮는다.
 
+    `(남은 잎들, 그 잎들의 알파 한 장)`을 돌려준다. 알파는 `_paste_alpha(kept, box)`와
+    **같은 배열**이다 — 같은 최댓값 합성이다.
+
     채우기가 라인 알파에 섞이면 두 가지가 함께 망가진다 — `_auto_width`가 그
     알파의 가로 런 중앙값에서 굵기를 유도하므로 획이 캐릭터 몸통만큼 굵어지고,
     `subtract_lines`가 그 자리를 "이미 선이 있다"로 보고 이 기능이 그려야 할
     색 경계를 지운다.
+
+    **알파를 같이 돌려주는 이유.** 덮는 넓이를 재려면 잎을 디코드해야 하는데, 예전에는
+    그 배열을 버리고 호출부가 살아남은 잎으로 `_paste_alpha`를 다시 불렀다. 납품 폴더
+    100장 전수 조사에서 뷰 424개 중 실제로 뭔가 버린 뷰는 **1개**뿐이라, 그 두 번째
+    디코드는 거의 언제나 방금 만든 것과 정확히 같은 배열을 다시 만드는 일이었다 —
+    미리보기 전체 시간의 12.0%(200초/27.9분). 재는 김에 합치면 그 값이 사라진다.
     """
+    left, top, right, bottom = box
     kept = []
+    alpha = np.zeros((bottom - top, right - left), np.uint8)
     for layer in line_layers:
-        alpha = _paste_alpha([layer], box)
-        if float((alpha > alpha_threshold).mean()) > FILL_COVERAGE:
+        one = _paste_alpha([layer], box)
+        if float((one > alpha_threshold).mean()) > FILL_COVERAGE:
             continue
         kept.append(layer)
-    return kept
+        np.maximum(alpha, one, out=alpha)
+    return kept, alpha
 
 
 def _composite_colour(psd, colour_layers, box):
@@ -970,10 +1000,10 @@ def overlay_for_view(session, colour_ids, line_ids, opts):
             colour_rgba = _paste_colour(colour_layers, box)
         else:
             colour_rgba = _composite_colour(session["psd"], colour_layers, box)
-    line_alpha = _paste_alpha(
-        _drop_filled(
-            [layers_by_id[i] for i in line_ids], box, o["lineAlpha"]),
-        box)
+    # 채우기를 걸러내면서 알파도 같이 받는다 — 거르려면 어차피 디코드해야 하므로
+    # 살아남은 잎을 다시 읽을 이유가 없다(_drop_filled 문서 참고).
+    _, line_alpha = _drop_filled(
+        [layers_by_id[i] for i in line_ids], box, o["lineAlpha"])
 
     out = build_overlay(colour_rgba, line_alpha, opts)
     if out[..., 3].max() == 0:
