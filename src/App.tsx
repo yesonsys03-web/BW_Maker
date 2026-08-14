@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import { AppProvider, applyPresetEffect, openFileEffect, useAppStore, type AppState, type FileEntry, type PreparedFileResult } from "./state/appStore";
+import { AppProvider, applyPresetEffect, attachSessionEffect, buildInitialOpsState, openFileEffect, useAppStore, type AppState, type FileEntry, type PreparedFileResult } from "./state/appStore";
 import type { SkippedLayer } from "./lib/engine";
 import { FilePanel } from "./components/FilePanel";
 import { LayerTree } from "./components/LayerTree";
@@ -32,7 +32,7 @@ import {
 import { splitLineLeafIds } from "./lib/layerFilter";
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY, loadPresets } from "./lib/presets";
-import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError } from "./lib/preview";
+import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError, visibleIdsForPreview } from "./lib/preview";
 import { PreviewCache, needsPrefetch, previewRenderSpec } from "./lib/previewCache";
 import { openFailureReport, type FailedOpen } from "./lib/openReport";
 import {
@@ -496,7 +496,19 @@ function AppShell() {
     const openFailures: FailedOpen[] = [];
 
     void drainLoadQueue({
-      pendingPaths: () => filesRef.current.filter((f) => f.status === "idle").map((f) => f.path),
+      // 준비가 가져갈 파일은 애초에 목록에서 뺀다. **아래 cancelled의
+      // preparingRef만으로는 늦다**: 효과는 선언 순서대로 도는데 이 큐가 준비
+      // 효과보다 앞이라, 폴더를 연 첫 렌더에서는 그 ref가 아직 false다. 그 한
+      // 틈에 폴더의 첫 파일이 메인 엔진과 워커에서 **함께** 열리고, 늦게 착지한
+      // openSuccess가 buildInitialOpsState로 ops를 다시 만들면 워커가 그 파일에
+      // 대해 구운 미리보기만 미아가 된다.
+      //
+      // 준비가 못 한 파일은 prepareWillTake가 false를 주므로 여기 남는다 —
+      // 그것들을 여는 것이 이 큐가 남아 있는 이유다.
+      pendingPaths: () =>
+        filesRef.current
+          .filter((f) => f.status === "idle" && !prepareWillTake(f.path))
+          .map((f) => f.path),
       processPath: async (path) => {
         // 아직 아무것도 안 보고 있으면 첫 파일을 띄워준다. 그 뒤로는 사람이
         // 보고 있는 화면을 뺏지 않는다.
@@ -772,8 +784,10 @@ function AppShell() {
    * — 그러면 새 설정을 확인하는 아티스트에게 옛 그림이 뜬다(이 캐시의 최악 고장).
    * 워커가 실제로 쓴 그 프리셋으로 키를 만든다.
    *
-   * 갓 준비한 파일에는 눈·솔로·수동 지정이 없다 — 그래서 워커의
-   * _preset_preview_args가 그린 그림과 이 키가 같은 화면을 가리킨다.
+   * 눈(previewHiddenIds)은 **[]가 아니다.** 리듀서가 트리의 visible 플래그로
+   * 세우므로 여기도 같은 값을 넣어야 화면이 나중에 만들 키와 같아진다. 그런데
+   * 워커가 그린 그림은 그 눈을 안 본다 — 그래서 아래에서 두 그림이 같을 때만
+   * 담는다.
    */
   const applyPreparedFile = useCallback(
     async (path: string, result: Record<string, unknown>, preset: Preset) => {
@@ -781,13 +795,15 @@ function AppShell() {
       // 세션 없이 "열림"으로 세운다. 세션은 화면이 그 파일을 실제로 쓸 때 채워진다.
       dispatch({ type: "preparedFile", path, result: r });
       if (r.pngPath === null) return;
-      // 리듀서가 opsByPath에 세우는 includedIds와 같은 값(갓 적용 상태의 포함 목록).
+      // 리듀서가 opsByPath에 세우는 값 그대로. 두 계산이 갈리면 워커가 구운 그림을
+      // 화면이 영영 못 찾는다 — 오류 한 줄 없이 기능이 통째로 사라지는 고장이다.
       const includedIds = [...r.matchedLayerIds].sort((a, b) => a - b);
+      const { previewHiddenIds } = buildInitialOpsState(r.tree);
       const spec = previewRenderSpec(
         { path, mtime: r.mtime },
         r.tree,
         includedIds,
-        [],                   // 눈
+        previewHiddenIds,     // 눈 — 포토샵에서 꺼져 있던 잎(리듀서와 같은 값)
         [],                   // 솔로
         preset.lineColor,
         r.matchedLayerIds,    // 리듀서가 matchedIdsByPath에 넣는 바로 그 값
@@ -795,6 +811,21 @@ function AppShell() {
         []                    // 색 경계선 수동 지정
       );
       if (!spec.key) return;
+      // 워커가 **실제로 그린** 그림. engine/psd_engine/warmworker.py의
+      // _preset_preview_args는 매칭된 픽셀 잎을 문서 순서로 전부 그린다 —
+      // 눈 플래그를 안 본다(_pixel_leaf_ids는 included만 거른다). 화면은 그 위에
+      // 눈을 한 번 더 거르므로, 매칭된 잎 중 포토샵에서 꺼진 것이 하나라도 있으면
+      // 두 그림이 다르다.
+      //
+      // 그때는 **담지 않는다.** 키는 화면이 만들 키인데 그림은 워커 것이라, 담으면
+      // 아티스트가 "안 그려질 레이어까지 그려진 그림"으로 설정을 확인하게 된다 —
+      // 이 캐시의 최악 고장이다(previewCache.ts의 PREVIEW_PICTURE_VERSION 주석).
+      // 안 담으면 그 파일만 누를 때 합성한다: 지금까지와 같고, 옳다.
+      const painted = visibleIdsForPreview(r.tree, includedIds, [], []);
+      const samePicture =
+        spec.visibleIds.length === painted.length &&
+        spec.visibleIds.every((id, i) => id === painted[i]);
+      if (!samePicture) return;
       try {
         previewCacheRef.current.set(spec.key, await loadPngDataUrl(r.pngPath));
         prefetchedKeysRef.current.add(spec.key);
@@ -804,6 +835,43 @@ function AppShell() {
     },
     [dispatch]
   );
+
+  /** 지금 세션을 붙이는 중인 파일. 같은 파일로 두 번 열지 않기 위한 표시다. */
+  const attachingSessionRef = useRef<Set<string>>(new Set());
+  /**
+   * 보고 있는 파일에 세션이 없으면 그 자리에서 하나 연다.
+   *
+   * 작업 프로세스가 준비한 파일은 세션 없이 "열림"이다 — 워커는 메인 엔진의
+   * SessionStore를 만들 수 없다. 그런데 세션이 필요한 곳이 셋이다: 캔버스의
+   * 합성 렌더(PreviewCanvas는 sid가 없으면 아예 안 낸다), 레이어 썸네일,
+   * 내보내기 버튼. 그래서 그 상태로 두면 준비된 판은 눌러도 아무것도 안 뜨고,
+   * 미리보기 캐시에 그림이 있는 경우에만 우연히 보인다.
+   *
+   * **보고 있는 파일 하나만** 연다. 준비가 끝났다고 전부 열면 100장짜리 폴더가
+   * 100번의 open_psd를 내는데, 엔진 세션은 LRU 2칸이라 98장은 열자마자 죽는다 —
+   * 준비를 워커로 옮긴 이유가 바로 그 낭비였다. 필요할 때 한 장씩 여는 것이
+   * withEvictedSessionRetry가 이미 하는 일이고, 이건 그 규칙을 "축출된 세션"에서
+   * "아직 없는 세션"까지 넓힌 것뿐이다(설계 5절).
+   *
+   * status가 "idle"인 파일(프로젝트 복원본)은 건드리지 않는다 — 그쪽은 로드 큐의
+   * 몫이고, 여기서 함께 열면 같은 PSD를 두 곳에서 연다.
+   *
+   * 로드 큐가 도는 동안에도 비켜선다. 그때는 두 칸을 다 큐에 주는 것이 규칙이고
+   * (위 pinFile 효과의 주석), 여기서 한 칸을 가져가면 큐가 방금 연 세션이 밀려나
+   * apply_preset이 'unknown or evicted session'으로 떨어진다. 잃는 것은 없다 —
+   * 캔버스는 loading 동안 paused라 어차피 렌더를 안 내고, 준비된 그림은 세션
+   * 없이도 캐시에서 바로 뜬다(PreviewCanvas의 캐시 조회가 paused보다 앞이다).
+   */
+  useEffect(() => {
+    if (loading) return;
+    const file = state.files.find((f) => f.path === state.activePath);
+    if (!file || file.status !== "open" || file.sessionId !== undefined) return;
+    if (attachingSessionRef.current.has(file.path)) return;
+    attachingSessionRef.current.add(file.path);
+    void attachSessionEffect(dispatch, file.path).finally(() => {
+      attachingSessionRef.current.delete(file.path);
+    });
+  }, [loading, state.activePath, state.files, dispatch]);
 
   /**
    * 복원한 항목의 PNG를 미리보기 캐시에 넣는다. 키를 다시 계산해 저장된 것과
@@ -1544,6 +1612,27 @@ function AppShell() {
     };
   }, [loading, prefetchProgress, batchRunning, prefetchHold, warmKick, state.activePath, state.files, refreshSession, fullCacheOn, cacheWorkers, handleFullCacheToggle]);
 
+  /**
+   * 파일 준비(작업 프로세스)가 이 파일을 가져가는가. 아래 준비 효과의 대상
+   * 목록과 **위 로드 큐의 대기 목록**이 같은 판정 하나를 본다 — 둘이 갈리면
+   * 같은 PSD를 메인 엔진과 워커가 함께 열어 세션 두 칸을 두고 다툰다.
+   *
+   * 함수 선언인 것은 자리 때문이다. 판정에 필요한 값(cacheWorkers·fullCacheOn·
+   * batchRunning)이 로드 큐보다 한참 뒤에 선언되므로 그 곁에 두어야 읽히는데,
+   * 함수 선언은 끌어올려지고 본문은 렌더가 끝난 뒤(효과 안)에만 도니 TDZ에
+   * 걸리지 않는다.
+   */
+  function prepareWillTake(path: string): boolean {
+    return (
+      cacheWorkers > 1 &&
+      !fullCacheOn &&
+      !batchRunning &&
+      !loadCancelled &&
+      presetRef.current !== undefined &&
+      !prepareFailedRef.current.has(path)
+    );
+  }
+
   // 파일 준비 — 작업 프로세스 모드(워커 수 2 이상). 폴더를 연 직후의 "여는 중"과
   // "미리보기 준비 중"을 워커가 파일 단위로 나눠 병렬로 한다. 두 패스가 하나로
   // 합쳐지는 것이 요점이다: 지금은 여는 중에 PSD를 한 번 열고, 미리보기 준비에서
@@ -1570,14 +1659,16 @@ function AppShell() {
     // 이미 돌고 있으면 그대로 둔다. 위 주석대로 이 효과는 준비 중에도 여러 번
     // 도는데, 그때마다 다시 출발시키면 큐가 앞의 회차를 계속 갈아엎는다.
     if (preparingRef.current) return;
-    const targets = filesRef.current
-      .filter((f) => f.status === "idle" && !prepareFailedRef.current.has(f.path))
-      .map((f) => f.path);
-    if (targets.length === 0) return;
     // 프리셋이 없으면 워커가 매칭할 규칙이 없다. 목록이 아직 안 읽혔을 뿐이므로
-    // (PresetBar가 비동기로 읽는다) 그때는 다음 회차를 기다린다.
+    // (PresetBar가 비동기로 읽는다) 그때는 다음 회차를 기다린다 — 그동안은
+    // prepareWillTake도 false라 로드 큐가 현행대로 연다.
     const preset = presetRef.current;
     if (!preset) return;
+    // 로드 큐가 비켜선 파일과 **정확히 같은 목록**이다(prepareWillTake 주석).
+    const targets = filesRef.current
+      .filter((f) => f.status === "idle" && prepareWillTake(f.path))
+      .map((f) => f.path);
+    if (targets.length === 0) return;
 
     const run = ++prepareRunRef.current;
     preparingRef.current = true;

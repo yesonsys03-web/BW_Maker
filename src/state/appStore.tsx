@@ -313,8 +313,24 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       // 같은 값이어야 한다 — 미리보기 캐시 키가 이 목록으로 만들어지므로, 두
       // 경로가 갈리면 워커가 구운 그림을 화면이 영영 못 찾는다.
       const includedIds = [...result.matchedLayerIds].sort((a, b) => a - b);
+      // 나머지 칸은 **트리에서** 만든다. EMPTY_OPS로 두면 previewHiddenIds가 []가
+      // 되어, 포토샵에서 아티스트가 눈을 꺼둔 레이어를 준비된 파일만 그린다 —
+      // 같은 판이 워커가 준비했느냐 메인 엔진이 열었느냐에 따라 다른 그림이 된다.
+      // 그리고 스스로 고쳐지지 않는다: sessionRefreshed는 opsByPath를 일부러
+      // 안 건드리므로, 나중에 세션이 붙어도 이 ops가 그대로 남는다.
+      //
+      // buildInitialOpsState + includedIds 교체는 정상 경로(openSuccess 다음
+      // applyPresetResult)가 만드는 것과 **같은 OpsState**다: 눈은 트리의
+      // visible 플래그, 솔로·지정·손 병합은 비어 있고, entries는 새 포함
+      // 목록으로 다시 만든 것.
+      const initial = buildInitialOpsState(result.tree);
       return {
         ...state,
+        // 아직 아무것도 안 보고 있으면 이 파일을 띄운다 — 로드 큐가 폴더의 첫
+        // 파일에 하는 것(openFileEffect의 activate)과 같은 규칙이다. 워커 모드에서는
+        // 그 큐가 비켜서 있으므로, 여기서 안 세우면 폴더를 열어도 화면이 "왼쪽에서
+        // 파일을 선택하세요"에 머문다.
+        activePath: state.activePath ?? path,
         // 세션 없이 "열림". 프로젝트 복원(restoreProject)이 만드는 것과 같은
         // 모양이고, 세션은 화면이 그 파일을 실제로 쓸 때 채워진다.
         files: updateFile(state.files, path, {
@@ -330,7 +346,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         matchedIdsByPath: { ...state.matchedIdsByPath, [path]: result.matchedLayerIds },
         opsByPath: {
           ...state.opsByPath,
-          [path]: { ...EMPTY_OPS, includedIds, entries: buildEntries(includedIds, []) },
+          [path]: { ...initial, includedIds, entries: buildEntries(includedIds, initial.ops) },
         },
       };
     }
@@ -688,6 +704,32 @@ export async function openFileEffect(
     dispatch({ type: "openError", path, error, quiet: options.collect !== undefined });
     options.collect?.(path, error);
     return null;
+  }
+}
+
+/**
+ * 세션 없이 "열림"인 파일에 **세션만** 붙인다. 작업 프로세스가 준비한 파일이
+ * 그 상태다 — 트리·매칭·미리보기는 다 있는데 세션이 없다(세션은 메인 엔진
+ * SessionStore의 것이라 워커가 만들 수 없다).
+ *
+ * openFileEffect를 쓰지 않는 이유가 이 함수의 전부다. openSuccess는 ops를
+ * 트리로 다시 만들고 matchedIdsByPath를 지우고 presetApplied를 내린다 — 그러면
+ * 워커가 한 프리셋 매칭이 버려지고, 자동 적용이 메인 엔진에서 한 번 더 돌고,
+ * 그 사이 matchedIds가 비어 캐시 키가 갈려 워커가 구운 그림을 화면이 못 찾는다.
+ * sessionRefreshed는 축출 후 재오픈과 같은 뜻이고, 그 액션은 **opsByPath를
+ * 일부러 건드리지 않는다**(같은 파일의 작업을 이어가는 것이므로).
+ *
+ * 실패는 openError로 접는다. 카드가 뜨는 것도 중요하지만 status가 "error"가
+ * 되는 것이 더 중요하다 — selectFile이 "error"를 다시 여는 상태로 취급하므로,
+ * 그 파일을 한 번 더 누르면 정상 경로로 복구된다. 조용히 두면 세션이 영영 안
+ * 붙고 썸네일·내보내기가 그 파일에서만 죽은 채로 남는다.
+ */
+export async function attachSessionEffect(dispatch: Dispatch<AppAction>, path: string): Promise<void> {
+  try {
+    dispatch({ type: "sessionRefreshed", path, result: await openPsd(path) });
+  } catch (e) {
+    const error: EngineError = e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
+    dispatch({ type: "openError", path, error });
   }
 }
 

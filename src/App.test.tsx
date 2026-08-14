@@ -1772,6 +1772,21 @@ async function renderWithPreset() {
   await new Promise((r) => setTimeout(r, 20));
 }
 
+/**
+ * 목록에 PATHS를 넣되 **메인 엔진 열기를 기다리지 않는다.** 워커 모드에서는 로드
+ * 큐가 통째로 비켜서므로 open_psd가 한 번도 안 나간다 — addFiles의 "열기가
+ * 나갔다"를 기다리면 그 자리에서 멈춘다. 행이 선 것으로 확인한다.
+ */
+async function addFilesForPrepare() {
+  click(screen.getByRole("button", { name: "+ 추가" }));
+  await waitFor(() => expect(fileRow("a.psd")).toBeTruthy());
+}
+
+/** 경로에서 파일명만. 목록 행을 찾을 때 쓴다(경로는 기밀이라 화면에 안 뜬다). */
+function nameOf(path: string) {
+  return path.split("/").pop()!;
+}
+
 /** 워커 수 드롭다운을 돌린다. 준비도 전체 캐시와 **같은 설정**을 쓴다. */
 function setWorkers(n: number) {
   const select = screen.getByTitle(/전체 캐시를 몇 개의 작업 프로세스/) as HTMLSelectElement;
@@ -1802,7 +1817,7 @@ test("raising the worker count spreads file preparation across processes", async
 
   await renderWithPreset();
   setWorkers(2);
-  await addFiles({ click });
+  await addFilesForPrepare();
 
   await waitFor(() => expect(engine.warmWorkersStart).toHaveBeenCalledWith(2, expect.any(Number)));
   // 세 장 중 두 장이 **동시에** 나간다 — 한 장 끝나야 다음이 아니다.
@@ -1835,21 +1850,107 @@ test("with one worker file preparation stays on the current sequential path", as
   expect(engine.warmWorkerSend).not.toHaveBeenCalled();
 });
 
-test("the load queue stands aside while preparation holds the workers", async () => {
+test("the load queue never opens a file that preparation is going to take", async () => {
   // 준비는 로드 큐가 하던 일을 워커로 옮긴 것이다. 둘이 같이 돌면 같은 PSD를
   // 메인 엔진과 워커가 함께 열어 세션 두 칸을 두고 다툰다.
+  //
+  // **폴더의 첫 파일이 특히 위험하다.** 효과는 선언 순서대로 도는데 로드 큐가
+  // 준비 효과보다 앞이라, 준비가 "돌고 있다"고 표시하기 전에 큐가 이미 한 장을
+  // 집어 간다. 그러면 그 파일만 두 번 열리고, 늦게 착지한 openSuccess가 ops를
+  // 다시 만들어 워커가 구운 미리보기가 그 파일에서만 미아가 된다. 그래서 여기서
+  // 세는 것은 "한 장"이 아니라 **0장**이다.
   captureWorkerLines(9, [0, 1]);
 
   await renderWithPreset();
   setWorkers(2);
-  await addFiles({ click });
+  await addFilesForPrepare();
   await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
 
-  // 로드 큐가 쥐고 있던 파일 하나를 끝낸다. 준비가 도는 동안에는 그다음 파일로
-  // 넘어가면 안 된다.
-  await finishOpen(0, 1);
   await new Promise((r) => setTimeout(r, 30));
-  expect(opens).toHaveLength(1);
+  expect(opens).toHaveLength(0);
+});
+
+/**
+ * 워커는 세션을 만들 수 없다 — 세션은 메인 엔진 SessionStore의 것이다. 그래서
+ * 준비된 파일은 "트리는 있는데 sessionId가 없는" 상태로 앉는데, 캔버스의 합성
+ * 렌더도(PreviewCanvas는 sid가 없으면 요청 자체를 안 낸다) 레이어 썸네일도
+ * 내보내기 버튼도 세션이 있어야 산다. 안 채우면 준비된 판은 눌러도 아무것도
+ * 안 뜬다 — 미리보기 캐시에 그림이 있는 경우만 우연히 보인다.
+ */
+test("a prepared file gets a session when the app actually needs it", async () => {
+  const finish = captureWorkerLines(9, [0, 1]);
+
+  await renderWithPreset();
+  setWorkers(2);
+  await addFilesForPrepare();
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
+  const first = engine.warmWorkerSend.mock.calls[0] as [number, { path: string }];
+  const second = engine.warmWorkerSend.mock.calls[1] as [number, { path: string }];
+
+  finish(first, preparedResult([1]));
+  finish(second, preparedResult([1]));
+  await waitFor(() => expect(screen.queryAllByText("열림").length).toBeGreaterThanOrEqual(2));
+
+  // 화면에 올라온 그 한 장에만 세션이 열린다. **준비된 전부가 아니다** — 세션은
+  // LRU 2칸이라 100장을 열면 98장은 열자마자 죽고, 그 낭비를 없애려고 준비를
+  // 워커로 옮긴 것이다.
+  await waitFor(() => expect(opens).toHaveLength(1));
+  expect(opens[0].path).toBe(first[1].path);
+  await finishOpen(0, 11);
+  await waitFor(() =>
+    expect((screen.getByRole("button", { name: /내보내기/ }) as HTMLButtonElement).disabled).toBe(false)
+  );
+
+  // 다른 판을 누르면 그 판도 그 자리에서 세션을 얻는다.
+  click(fileRow(nameOf(second[1].path)));
+  await waitFor(() => expect(opens).toHaveLength(2));
+  expect(opens[1].path).toBe(second[1].path);
+});
+
+/**
+ * 전체 캐시와 배치 내보내기가 도는 동안 준비가 작업 프로세스를 건드리면 안 된다.
+ * 워커 스폰(warmWorkersStart)이 이전 세대를 **무조건 전부 죽이므로**
+ * (src-tauri/src/warm.rs의 kill_all), 여기서 출발하면 몇 시간짜리 전체 캐시가
+ * 조용히 죽고 배치는 반쪽 PSD를 남긴다. 설계 9절이 검증 항목으로 못박은 둘이다.
+ */
+test("file preparation stands aside while the full cache holds the workers", async () => {
+  await renderWithPreset();
+  await addFiles({ click }); // 워커 1 — 현행 순차 경로가 첫 파일을 쥔다
+  click(screen.getByRole("button", { name: "전체 캐시" }));
+  setWorkers(2);
+  await waitFor(() => expect(engine.warmWorkersStart).toHaveBeenCalled());
+  await new Promise((r) => setTimeout(r, 30));
+
+  // 워커에 나간 잡은 전부 전체 캐시(presets)다 — 준비 잡은 한 장도 없다.
+  const jobs = engine.warmWorkerSend.mock.calls.map((c) => c[1] as { prepare?: unknown });
+  expect(jobs.filter((j) => j.prepare !== undefined)).toHaveLength(0);
+  // 그리고 파일은 현행 순차 경로가 계속 연다 — 느리지만 옳다(설계 6.2).
+  await finishOpen(0, 1);
+  await waitFor(() => expect(opens).toHaveLength(2));
+});
+
+test("file preparation stands aside while a batch export holds the workers", async () => {
+  const batching = deferred<{ results: unknown[] }>();
+  engine.batchRun.mockReturnValue(batching.promise);
+  engine.pathsExist.mockResolvedValue(PATHS.map(() => false));
+  // BatchPanel도 프리셋 목록을 따로 읽는다 — 없으면 "배치 실행"이 비활성이다.
+  vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
+
+  await renderWithPreset();
+  await addFiles({ click }); // 워커 1 — 파일 둘이 대기로 남는다
+  click(screen.getByRole("button", { name: "배치" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "전체 선택" })).toBeTruthy());
+  click(screen.getByRole("button", { name: "전체 선택" }));
+  await waitFor(() =>
+    expect((screen.getByRole("button", { name: "배치 실행" }) as HTMLButtonElement).disabled).toBe(false)
+  );
+  click(screen.getByRole("button", { name: "배치 실행" }));
+  await waitFor(() => expect(engine.batchRun).toHaveBeenCalled());
+
+  setWorkers(2);
+  await new Promise((r) => setTimeout(r, 30));
+  expect(engine.warmWorkersStart).not.toHaveBeenCalled();
+  expect(engine.warmWorkerSend).not.toHaveBeenCalled();
 });
 
 /**
@@ -1867,7 +1968,7 @@ test("a prepared preview lands under the key the app looks up later", async () =
 
   await renderWithPreset();
   setWorkers(2);
-  await addFiles({ click });
+  await addFilesForPrepare();
   await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
 
   const call = engine.warmWorkerSend.mock.calls[0] as [number, { path: string }];
@@ -1894,6 +1995,56 @@ test("a prepared preview lands under the key the app looks up later", async () =
   expect(entry?.previewKey).toBe(expected.key);
   expect(entry?.previewFile).toBeTruthy();
   expect(previews.get(entry!.previewFile!)).toBe("data:image/png;base64,AAA");
+});
+
+/**
+ * 준비된 파일의 눈(previewHiddenIds)은 **정상 경로와 같아야 한다** — 포토샵에서
+ * 아티스트가 꺼둔 레이어는 준비된 판에서도 꺼져 있어야 한다. 그리고 스스로
+ * 고쳐지지 않는다: 나중에 세션이 붙어도(sessionRefreshed) 그 액션은 opsByPath를
+ * 일부러 안 건드린다.
+ *
+ * 같은 자리에서 캐시 키의 반대편도 잠근다. 워커의 _preset_preview_args는 매칭된
+ * 픽셀 잎을 **눈과 무관하게 전부** 그리므로(engine/psd_engine/warmworker.py),
+ * 매칭된 잎 중 꺼진 것이 있으면 워커의 그림과 화면이 그릴 그림이 다르다 — 그때
+ * 그 PNG를 화면의 키에 담으면 아티스트는 안 그려질 레이어까지 그려진 그림으로
+ * 설정을 확인하게 된다. 담지 않는 것이 옳다.
+ */
+test("a prepared file hides what Photoshop had hidden, and its preview is not cached under a different picture", async () => {
+  const finish = captureWorkerLines(9, [0, 1]);
+  vi.mocked(saveDialog).mockResolvedValue("/proj/새작업.bwproj" as never);
+
+  await renderWithPreset();
+  setWorkers(2);
+  await addFilesForPrepare();
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
+
+  const call = engine.warmWorkerSend.mock.calls[0] as [number, { path: string }];
+  const prepared = call[1].path;
+  // 잎 2는 포토샵에서 꺼져 있고, 프리셋은 1과 2를 잡았다.
+  const tree = [...treeOf([1]), ...treeOf([2], false), ...treeOf([3])];
+  finish(call, { ...preparedResult([1, 2], "/tmp/prepared.png"), tree });
+  await waitFor(() => expect(screen.queryAllByText("열림").length).toBeGreaterThanOrEqual(1));
+  await new Promise((r) => setTimeout(r, 20));
+
+  click(screen.getByRole("button", { name: "프로젝트 저장" }));
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  const [, saved, previews] = vi.mocked(saveProjectTo).mock.calls[0];
+  const entry = saved.files.find((f) => f.path === prepared);
+  expect(entry?.ops.previewHiddenIds).toEqual([2]);
+  // 키는 화면이 그릴 그림(잎 1뿐)을 가리키고, 워커가 구운 그림은 담기지 않았다.
+  const expected = previewRenderSpec(
+    { path: prepared, mtime: 1 },
+    tree as never,
+    [1, 2], [2], [],
+    PRESET.lineColor,
+    [1, 2],
+    PRESET.edgeLines,
+    []
+  );
+  expect(entry?.previewKey).toBe(expected.key);
+  expect(entry?.previewFile).toBeFalsy();
+  expect(previews.size).toBe(0);
 });
 
 test("the warmup chain shows leaf-level progress while it runs", async () => {
