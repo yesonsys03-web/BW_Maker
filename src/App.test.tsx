@@ -1954,6 +1954,54 @@ test("file preparation stands aside while a batch export holds the workers", asy
 });
 
 /**
+ * 반대 방향: 파일 준비가 도는 중에 "전체 캐시"를 누르면, 스윕은 준비가 끝날
+ * 때까지 기다렸다 스스로 이어서 시작한다(사람이 다시 누를 필요가 없다). 즉시
+ * 출발하면 워커 스폰(warmWorkersStart)이 이전 세대를 죽이므로(warm.rs의
+ * kill_all) 준비하던 작업 프로세스가 몰살당하고, 준비 큐는 남은 파일을 실패로
+ * 적어 가짜 오류 카드를 낸다.
+ */
+test("the full cache waits for file preparation, then takes over", async () => {
+  // 워커 셋을 매핑해 목록 셋(PATHS)이 당겨 가기 없이 한 번에 나가게 한다 —
+  // "몇 장이 남았나"의 레이스(로드 큐가 다음 파일을 이미 집어 갔는지)를
+  // 비켜서기 위해서다(위 addFilesForPrepare 주석 참고: 준비가 먼저 서야
+  // 로드 큐가 아예 손을 안 댄다).
+  const finish = captureWorkerLines(5, [0, 1, 2]);
+
+  await renderWithPreset();
+  setWorkers(2);
+  await addFilesForPrepare();
+  // 준비 큐가 목록 전체(세 장)를 집는다.
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(3));
+
+  click(screen.getByRole("button", { name: "전체 캐시" }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "파일 준비 후 시작" })).toBeTruthy());
+  // 준비가 도는 동안 스윕은 출발하지 않는다 — 워커에 나간 잡은 여전히 전부
+  // prepare뿐이다(presets 잡은 한 장도 없다).
+  expect(
+    engine.warmWorkerSend.mock.calls.every(
+      (c) => (c[1] as { prepare?: unknown }).prepare !== undefined
+    )
+  ).toBe(true);
+
+  // 준비가 끝나면(세 장 모두 결과를 돌려주면) 효과가 다시 돌아 스윕이 알아서
+  // 이어진다.
+  for (const call of engine.warmWorkerSend.mock.calls.slice(0, 3)) {
+    finish(call as [number, { path: string }], preparedResult([1]));
+  }
+
+  await waitFor(() =>
+    expect(
+      engine.warmWorkerSend.mock.calls.some(
+        (c) => (c[1] as { presets?: unknown }).presets !== undefined
+      )
+    ).toBe(true)
+  );
+  // 가짜 오류 카드가 뜨면 안 된다 — 대기는 실패가 아니다.
+  expect(screen.queryByText(/준비하지 못한 파일/)).toBeNull();
+});
+
+/**
  * 이 테스트가 이 기능의 심장이다: 워커가 구운 그림이 **화면이 나중에 만들 키**에
  * 담겨야 한다. 어긋나면 워커가 100장을 구워도 클릭마다 다시 합성한다 — 오류
  * 한 줄 없이 기능이 통째로 사라지는 고장이다.

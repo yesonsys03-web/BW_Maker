@@ -38,6 +38,17 @@ interface FilePanelProps {
    * 켜 두면 사람이 쓰는 동안은 비켜서며 돌고, 끝나면 App이 완료 팝업을 낸다.
    */
   fullCacheRunning: boolean;
+  /**
+   * 파일 준비(작업 프로세스)가 도는 중인가. "전체 캐시"를 누른 시점에 준비가
+   * 아직 파일을 여는 중이면 스윕은 그 준비가 끝날 때까지 기다린다(App.tsx의
+   * 전체 캐시 효과) — 버튼은 그 대기를 "캐시 중지"가 아니라 "파일 준비 후
+   * 시작"으로 정직하게 보여줘야 한다. 누르면 대기도 취소된다(fullCacheRunning과
+   * 같은 onFullCacheStop 경로).
+   *
+   * 선택 프롭이다 — FilePanel.test.tsx는 이 기능과 무관한(라인필요 배지) 것만
+   * 잠그고 있어 손대지 않는다. 안 주면 대기 상태가 아닌 것으로 본다.
+   */
+  preparing?: boolean;
   onFullCacheStart: () => void;
   onFullCacheStop: () => void;
   /** 전체 캐시 워커 수. 1 = 엔진이 짬짬이(기본), 그 이상 = 별도 프로세스 병렬. */
@@ -148,6 +159,7 @@ export function FilePanel({
   prefetchProgress,
   warmProgress,
   fullCacheRunning,
+  preparing = false,
   onFullCacheStart,
   onFullCacheStop,
   cacheWorkers,
@@ -174,6 +186,11 @@ export function FilePanel({
   const [confirmClear, setConfirmClear] = useState(false);
 
   const staleSet = useMemo(() => new Set(staleProjectPaths), [staleProjectPaths]);
+
+  // "전체 캐시"는 켜져 있지만(fullCacheRunning) 파일 준비가 아직 작업 프로세스를
+  // 쥐고 있어 스윕이 출발을 미루는 중. App.tsx의 전체 캐시 효과가 preparing을
+  // 보고 기다리는 것과 같은 판정이다.
+  const fullCacheQueued = fullCacheRunning && preparing;
 
   /**
    * 사람이 직접 손댄 파일이 있는지. 프리셋 자동 적용만 걸린 파일은 여기 안 든다
@@ -346,12 +363,16 @@ export function FilePanel({
             onClick={fullCacheRunning ? onFullCacheStop : onFullCacheStart}
             disabled={files.length === 0}
             title={
-              fullCacheRunning
-                ? "전체 캐시 만들기를 멈춥니다. 이미 쌓인 캐시는 그대로 남습니다."
-                : "목록의 모든 파일의 드로잉 레이어를 미리 디코드해 디스크에 쌓아 둡니다. 파일 수에 따라 오래 걸릴 수 있고, 작업하는 동안에는 알아서 비켜섭니다."
+              // fullCacheQueued를 fullCacheRunning보다 먼저 본다 — 켜져 있는데
+              // 준비가 아직 도는 중이면 "멈춘다"가 아니라 "기다리는 중"이 진실이다.
+              fullCacheQueued
+                ? "파일 준비가 끝나면 전체 캐시가 이어서 시작합니다. 지금 누르면 대기도 취소됩니다."
+                : fullCacheRunning
+                  ? "전체 캐시 만들기를 멈춥니다. 이미 쌓인 캐시는 그대로 남습니다."
+                  : "목록의 모든 파일의 드로잉 레이어를 미리 디코드해 디스크에 쌓아 둡니다. 파일 수에 따라 오래 걸릴 수 있고, 작업하는 동안에는 알아서 비켜섭니다."
             }
           >
-            {fullCacheRunning ? "캐시 중지" : "전체 캐시"}
+            {fullCacheQueued ? "파일 준비 후 시작" : fullCacheRunning ? "캐시 중지" : "전체 캐시"}
           </button>
           <select
             value={String(cacheWorkers)}

@@ -1734,6 +1734,16 @@ function AppShell() {
     // 정리된다 — 캐시 쓰기는 원자적이라 잃는 것이 없고, 이 효과의 클린업이
     // 스윕 핸들을 접는다.
     if (batchRunning) return;
+    // 파일 준비가 작업 프로세스를 쥐고 있으면 기다린다. 여기서 스폰하면
+    // (warmWorkersStart가 이전 세대를 죽인다) 준비하던 프로세스가 몰살당하고,
+    // 준비 큐는 남은 파일을 실패로 적어 가짜 오류 카드를 낸다.
+    //
+    // 기다리는 것이 손해가 아니다: 준비가 구운 미리보기는 이 스윕이 쓸 디스크
+    // 캐시와 같은 키로 들어가므로 스윕이 그 단계를 건너뛰고, 준비가 끝나면
+    // 모든 파일의 트리를 알아 아래 총량 추정(estimated)도 정확해진다.
+    // preparing이 deps에 있으므로 준비가 끝나면 효과가 다시 돌아 이어진다 —
+    // 바로 위 batchRunning과 같은 장치다.
+    if (preparing) return;
     // 대상: **목록의 전체 파일.** 앱에서 열렸는지(status/sessionId)를 보면 안
     // 된다 — 프로젝트 로드 직후에는 대부분이 아직 안 열린 상태라, 그 순간 열린
     // 몇 장만 쓸고 "완료" 팝업이 떴다(실사용에서 그렇게 잡혔다: 스윕이 수상하게
@@ -1808,7 +1818,7 @@ function AppShell() {
       setFullCacheDone(true);
     });
     return () => handle.cancel();
-  }, [fullCacheOn, cacheWorkers, batchRunning, handleFullCacheToggle, pushError]);
+  }, [fullCacheOn, cacheWorkers, batchRunning, preparing, handleFullCacheToggle, pushError]);
 
   /**
    * 파일별로 손으로 "라인으로 지정"한 레이어. 배치가 이걸 함께 보내야, 이름
@@ -2089,6 +2099,7 @@ function AppShell() {
             : null
         }
         fullCacheRunning={fullCacheOn}
+        preparing={preparing}
         onFullCacheStart={() => handleFullCacheToggle(true)}
         onFullCacheStop={() => handleFullCacheToggle(false)}
         cacheWorkers={cacheWorkers}
