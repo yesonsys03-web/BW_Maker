@@ -567,15 +567,17 @@ export interface PrepareDeps extends Omit<WorkerSweepDeps, "onProgress"> {
  */
 export function runPrepareQueue(deps: PrepareDeps) {
   const failed: Array<{ path: string; message: string }> = [];
-  let done = 0;
+  /** 성공한 파일 수. 진행률은 이것 + failed.length로 센다 — 파일 하나가 정확히
+   * 한 번만 세어지도록 두 경로(성공·실패)가 각각 자기 자리에만 들어간다. */
+  let succeeded = 0;
 
   const core = runWorkerQueue(deps as WorkerSweepDeps, {
     drainOnCancel: false,
     onOther: () => {},
     onFile: (ev) => {
       const path = ev.path!;
-      done += 1;
       if (ev.ok && ev.result !== undefined) {
+        succeeded += 1;
         deps.onResult(path, ev.result as unknown as Record<string, unknown>);
       } else {
         failed.push({ path, message: ev.message ?? "unknown" });
@@ -590,7 +592,7 @@ export function runPrepareQueue(deps: PrepareDeps) {
   });
 
   function report() {
-    deps.onProgress?.({ filesDone: done + failed.length, filesTotal: deps.paths.length });
+    deps.onProgress?.({ filesDone: succeeded + failed.length, filesTotal: deps.paths.length });
   }
 
   return {
@@ -1262,11 +1264,35 @@ git commit -m "docs: record the parallel file-preparation measurements"
 
 ## 실측 기록
 
-_Task 1과 Task 8이 채운다._
+측정: `scripts/prepare-baseline.py`, CH 납품 폴더 100장, `PSD_ENGINE_TILE_CACHE=0`(콜드), `nice 10`.
 
 | 조건 | 파일 수 | 벽시계 | 배율 |
 |---|---|---|---|
-| 순차 (기준선, 콜드) | | | 1.0 |
-| 순차 (기준선, 웜) | | | |
+| **순차 (기준선, 콜드)** | **100** | **28.0분** (1,679초) | **1.0** |
 | 작업 프로세스 2 | | | |
 | 작업 프로세스 4 | | | |
+
+**단계별 (콜드, 100장)**
+
+| 단계 | 합 | 비중 | 파일당 평균 | 중앙 | 최대 |
+|---|---|---|---|---|---|
+| `open_psd` | 28.9초 | **1.7%** | 0.29초 | | 1.51초 |
+| 프리셋 매칭 | 0.1초 | ~0% | | | |
+| **미리보기 합성** | **1,649.9초** | **98.3%** | 16.5초 | 5.0초 | **259.1초** |
+
+실패 0장.
+
+### 이 숫자가 설계에 대해 말하는 것
+
+**설계 1.1절의 `open_psd` 2.5~6.6초는 이 폴더에 해당하지 않는다.** 그 값은 BG 판
+(520MB~1.5GB) 실측이고, CH 판은 평균 0.29초다. **여는 패스를 병렬화해 얻는 것은 전체의
+1.7%뿐이다.**
+
+그래도 설계는 그대로 간다: 준비 잡은 파일을 **한 번 열어** 트리·매칭·미리보기를 모두
+만든다. 여는 패스를 떼어내면 파일을 두 번 열게 되므로, 합치는 쪽이 여전히 옳다. 다만
+이 트랙의 가치는 **전부 미리보기 합성 병렬화**에 있다고 읽어야 한다.
+
+**병렬화의 이론적 하한.** 파일 단위로만 나누므로 가장 무거운 한 장(259초)보다 빠를 수
+없다. 작업 프로세스 4개면 `max(1679/4, 259) = 420초 ≈ 7.0분` — **약 4배**가 상한이다.
+중앙값 5.0초 대 평균 16.5초라 분포가 심하게 치우쳐 있으므로, 당겨 가기 큐(빠른 프로세스가
+더 가져감)가 미리 나누기보다 유리한 것이 이 데이터로 확인된다.
