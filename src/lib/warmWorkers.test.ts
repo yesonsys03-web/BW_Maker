@@ -5,6 +5,7 @@ import {
   type WorkerEvent,
   type WorkerSweepDeps,
   type PrepareDeps,
+  type PrepareProgress,
 } from "./warmWorkers";
 
 /** 가짜 워커판. 이벤트를 손으로 흘려보내며 디스패처 규칙을 검증한다. */
@@ -304,6 +305,7 @@ function prepareHarness(paths: string[], workerCount: number, ids = [0, 1]) {
   let exitCb: ((e: { generation: number; id: number }) => void) | undefined;
   const sends: Array<{ id: number; path: string }> = [];
   const results: Array<{ path: string; result: Record<string, unknown> }> = [];
+  const progress: PrepareProgress[] = [];
   const deps: PrepareDeps = {
     paths,
     workerCount,
@@ -313,6 +315,7 @@ function prepareHarness(paths: string[], workerCount: number, ids = [0, 1]) {
     onLine: async (cb) => { lineCb = cb; return () => (lineCb = undefined); },
     onExit: async (cb) => { exitCb = cb; return () => (exitCb = undefined); },
     onResult: (path, result) => void results.push({ path, result }),
+    onProgress: (p) => void progress.push(p),
   };
   // 준비 잡의 result는 배치 내보내기의 BatchWorkerResultEntry(ok 필수)와 다른
   // 모양(Record<string, unknown>)이라 WorkerEvent를 그대로는 못 쓴다 — result
@@ -323,7 +326,7 @@ function prepareHarness(paths: string[], workerCount: number, ids = [0, 1]) {
     generation = 7
   ) => lineCb?.({ generation, id, line: JSON.stringify(ev) });
   const exit = (id: number, generation = 7) => exitCb?.({ generation, id });
-  return { deps, sends, results, emit, exit };
+  return { deps, sends, results, progress, emit, exit };
 }
 
 test("prepare hands each result to the caller as soon as that file lands", async () => {
@@ -372,4 +375,25 @@ test("cancel is not a failure — the remaining files stay unclaimed", async () 
   expect(out.stopped).toBe(true);
   expect(out.failed).toEqual([]);
   expect(out.remaining).toEqual(["b", "c"]);
+});
+
+test("a failed file advances filesDone by exactly one, not two", async () => {
+  // 실패한 파일이 done과 failed 양쪽에 잡히면 진행바가 한 파일에 2씩 밀린다
+  // — 실패가 섞인 폴더에서 진행바가 100%를 넘어간다. 실패 쪽을 먼저 흘려보내
+  // "둘로 세는" 그 파일이 실제로 여기 걸리게 한다.
+  const h = prepareHarness(["a", "b"], 2);
+  const run = runPrepareQueue(h.deps);
+  await tick();
+
+  h.emit(0, { event: "file", path: "a", ok: false, message: "boom" });
+  h.emit(1, { event: "file", path: "b", ok: true, result: { path: "b" } });
+  await run.finished;
+
+  // 관측한 진행값 전부가 총량을 넘어서는 안 되고, 마지막 값은 파일 수(2)와
+  // 정확히 같아야 한다 — 최종값만 보면 순서에 따라 우연히 통과할 수 있어
+  // 매 보고를 확인한다.
+  for (const p of h.progress) {
+    expect(p.filesDone).toBeLessThanOrEqual(p.filesTotal);
+  }
+  expect(h.progress[h.progress.length - 1]).toEqual({ filesDone: 2, filesTotal: 2 });
 });

@@ -478,15 +478,18 @@ export interface PrepareDeps extends Omit<WorkerSweepDeps, "onProgress"> {
  */
 export function runPrepareQueue(deps: PrepareDeps) {
   const failed: Array<{ path: string; message: string }> = [];
-  let done = 0;
+  // 성공만 센다 — 실패는 failed 배열 하나에만 적히므로, filesDone은
+  // succeeded + failed.length로 파일마다 정확히 한 번씩만 잡힌다(예전에는
+  // 실패한 파일이 done과 failed 양쪽에 잡혀 진행바가 한 파일에 2씩 밀렸다).
+  let succeeded = 0;
 
   const core = runWorkerQueue(deps as WorkerSweepDeps, {
     drainOnCancel: false,
     onOther: () => {},
     onFile: (ev) => {
       const path = ev.path!;
-      done += 1;
       if (ev.ok && ev.result !== undefined) {
+        succeeded += 1;
         deps.onResult(path, ev.result as unknown as Record<string, unknown>);
       } else {
         failed.push({ path, message: ev.message ?? "unknown" });
@@ -501,7 +504,7 @@ export function runPrepareQueue(deps: PrepareDeps) {
   });
 
   function report() {
-    deps.onProgress?.({ filesDone: done + failed.length, filesTotal: deps.paths.length });
+    deps.onProgress?.({ filesDone: succeeded + failed.length, filesTotal: deps.paths.length });
   }
 
   return {
