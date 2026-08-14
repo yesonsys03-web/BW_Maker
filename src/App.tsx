@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import { AppProvider, applyPresetEffect, openFileEffect, useAppStore, type AppState, type FileEntry } from "./state/appStore";
+import { AppProvider, applyPresetEffect, openFileEffect, useAppStore, type AppState, type FileEntry, type PreparedFileResult } from "./state/appStore";
 import type { SkippedLayer } from "./lib/engine";
 import { FilePanel } from "./components/FilePanel";
 import { LayerTree } from "./components/LayerTree";
@@ -13,7 +13,7 @@ import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { loadPngDataUrl, onWarmWorkerExit, onWarmWorkerLine, pinFile, psdMtimes, renderDocumentPreview, renderPreview, renderThumbnails, warmPreviewTiles, warmWorkerSend, warmWorkersStart, warmWorkersStop } from "./lib/engine";
-import { runWorkerSweep } from "./lib/warmWorkers";
+import { runPrepareQueue, runWorkerSweep } from "./lib/warmWorkers";
 import { ProjectBar, type ProjectBusy } from "./components/ProjectBar";
 import {
   BOTTOM_PANEL_HEIGHT_STORAGE_KEY,
@@ -314,6 +314,32 @@ function AppShell() {
   // 밀려나도 그대로 쓸 수 있다. 다시 필요한 것은 미리보기 렌더뿐이다.
   const [loadProgress, setLoadProgress] = useState<{ done: number; total: number } | null>(null);
   const drainingRef = useRef(false);
+
+  /**
+   * 파일 준비(작업 프로세스 모드)가 도는 중인지. 배경 큐 둘이 이걸 보고 비켜선다
+   * — 준비는 그 둘이 하던 일(여는 중 + 미리보기 준비)을 워커가 파일 단위로 나눠
+   * 하는 것이라, 셋이 같이 돌면 같은 PSD를 세 군데서 연다.
+   *
+   * ref와 상태를 함께 드는 것은 loadCancelled와 같은 이유다: 돌고 있는 큐는
+   * 값을 즉시 읽어야 하고(ref), 멈춘 효과를 다시 깨우는 것은 상태다.
+   *
+   * 선언이 큐보다 한참 앞인 이유: 진행바의 "중지"(cancelLoad)가 렌더 중에 이
+   * 값을 읽으므로, 그 콜백보다 뒤에 서면 TDZ에 걸린다.
+   */
+  const preparingRef = useRef(false);
+  const [preparing, setPreparing] = useState(false);
+  /** 준비 진행. 진행바의 "여는 중" 자리에 라벨만 바꿔 들어간다. */
+  const [prepareProgress, setPrepareProgress] = useState<{ done: number; total: number } | null>(null);
+  /**
+   * 준비하지 못한 파일. 다시 집으면 큐가 끝나지 않는다(prefetchFailedRef와 같은
+   * 규칙) — 준비가 끝날 때마다 같은 파일로 큐가 다시 서면 워커 무리가 무한히
+   * 다시 뜬다. 실패한 파일은 status가 "idle"로 남으므로 현행 순차 경로가 연다.
+   */
+  const prepareFailedRef = useRef<Set<string>>(new Set());
+  /** 돌고 있는 준비 큐의 손잡이. 비켜서야 할 때(전체 캐시·배치·중지) 접는다. */
+  const prepareHandleRef = useRef<{ cancel: () => void } | null>(null);
+  /** 준비 회차 번호. 접힌 회차의 뒷정리가 다음 회차의 표시를 지우지 않게 한다. */
+  const prepareRunRef = useRef(0);
   /**
    * "중지"가 세운 취소 표시. 큐마다 따로 둔다 — 진행바 자리는 하나지만 두 큐는
    * 별개의 작업이라, "여는 중"에서 누른 중지가 그 뒤에 도는 "미리보기 준비 중"까지
@@ -398,9 +424,12 @@ function AppShell() {
    * 그 큐만 세운다 — 사용자는 지금 눈에 보이는 문구를 멈추려고 누른다.
    */
   const cancelLoad = useCallback(() => {
-    if (loading) setLoadCancel(true);
+    // 준비와 "여는 중"은 같은 일이다(준비는 그 패스를 워커로 옮긴 것이다) —
+    // 그래서 중지 표시도 같은 것을 쓴다. 이게 없으면 "파일 준비 중"이 떠 있는
+    // 동안 중지 버튼이 아무 일도 안 하고, 사용자는 멈추지 않는 막대를 본다.
+    if (loading || preparing) setLoadCancel(true);
     else setPrefetchCancel(true);
-  }, [loading, setLoadCancel, setPrefetchCancel]);
+  }, [loading, preparing, setLoadCancel, setPrefetchCancel]);
 
   /**
    * 파일을 새로 추가하는 것은 "이제 다시 시작해도 좋다"는 뜻이므로 중지 표시를
@@ -425,6 +454,7 @@ function AppShell() {
     setLoadCancel(false);
     setPrefetchCancel(false);
     prefetchFailedRef.current.clear();
+    prepareFailedRef.current.clear();
     // "파일이 바뀜"은 방금 치운 프로젝트에 대한 이야기다. 남겨두면 나중에 같은
     // 경로를 다시 추가했을 때 근거 없는 배지가 붙는다. 저장용 폴백 항목도 같은
     // 이유로 함께 내린다 — 목록에서 치운 파일의 옛 트리를 되살릴 이유가 없다.
@@ -514,7 +544,11 @@ function AppShell() {
         if (progress === null) drainingRef.current = false;
         setLoadProgress(progress);
       },
-      cancelled: () => abandonedRef.current || loadCancelledRef.current,
+      // 파일 준비(작업 프로세스)가 도는 동안에는 비켜선다 — 준비가 이 패스를
+      // 파일 단위로 나눠 하고 있으므로, 여기서 같은 PSD를 또 열면 세션 두 칸을
+      // 두고 다툰다. 준비가 끝나거나 접히면 남은 파일은 status가 "idle"로 남아
+      // 있고, 이 효과가 preparing을 보고 다시 돌아 이어받는다.
+      cancelled: () => abandonedRef.current || loadCancelledRef.current || preparingRef.current,
     })
       .then(() => {
         const failures = openFailureReport(openFailures);
@@ -533,7 +567,10 @@ function AppShell() {
       .finally(() => {
         drainingRef.current = false;
       });
-  }, [state.files, loadCancelled, dispatch, pushError]);
+    // preparing이 의존성에 있는 것이 "이어받기"를 실제로 만든다. 준비가 도는
+    // 동안 이 큐는 위 cancelled에서 즉시 되돌아가는데, 준비가 끝나며 바뀌는 것은
+    // 그 상태뿐이다 — 없으면 남은 파일이 다음 상태 변화까지 대기로 멈춰 있는다.
+  }, [state.files, loadCancelled, preparing, dispatch, pushError]);
 
   // 보고 있는 파일을 엔진에 고정한다. 이게 없으면 배경 작업(미리보기 미리
   // 만들기)이 파일을 차례로 여는 동안 화면이 쓰는 세션이 계속 밀려나고, 썸네일과
@@ -720,6 +757,53 @@ function AppShell() {
       ops.edgeColourIds
     );
   }, []);
+
+  /**
+   * 작업 프로세스가 준비한 파일 하나를 화면 상태에 반영한다.
+   *
+   * 캐시 키는 **여기서 계산한다.** 워커가 만든 키를 쓰면 프런트와 워커 중 어느
+   * 쪽이 옳은지 정할 수 없게 되고, 어긋난 순간 화면은 그 그림을 영영 못 찾는다 —
+   * 워커가 100장을 구워도 클릭마다 다시 합성하는, 오류 한 줄 없는 전손이다.
+   * previewRenderSpec에 **화면이 나중에 넣을 값 그대로** 넣으면(리듀서가 세우는
+   * ops와 matchedIdsByPath) 두 키는 구조적으로 같아진다.
+   *
+   * 프리셋은 인자로 받는다. presetRef.current를 여기서 읽으면 준비가 도는 중에
+   * 아티스트가 프리셋을 바꿨을 때 **워커가 그린 그림에 다른 설정의 키**가 붙는다
+   * — 그러면 새 설정을 확인하는 아티스트에게 옛 그림이 뜬다(이 캐시의 최악 고장).
+   * 워커가 실제로 쓴 그 프리셋으로 키를 만든다.
+   *
+   * 갓 준비한 파일에는 눈·솔로·수동 지정이 없다 — 그래서 워커의
+   * _preset_preview_args가 그린 그림과 이 키가 같은 화면을 가리킨다.
+   */
+  const applyPreparedFile = useCallback(
+    async (path: string, result: Record<string, unknown>, preset: Preset) => {
+      const r = result as unknown as PreparedFileResult;
+      // 세션 없이 "열림"으로 세운다. 세션은 화면이 그 파일을 실제로 쓸 때 채워진다.
+      dispatch({ type: "preparedFile", path, result: r });
+      if (r.pngPath === null) return;
+      // 리듀서가 opsByPath에 세우는 includedIds와 같은 값(갓 적용 상태의 포함 목록).
+      const includedIds = [...r.matchedLayerIds].sort((a, b) => a - b);
+      const spec = previewRenderSpec(
+        { path, mtime: r.mtime },
+        r.tree,
+        includedIds,
+        [],                   // 눈
+        [],                   // 솔로
+        preset.lineColor,
+        r.matchedLayerIds,    // 리듀서가 matchedIdsByPath에 넣는 바로 그 값
+        preset.edgeLines,
+        []                    // 색 경계선 수동 지정
+      );
+      if (!spec.key) return;
+      try {
+        previewCacheRef.current.set(spec.key, await loadPngDataUrl(r.pngPath));
+        prefetchedKeysRef.current.add(spec.key);
+      } catch {
+        // 그림을 못 읽어도 준비 자체는 성공이다 — 누르면 화면이 그린다.
+      }
+    },
+    [dispatch]
+  );
 
   /**
    * 복원한 항목의 PNG를 미리보기 캐시에 넣는다. 키를 다시 계산해 저장된 것과
@@ -1113,6 +1197,10 @@ function AppShell() {
     // 세션 두 칸을 두고 다투다 'unknown or evicted session'이 난다. 효과는 선언
     // 순서대로 도니, 로드 큐가 동기적으로 세워둔 ref를 여기서 보면 그 틈이 없다.
     if (loading || drainingRef.current || prefetchingRef.current || batchRunning) return;
+    // 파일 준비가 도는 중이면 아예 출발하지 않는다 — 준비가 이 큐의 일(미리보기
+    // 만들기)까지 워커에서 함께 하고 있다. 상태가 아니라 ref를 보는 것은 바로 위
+    // drainingRef와 같은 이유다: 준비는 같은 커밋 안에서 출발할 수 있다.
+    if (preparingRef.current) return;
     if (prefetchCancelled) return;
     // 프리셋을 만지는 중이면 아직 출발하지 않는다(prefetchHold 주석 참고).
     if (prefetchHold) return;
@@ -1210,7 +1298,8 @@ function AppShell() {
       // 쪽이고, 미리 만들어두는 일은 그 뒤에 해도 된다. 취소 표시는 건드리지
       // 않으므로 로드가 끝나 loading이 내려가면 알아서 다시 돈다.
       cancelled: () =>
-        abandonedRef.current || prefetchCancelledRef.current || drainingRef.current || batchRunningRef.current,
+        abandonedRef.current || prefetchCancelledRef.current || drainingRef.current ||
+        batchRunningRef.current || preparingRef.current,
     })
       .then(() => {
         // 미리 만들어두는 일이 실패해도 작업을 막지 않는다(누를 때 그리면 된다).
@@ -1226,7 +1315,9 @@ function AppShell() {
       .finally(() => {
         prefetchingRef.current = false;
       });
-  }, [loading, prefetchCancelled, prefetchHold, batchRunning, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
+    // preparing은 "준비가 끝났다"를 이 큐에 전하는 유일한 신호다(로드 큐의 같은
+    // 의존성 주석 참고) — 없으면 준비가 끝난 뒤 아무도 이 큐를 다시 안 깨운다.
+  }, [loading, prefetchCancelled, prefetchHold, batchRunning, preparing, state.files, state.opsByPath, state.activePath, previewPlanFor, refreshSession, pushError]);
 
   // 토글 워밍업 큐. 준비 큐까지 끝나 엔진이 놀 때, 보고 있는 파일의 아직 안 데운
   // 잎 타일을 미리 디코드해 둔다. 실측(2026-08-11, 납품 판)으로 토글 지연은 새로
@@ -1452,6 +1543,90 @@ function AppShell() {
       cancelled = true;
     };
   }, [loading, prefetchProgress, batchRunning, prefetchHold, warmKick, state.activePath, state.files, refreshSession, fullCacheOn, cacheWorkers, handleFullCacheToggle]);
+
+  // 파일 준비 — 작업 프로세스 모드(워커 수 2 이상). 폴더를 연 직후의 "여는 중"과
+  // "미리보기 준비 중"을 워커가 파일 단위로 나눠 병렬로 한다. 두 패스가 하나로
+  // 합쳐지는 것이 요점이다: 지금은 여는 중에 PSD를 한 번 열고, 미리보기 준비에서
+  // 세션이 이미 LRU(2칸)에 밀려나 있어 또 연다. 실측(100장 폴더, 콜드)으로 28.0분
+  // 중 98.3%가 미리보기 합성이었고 여는 것은 1.7%뿐이라, 나눌 값이 있는 쪽은
+  // 합성이다 — 워커 4개면 이론상 ~7분이다.
+  //
+  // 전체 캐시·배치 내보내기가 돌면 아예 출발하지 않고, 돌던 것도 접는다. 워커
+  // 스폰(warmWorkersStart)이 이전 세대를 죽이므로(warm.rs의 kill_all) 여기서
+  // 시작하면 **몇 시간짜리 전체 캐시가 조용히 죽고 배치 내보내기는 반쪽 PSD를
+  // 남긴다.** 그 둘이 도는 동안은 현행 순차 경로가 파일을 준비한다 — 느리지만 옳다.
+  //
+  // 접는 것을 정리 함수(cleanup)가 아니라 게이트에서 하는 이유: 이 효과의 의존성에
+  // state.files가 있고 그것은 **준비가 도는 내내 바뀐다**(파일 하나가 준비될 때마다).
+  // 정리 함수에서 접으면 파일 하나마다 워커 무리를 죽였다 다시 띄우고, 그때 워커에
+  // 나가 있던 파일은 실패 목록에도 남은 목록에도 안 남아 조용히 사라진다.
+  useEffect(() => {
+    // 게이트가 닫히면 돌던 준비를 접는다. 중지(loadCancelled)도 여기 있다 —
+    // 준비는 "여는 중"을 대신하는 일이라 그 중지가 이쪽에도 닿아야 한다.
+    if (cacheWorkers <= 1 || fullCacheOn || batchRunning || loadCancelled) {
+      prepareHandleRef.current?.cancel();
+      return;
+    }
+    // 이미 돌고 있으면 그대로 둔다. 위 주석대로 이 효과는 준비 중에도 여러 번
+    // 도는데, 그때마다 다시 출발시키면 큐가 앞의 회차를 계속 갈아엎는다.
+    if (preparingRef.current) return;
+    const targets = filesRef.current
+      .filter((f) => f.status === "idle" && !prepareFailedRef.current.has(f.path))
+      .map((f) => f.path);
+    if (targets.length === 0) return;
+    // 프리셋이 없으면 워커가 매칭할 규칙이 없다. 목록이 아직 안 읽혔을 뿐이므로
+    // (PresetBar가 비동기로 읽는다) 그때는 다음 회차를 기다린다.
+    const preset = presetRef.current;
+    if (!preset) return;
+
+    const run = ++prepareRunRef.current;
+    preparingRef.current = true;
+    setPreparing(true);
+    // 막대를 지금 세운다. 워커가 뜨기까지의 몇 초가 비어 있으면 사용자는 아무
+    // 일도 안 일어난 것으로 보고 다른 것을 누른다.
+    setPrepareProgress({ done: 0, total: targets.length });
+
+    const handle = runPrepareQueue({
+      paths: targets,
+      workerCount: cacheWorkers,
+      start: (count) => warmWorkersStart(count, PREVIEW_MAX_SIZE),
+      send: (id, path) => warmWorkerSend(id, { path, prepare: { preset, maxSize: PREVIEW_MAX_SIZE } }),
+      stop: warmWorkersStop,
+      onLine: onWarmWorkerLine,
+      onExit: onWarmWorkerExit,
+      onProgress: (p) => setPrepareProgress({ done: p.filesDone, total: p.filesTotal }),
+      // 키는 이 회차가 쓴 프리셋으로 만든다(applyPreparedFile 주석 참고).
+      onResult: (path, result) => void applyPreparedFile(path, result, preset),
+    });
+    prepareHandleRef.current = handle;
+
+    void handle.finished.then((out) => {
+      // 접힌 회차의 뒷정리는 하지 않는다 — 다음 회차가 이미 서 있을 수 있고,
+      // 그 표시를 이 회차가 지우면 큐가 도는데 아무도 비켜서지 않게 된다.
+      if (prepareRunRef.current !== run) return;
+      preparingRef.current = false;
+      setPreparing(false);
+      setPrepareProgress(null);
+      for (const f of out.failed) prepareFailedRef.current.add(f.path);
+      if (out.failed.length > 0) {
+        // 조용히 넘기지 않는다. 파일마다 카드를 내면 화면이 덮이므로 한 장으로 모은다.
+        pushError(`준비하지 못한 파일 ${out.failed.length}개`, {
+          message: out.failed.map((f) => `${fileName(f.path)} — ${f.message}`).join("\n"),
+          traceback: "",
+        });
+      }
+      // 취소로 끝났으면(전체 캐시·배치가 가져갔거나 중지) 남은 파일은 현행 순차
+      // 경로가 이어받는다 — status가 "idle"로 남아 있으므로 로드 큐가 집는다.
+      // 워커에 나가 있던 파일도 마찬가지다: 준비 결과가 안 왔으면 "idle" 그대로다.
+    });
+    // preparing이 의존성에 있는 이유: 한 회차가 끝난 뒤 남은 파일(도는 중에 추가된
+    // 것 등)을 다시 세려면 효과가 한 번 더 돌아야 하는데, 그때 바뀌는 것은 이
+    // 상태뿐이다. 실패한 파일은 위에서 빼두므로 같은 파일로 되돌지 않는다.
+  }, [cacheWorkers, fullCacheOn, batchRunning, loadCancelled, preparing, state.files, pushError, applyPreparedFile]);
+
+  // 화면이 사라지면 워커도 거둔다. 준비는 정리 함수에서 접지 않으므로(위 주석)
+  // 언마운트만 여기서 따로 맡는다 — 안 접으면 버려진 화면의 워커 무리가 계속 돈다.
+  useEffect(() => () => prepareHandleRef.current?.cancel(), []);
 
   // 전체 캐시 — 워커 모드(워커 수 2 이상). 별도 프로세스들이 파일을 나눠 디스크
   // 캐시를 채우므로 메인 엔진(stdin 직렬)과 안 겹치고, 큰 드로잉 레이어도
@@ -1783,10 +1958,20 @@ function AppShell() {
         />
       </div>
 
+      {/* 파일 준비는 "여는 중"과 "미리보기 준비 중"을 합친 것이라 막대도 그
+          자리 하나를 쓴다(FilePanel은 loadProgress와 prefetchProgress를 한
+          슬롯에 그린다). 준비가 도는 동안 기존 두 패스는 비켜서 있으므로 셋이
+          동시에 뜰 일은 없다 — 순서를 준비 우선으로 두는 것은 안전망이다. */}
       <FilePanel
         files={state.files}
         activePath={state.activePath}
-        loadProgress={loadProgress ? { ...loadProgress, label: "여는 중" } : null}
+        loadProgress={
+          prepareProgress
+            ? { ...prepareProgress, label: "파일 준비 중" }
+            : loadProgress
+              ? { ...loadProgress, label: "여는 중" }
+              : null
+        }
         prefetchProgress={prefetchProgress ? { ...prefetchProgress, label: "미리보기 준비 중" } : null}
         warmProgress={
           warmProgress

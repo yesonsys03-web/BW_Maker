@@ -93,11 +93,38 @@ export interface AppState {
   restoredMtimeByPath: Record<string, number>;
 }
 
+/**
+ * 작업 프로세스가 준비한 파일 하나(엔진 warmworker.prepare_file의 result).
+ * open_psd 응답에서 **sessionId만 빠진 것** + apply_preset 응답 + 미리보기 경로다
+ * — 세션은 메인 엔진 SessionStore의 것이라 워커가 만들 수 없다.
+ */
+export interface PreparedFileResult {
+  tree: TreeNode[];
+  mtime: number;
+  width: number;
+  height: number;
+  colorMode: string;
+  depth: number;
+  matchedLayerIds: number[];
+  skippedLayers: SkippedLayer[];
+  /**
+   * 프리셋이 만든 자동 병합. 지금은 쓰지 않는다 — applyPresetResult가 손 병합
+   * (current.ops)만 남기고 이 값을 버리는 것과 같은 판단이고, 갓 준비한 파일에는
+   * 손 병합도 없다. 프로토콜에 실려 오므로 타입에는 남긴다.
+   */
+  operations: Operation[];
+  /** 워커가 구운 "갓 적용한 화면"의 PNG. 구울 것이 없었으면 null. */
+  pngPath: string | null;
+  /** 매칭이 파일을 연 직후 보이는 전부와 같아, 화면이 저장된 병합 이미지로 가는 경우. */
+  documentView: boolean;
+}
+
 export type AppAction =
   | { type: "addFiles"; paths: string[] }
   | { type: "openStart"; path: string; activate: boolean }
   | { type: "openSuccess"; path: string; result: OpenResult }
   | { type: "openError"; path: string; error: EngineError; quiet?: boolean }
+  | { type: "preparedFile"; path: string; result: PreparedFileResult }
   | { type: "selectFile"; path: string }
   | { type: "togglePreview"; path: string; layerId: number }
   | { type: "setPreviewHidden"; path: string; layerIds: number[]; hidden: boolean }
@@ -267,6 +294,43 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           [path]: isRestoredMatch && state.opsByPath[path]
             ? state.opsByPath[path]
             : buildInitialOpsState(result.tree),
+        },
+      };
+    }
+
+    // 작업 프로세스가 준비한 파일 하나(App.tsx의 파일 준비 큐).
+    //
+    // openSuccess를 재사용하지 않는 이유가 둘 있다. openSuccess는
+    // result.sessionId를 세우는데 준비 결과에는 그것이 없고, 복원 판정
+    // (restoredMtimeByPath)도 함께 얹혀 있다 — 별도 액션이 그 둘을 섞지 않는다.
+    case "preparedFile": {
+      const { path, result } = action;
+      // 목록에서 빠진 파일의 결과는 버린다. 워커가 파일을 쥐고 있는 동안 X로 뺄
+      // 수 있는데, 그때 되살리면 removeFile이 지운 ops/매칭이 목록에 없는 경로로
+      // 되살아난다.
+      if (!state.files.some((f) => f.path === path)) return state;
+      // 갓 적용 상태의 포함 목록 = 매칭 결과, 숫자 오름차순. applyPresetResult와
+      // 같은 값이어야 한다 — 미리보기 캐시 키가 이 목록으로 만들어지므로, 두
+      // 경로가 갈리면 워커가 구운 그림을 화면이 영영 못 찾는다.
+      const includedIds = [...result.matchedLayerIds].sort((a, b) => a - b);
+      return {
+        ...state,
+        // 세션 없이 "열림". 프로젝트 복원(restoreProject)이 만드는 것과 같은
+        // 모양이고, 세션은 화면이 그 파일을 실제로 쓸 때 채워진다.
+        files: updateFile(state.files, path, {
+          status: "open",
+          tree: result.tree,
+          mtime: result.mtime,
+          width: result.width,
+          height: result.height,
+          // 워커가 프리셋 매칭까지 마쳤다. 래치를 안 세우면 자동 적용 그물
+          // (App.tsx)이 그 위에 같은 프리셋을 한 번 더 건다.
+          presetApplied: true,
+        }),
+        matchedIdsByPath: { ...state.matchedIdsByPath, [path]: result.matchedLayerIds },
+        opsByPath: {
+          ...state.opsByPath,
+          [path]: { ...EMPTY_OPS, includedIds, entries: buildEntries(includedIds, []) },
         },
       };
     }

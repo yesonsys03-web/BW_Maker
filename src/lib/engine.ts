@@ -398,6 +398,8 @@ export async function warmWorkersStart(count: number, maxSize: number): Promise<
  *   바꾸든 그 화면이 이미 구워져 있어야 "전체 캐시 완료 = 즉시"가 참이다.
  * - 배치 내보내기: `export`가 있으면 그 파일 하나를 batch._process_one으로
  *   내보낸다 — 산출물·검증이 메인 엔진의 순차 배치와 같은 함수를 탄다.
+ * - 파일 준비: `prepare`가 있으면 그 파일을 한 번 열어 트리·프리셋 매칭·
+ *   미리보기까지 만들어 돌려준다(warmworker.prepare_file).
  */
 export interface WarmWorkerJob {
   path: string;
@@ -407,6 +409,16 @@ export interface WarmWorkerJob {
     outputDir: string | null;
     overwrite: boolean;
     manualLineIds?: number[];
+  };
+  /**
+   * 파일 준비 — 폴더 로드 직후의 "여는 중"과 "미리보기 준비 중"을 작업
+   * 프로세스가 파일 단위로 나눠 한다. 워커가 파일을 한 번 열어 트리·프리셋
+   * 매칭·미리보기를 만들어 돌려주므로, 지금처럼 두 패스가 같은 PSD를 두 번
+   * (세션이 LRU 2칸에 밀려나 있어) 여는 일이 사라진다.
+   */
+  prepare?: {
+    preset: Preset;
+    maxSize: number;
   };
 }
 
