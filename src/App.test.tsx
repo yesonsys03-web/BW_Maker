@@ -2057,6 +2057,65 @@ test("file preparation stands aside while a batch export holds the workers", asy
 });
 
 /**
+ * 반대 방향: 준비가 **돌고 있는데** 배치가 시작하면, 준비는 그 자리서 접혀야
+ * 한다 — 그리고 접힌 것은 "실패"가 아니라 "취소"다.
+ *
+ * 설계 9절이 못박은 지점이다. 접는 처리가 없으면 워커에 나가 있던 파일과 큐에
+ * 남은 파일이 전부 실패로 적혀 *"준비하지 못한 파일 87개"* 같은 **가짜 오류
+ * 카드**가 뜬다. 준비는 고장난 것이 아니라 자리를 내준 것이고, 남은 파일은
+ * status가 "idle" 그대로라 현행 순차 경로가 이어받는다.
+ *
+ * 그래서 여기서는 warm.rs의 kill_all까지 흉내 낸다: 배치가 워커를 띄우면 이전
+ * 세대가 통째로 죽고 그 exit이 준비 큐에 닿는다. 접힌 큐라면 그 exit은 아무
+ * 데도 안 적히고, 안 접혔다면 "worker died"가 파일 수만큼 쌓인다.
+ */
+test("a batch export starting mid-preparation folds the prepare queue as a cancel", async () => {
+  engine.pathsExist.mockResolvedValue(PATHS.map(() => false));
+  // BatchPanel도 프리셋 목록을 따로 읽는다 — 없으면 "배치 실행"이 비활성이다.
+  vi.mocked(loadPresets).mockResolvedValueOnce([PRESET]);
+  let exitCb: ((e: { generation: number; id: number }) => void) | undefined;
+  engine.onWarmWorkerExit.mockImplementation(
+    async (cb: (e: { generation: number; id: number }) => void) => {
+      exitCb = cb;
+      return () => {};
+    }
+  );
+  // 준비는 4세대, 배치는 5세대. 세대가 갈려야 아래 exit이 준비 큐에만 닿는다.
+  engine.warmWorkersStart
+    .mockResolvedValueOnce({ generation: 4, ids: [0, 1] })
+    .mockResolvedValue({ generation: 5, ids: [0, 1] });
+
+  await renderWithPreset();
+  setWorkers(2);
+  await addFilesForPrepare();
+  // 세 장 중 둘이 워커에 나가 있고 한 장은 큐에 남아 있다 — 준비가 한 장도
+  // 끝내지 못한 상태에서 배치가 들어온다.
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
+
+  click(screen.getByRole("button", { name: "배치" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "전체 선택" })).toBeTruthy());
+  click(screen.getByRole("button", { name: "전체 선택" }));
+  await waitFor(() =>
+    expect((screen.getByRole("button", { name: "배치 실행" }) as HTMLButtonElement).disabled).toBe(false)
+  );
+  click(screen.getByRole("button", { name: "배치 실행" }));
+
+  // 준비가 접힌다: 진행 표시가 걷히고 워커를 놓는다.
+  await waitFor(() => expect(screen.queryByText(/파일 준비 중/)).toBeNull());
+  await waitFor(() => expect(engine.warmWorkersStop).toHaveBeenCalled());
+
+  // 그리고 kill_all이 준비 세대를 죽인다.
+  exitCb?.({ generation: 4, id: 0 });
+  exitCb?.({ generation: 4, id: 1 });
+  await new Promise((r) => setTimeout(r, 50));
+
+  // 가짜 오류 카드가 없다.
+  expect(screen.queryByText(/준비하지 못한 파일/)).toBeNull();
+  // 준비된 파일도 없다 — 한 장도 못 끝냈으므로 전부 현행 순차 경로의 몫이다.
+  expect(screen.queryAllByText("열림")).toHaveLength(0);
+});
+
+/**
  * 반대 방향: 파일 준비가 도는 중에 "전체 캐시"를 누르면, 스윕은 준비가 끝날
  * 때까지 기다렸다 스스로 이어서 시작한다(사람이 다시 누를 필요가 없다) — 설계
  * 6.2가 "선점"이 아니라 "대기 후 인계"를 고른 이유는 사용자가 누르고 자리를
