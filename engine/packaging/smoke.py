@@ -275,6 +275,38 @@ def main():
             if worker.poll() is None:
                 worker.kill()
 
+        # 뷰 워커 모드(--view-worker). 위와 **같은 종류의 사고**를 막는 검사다 —
+        # 동결 진입점이 이 플래그를 모르면 자식이 일반 RPC 엔진으로 뜨고, 그러면
+        # 판을 나눠 굽는 대신 아무것도 안 굽는다. 화면은 멀쩡하고(부모가 미스로
+        # 보고 순차로 굽는다) 속도만 조용히 원래대로 돌아가므로, 실제로 띄워
+        # 확인하지 않으면 영영 안 드러난다.
+        #
+        # 판정: 뷰 워커는 stdout에 아무것도 안 낸다. RPC 엔진이었다면 이 JSON을
+        # method 없는 요청으로 읽고 **에러 한 줄로 답한다** — 그 차이를 본다.
+        view_job = json.dumps({"path": str(fixture), "opts": {},
+                               "settingsKey": [], "views": []},
+                              ensure_ascii=False)
+        view_worker = subprocess.Popen(
+            [str(exe), "--view-worker"],
+            env={**os.environ, "PSD_ENGINE_TILE_CACHE_DIR": str(cache_dir),
+                 "TMPDIR": str(worker_tmp), "TEMP": str(worker_tmp),
+                 "TMP": str(worker_tmp)},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            vw_out, vw_err = view_worker.communicate(
+                view_job.encode("utf-8"), timeout=60)
+        except subprocess.TimeoutExpired:
+            view_worker.kill()
+            vw_out, vw_err = b"", b"(시간 초과)"
+        check(
+            "뷰 워커 모드 기동(응답 없이 종료)",
+            view_worker.returncode == 0 and not vw_out.strip(),
+            f"exit={view_worker.returncode} stdout={vw_out[:200]!r} — stdout에 무언가 "
+            f"있으면 동결 진입점이 --view-worker를 모르고 RPC 엔진으로 뜬 것이다 "
+            f"(stderr: {vw_err[:300]!r})",
+        )
+
         exit_code = engine.close()
         check("stdin 닫힘 → 정상 종료", exit_code == 0, f"exit={exit_code}")
         leftovers = [p.name for p in engine_tmp.iterdir()]
