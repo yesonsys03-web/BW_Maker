@@ -153,7 +153,7 @@ git commit -m "chore: measure the sequential file-preparation baseline"
 
 ```python
 def test_prepare_returns_the_tree_and_the_preset_match(fixture_psd):
-    preset = {"name": "T", "include": [], "exclude": [], "merge": "none"}
+    preset = _PREPARE_PRESET   # Task 2가 모듈 상단에 둔 상수를 그대로 쓴다
     events = _run([json.dumps(
         {"path": str(fixture_psd), "prepare": {"preset": preset, "maxSize": 256}}
     ) + "\n"])
@@ -172,7 +172,7 @@ def test_prepare_returns_the_tree_and_the_preset_match(fixture_psd):
 
 def test_prepare_reports_a_failure_without_killing_the_worker(tmp_path):
     missing = tmp_path / "gone.psd"
-    preset = {"name": "T", "include": [], "exclude": [], "merge": "none"}
+    preset = _PREPARE_PRESET   # Task 2가 모듈 상단에 둔 상수를 그대로 쓴다
     events = _run([json.dumps(
         {"path": str(missing), "prepare": {"preset": preset, "maxSize": 256}}
     ) + "\n"])
@@ -297,7 +297,7 @@ def test_prepare_bakes_the_preview_the_main_engine_would_render(fixture_psd, tmp
     from psd_engine.rpc import Engine, _preview_key_material
     from psd_engine.warmworker import _preset_preview_args
 
-    preset = {"name": "T", "include": [], "exclude": [], "merge": "none"}
+    preset = _PREPARE_PRESET   # Task 2가 모듈 상단에 둔 상수를 그대로 쓴다
     events = _run([json.dumps(
         {"path": str(fixture_psd), "prepare": {"preset": preset, "maxSize": 256}}
     ) + "\n"])
@@ -324,7 +324,7 @@ def test_prepare_flags_the_document_view_instead_of_baking(fixture_psd):
     이미지로 간다(즉시) — 그 경우 구울 것이 없고 플래그만 준다."""
     from psd_engine.warmworker import _pixel_leaf_ids
 
-    preset = {"name": "T", "include": [], "exclude": [], "merge": "none"}
+    preset = _PREPARE_PRESET   # Task 2가 모듈 상단에 둔 상수를 그대로 쓴다
     events = _run([json.dumps(
         {"path": str(fixture_psd), "prepare": {"preset": preset, "maxSize": 256}}
     ) + "\n"])
