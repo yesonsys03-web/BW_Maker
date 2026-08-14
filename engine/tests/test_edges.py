@@ -1360,3 +1360,131 @@ def test_drop_filled_gives_an_empty_alpha_when_every_layer_is_a_fill(monkeypatch
     kept, alpha = _drop_filled([_FakeLayer("fill", 0, 0, fill)], (0, 0, 60, 40), 64)
     assert kept == []
     assert alpha.shape == (40, 60) and not alpha.any()
+
+
+# ── 조각 루프를 조각 사각형으로 좁힌 것 ────────────────────────────────────
+#
+# `stroke_rgba`는 조각마다 **캔버스 전체** 비교를 두 번 했다(`labels == lab`,
+# `(grown == lab) & painted`). 납품 폴더 100장에서 조각 4,811개가 그렇게 도는 넓이가
+# 19 Gpx였고, 조각 자기 사각형(자라는 반지름만큼 여유 포함)만 돌면 0.1 Gpx = 0.42%다.
+#
+# 좁혀도 답이 같은 근거: `grown`은 `labels`를 (size//2 + BLUR_REACH)번 3x3으로
+# 넓힌 것이고 매번 이미 라벨이 붙은 자리는 안 덮으므로, 한 라벨이 자기 원래
+# 픽셀에서 체비셰프 거리로 그 반지름을 넘어 퍼질 수 없다.
+
+def _stroke_rgba_full_canvas(mask, labels, colour, width):
+    """좁히기 전 구현 그대로 — 자로 쓴다."""
+    from PIL import Image, ImageFilter
+    from psd_engine.edges import BLUR_REACH, STROKE_BLUR, _grow_diamond
+
+    thick = _grow_diamond(mask, width // 2)
+    alpha = np.array(Image.fromarray((thick * 255).astype(np.uint8))
+                     .filter(ImageFilter.GaussianBlur(STROKE_BLUR)))
+    out = np.zeros(mask.shape + (4,), np.uint8)
+    out[..., 3] = alpha
+    if not thick.any():
+        return out
+    size = width if width % 2 else width + 1
+    grown = labels
+    for _ in range(size // 2 + BLUR_REACH):
+        step = np.array(Image.fromarray(grown.astype(np.int32), mode="I")
+                        .filter(ImageFilter.MaxFilter(3)))
+        grown = np.where(grown == 0, step, grown)
+    painted = alpha > 0
+    for lab in range(1, labels.max() + 1):
+        src = labels == lab
+        if not src.any():
+            continue
+        rep = np.median(colour[src], axis=0).astype(np.uint8)
+        out[(grown == lab) & painted, :3] = rep
+    return out
+
+
+def _scattered_components():
+    """서로 떨어진 조각 여럿 — 가장자리에 붙은 것과 대각선으로 붙은 것을 포함한다."""
+    from psd_engine.edges import label_components
+
+    mask = np.zeros((64, 80), bool)
+    mask[0, 0:6] = True                 # 위 가장자리에 붙음
+    mask[10:20, 5] = True               # 세로 막대
+    mask[30, 40:60] = True              # 가로 막대
+    mask[40:50, 70] = True              # 오른쪽 가장자리 가까이
+    mask[63, 20:26] = True              # 아래 가장자리에 붙음
+    for i in range(8):                  # 대각선
+        mask[20 + i, 20 + i] = True
+    labels, count = label_components(mask)
+    rng = np.random.default_rng(7)
+    colour = np.zeros((64, 80, 3), np.uint8)
+    for lab in range(1, count + 1):
+        colour[labels == lab] = rng.integers(30, 230, 3)
+    return mask, labels, colour
+
+
+def test_stroke_rgba_narrowed_to_component_boxes_matches_the_full_canvas_answer():
+    from psd_engine.edges import stroke_rgba
+
+    mask, labels, colour = _scattered_components()
+    assert labels.max() >= 5, "픽스처에 조각이 몇 개 없다 — 테스트가 무의미하다"
+    for width in (1, 3, 5, 9, 15):
+        got = stroke_rgba(mask, labels, colour, width)
+        want = _stroke_rgba_full_canvas(mask, labels, colour, width)
+        assert np.array_equal(got, want), (
+            f"width={width}에서 좁힌 답이 캔버스 전체로 돈 답과 다르다 "
+            f"(다른 픽셀 {int((got != want).any(2).sum())}개)")
+
+
+def test_stroke_rgba_still_paints_the_fringe_that_reaches_outside_a_component_box():
+    # 좁히기가 틀리는 가장 그럴듯한 방법: 여유를 안 두고 조각의 bbox만 돌아서,
+    # 자라난 색이 bbox 밖에서 안 칠해지고 검은 후광이 남는 것.
+    from psd_engine.edges import label_components, stroke_rgba
+
+    mask = np.zeros((32, 32), bool)
+    mask[16, 16] = True                              # 점 하나 — bbox가 1x1이다
+    labels, _ = label_components(mask)
+    colour = np.zeros((32, 32, 3), np.uint8)
+    colour[mask] = [200, 100, 50]
+    out = stroke_rgba(mask, labels, colour, width=9)
+    visible = out[..., 3] > 0
+    unpainted = visible & (out[..., :3].max(2) == 0)
+    assert visible.sum() > 20, "픽스처에서 획이 거의 안 자랐다 — 테스트가 무의미하다"
+    assert not unpainted.any(), (
+        f"알파는 있는데 색이 안 칠해진 픽셀 {int(unpainted.sum())}개 — "
+        "조각 사각형에 여유가 모자라다")
+
+
+def test_stroke_rgba_does_not_scan_the_whole_canvas_once_per_component():
+    # 답이 같은 것만으로는 이 변경의 목적을 못 지킨다 — 누가 조각 루프를 캔버스
+    # 전체로 되돌려도 위 동등성 테스트는 그대로 통과한다. 그래서 비용을 직접 잰다.
+    #
+    # 실측(1200x1200, 조각 199개): 전체 캔버스 1,110ms → 좁힘 256ms = 4.3배.
+    # 2000x2000/299개에서는 7.5배. 기준을 2배로 두는 것은 부하로 흔들려도 안
+    # 깨지게 하려는 것이다 — 되돌아가면 4배 넘게 벌어지므로 그래도 잡힌다.
+    import time
+
+    from psd_engine.edges import label_components, stroke_rgba
+
+    h = w = 1200
+    rng = np.random.default_rng(3)
+    mask = np.zeros((h, w), bool)
+    for _ in range(200):
+        y = int(rng.integers(5, h - 5))
+        x = int(rng.integers(5, w - 25))
+        mask[y, x:x + 20] = True
+    labels, count = label_components(mask)
+    assert count > 150, f"픽스처에 조각이 {count}개뿐 — 루프 비용이 안 드러난다"
+    colour = np.zeros((h, w, 3), np.uint8)
+    for lab in range(1, count + 1):
+        colour[labels == lab] = rng.integers(30, 230, 3)
+
+    t = time.perf_counter()
+    narrowed = stroke_rgba(mask, labels, colour, 5)
+    t_narrow = time.perf_counter() - t
+
+    t = time.perf_counter()
+    full = _stroke_rgba_full_canvas(mask, labels, colour, 5)
+    t_full = time.perf_counter() - t
+
+    assert np.array_equal(narrowed, full), "자와 답이 갈렸다"
+    assert t_narrow * 2 < t_full, (
+        f"조각마다 캔버스 전체를 도는 비용이 그대로다 "
+        f"(좁힘 {t_narrow*1000:.0f}ms, 전체 {t_full*1000:.0f}ms)")
