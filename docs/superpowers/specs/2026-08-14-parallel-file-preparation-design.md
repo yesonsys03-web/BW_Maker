@@ -142,13 +142,24 @@ LRU가 도는 것이 지금과 같다.
 작업 프로세스는 세션을 만들 수 없다. 세션은 메인 엔진 `SessionStore`의 것이다. 그래서
 **"트리는 있는데 `sessionId`가 없는 파일"이라는 상태가 새로 생긴다.**
 
-다만 지금도 사실상 같은 상태다. `SessionStore(max_sessions=2)`이므로 100장을 순서대로
-열면 **98장의 `sessionId`는 이미 죽은 값**이고, 쓰는 순간 `unknown or evicted session`이
-난다. 프런트는 이미 `withEvictedSessionRetry`로 그때그때 다시 연다.
+**그런데 그 상태는 이미 존재한다.** 프로젝트 열기가 정확히 그것을 만든다 —
+`App.tsx:758`:
 
-바뀌는 것은 "죽은 값"이 "없는 값"이 되는 것뿐이지만, 코드에서는 다르다 —
-`f.sessionId !== undefined`를 보는 가드가 여럿 있다(예: `App.tsx:1258`, `1272`).
-**이 작업에서 손이 가장 많이 가는 부분이고, 전수로 훑어야 한다.**
+> *"복원 직후의 항목에는 `sessionId`가 없다 — `restoreProject`가 `{ path, status,
+> tree, mtime }`만 세우고 세션은 로드 큐가 나중에 채운다."*
+
+그리고 같은 주석이 **키 계산도 이미 세션 없이 하고 있다**고 적어 뒀다: *"previewRenderSpec
+자체는 sessionId를 쓰지 않으므로(가드는 previewPlanFor에만 있다) 여기서는 직접
+계산한다."* 프로젝트 저장이 그렇게 한다.
+
+세션이 이미 얼마나 덧없는지도 같은 방향이다. `SessionStore(max_sessions=2)`이므로 100장을
+순서대로 열면 **98장의 `sessionId`는 이미 죽은 값**이고, 쓰는 순간
+`unknown or evicted session`이 난다. 프런트는 `withEvictedSessionRetry`로 그때그때 다시
+연다.
+
+**그래서 이 작업은 새 상태를 발명하는 게 아니라, 이미 있는 상태(프로젝트 복원)를 두 번째
+경로에도 허용하는 것이다.** 위험은 처음 판단보다 낮다. 다만 `f.sessionId !== undefined`를
+보는 가드는 여전히 전수로 훑어야 한다(최소 `App.tsx:710`, `1258`, `1272`).
 
 **방향은 하나다: `sessionId` 없는 "준비된 파일"을 정식 상태로 인정한다.** 세션이
 필요한 호출부가 그 자리에서 연다 — `withEvictedSessionRetry`가 이미 하는 일과 같고,
