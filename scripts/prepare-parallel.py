@@ -41,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 MAX_SIZE = 1500
@@ -93,18 +94,20 @@ def main(folder, preset_path, n_workers):
     n_workers = max(1, int(n_workers))
 
     events = queue.Queue()
+    # 벽시계는 첫 워커를 띄우기 **직전**부터다(모듈 docstring의 약속) — spawn
+    # 자체도 사용자가 기다리는 구간이므로 아래 컴프리헨션보다 앞에 있어야 한다.
+    t_all = time.perf_counter()
     procs = {wid: _spawn_worker(wid, events) for wid in range(n_workers)}
     alive = set(procs)
     inflight = {}          # worker_id -> (path, start_perf)
     per_worker = [0] * n_workers
-    remaining = list(paths)  # FIFO queue, consumed from the front
+    remaining = deque(paths)  # FIFO queue, consumed from the front
     failed = 0
-    completed = 0
 
     def feed(wid):
         if not remaining:
             return False
-        path = remaining.pop(0)
+        path = remaining.popleft()
         job = {"path": str(path),
                "prepare": {"preset": preset, "maxSize": MAX_SIZE}}
         try:
@@ -112,12 +115,11 @@ def main(folder, preset_path, n_workers):
             procs[wid].stdin.flush()
         except (BrokenPipeError, OSError):
             # 워커가 이미 죽어 못 먹였다 — 되돌리고 exit 신호가 뒷정리하게 둔다.
-            remaining.insert(0, path)
+            remaining.appendleft(path)
             return False
         inflight[wid] = (path, time.perf_counter())
         return True
 
-    t_all = time.perf_counter()
     for wid in range(n_workers):
         feed(wid)
 
@@ -129,11 +131,13 @@ def main(folder, preset_path, n_workers):
             alive.discard(wid)
             orphan = inflight.pop(wid, None)
             try:
+                # 최대 2초를 시계 안에서 쓴다 — 죽은 워커를 거둬 좀비로 안 남기는
+                # 값이 있고, 죽음은 드문 사건이라 재구조화할 만큼은 아니다.
                 procs[wid].wait(timeout=2)
             except Exception:
                 pass
             if orphan is not None:
-                remaining.insert(0, orphan[0])
+                remaining.appendleft(orphan[0])
             for other in list(alive):
                 if other not in inflight and remaining:
                     feed(other)
@@ -164,7 +168,6 @@ def main(folder, preset_path, n_workers):
             message = ev.get("message") or ""
             row["error_type"] = message.split(":", 1)[0] if message else "unknown"
         per_worker[wid] += 1
-        completed += 1
         print(json.dumps(row, ensure_ascii=False), flush=True)
 
         if wid in alive:
