@@ -706,9 +706,24 @@ function AppShell() {
    */
   const batchRunningRef = useRef(false);
   const [batchRunning, setBatchRunning] = useState(false);
-  /** 잎 타일 워밍업이 끝난 세션 id. 같은 세션을 다시 데우지 않기 위한 것 —
-   * 축출로 세션이 새로 열리면 id가 바뀌므로 자연히 다시 돈다. */
-  const warmedSessionsRef = useRef<Set<number>>(new Set());
+  /**
+   * 잎 타일 워밍업이 끝난 파일(path → mtime). 같은 판을 다시 데우지 않기 위한 것.
+   *
+   * **세션 id가 아니라 path+mtime이다.** 세션 id로는 이제 셀 수 없다: 작업
+   * 프로세스가 준비한 파일은 트리는 있는데 세션이 없고(설계 5절), 체인이 데울
+   * 파일을 **고르는 시점**에는 아직 아무 id도 없다. 세션은 그 파일을 실제로
+   * 데우기 직전에야 생긴다.
+   *
+   * 키를 path+mtime으로 고른 이유는 sweptFilesRef와 같다. 워밍업의 산출물은
+   * 세션 RAM만이 아니라 **디스크 캐시**에도 쌓이고(엔진 _preview_tile이 디코드
+   * 부산물을 떨군다), 그 캐시의 키가 정확히 path+mtime이다 — 그래서 세션이
+   * 축출-재오픈으로 갈려도 그 파일이 데워져 있다는 사실은 남는다. 반대로 id로
+   * 적으면 축출 한 번에 기록이 통째로 사라져 같은 파일을 계속 다시 데운다.
+   * 포토샵에서 다시 저장하면 mtime이 갈려 자연히 다시 돈다.
+   *
+   * 그래도 **배치 뒤에는 비운다**(sweptFilesRef와 갈리는 지점, 아래 참고).
+   */
+  const warmedFilesRef = useRef<Map<string, number>>(new Map());
   /**
    * 백그라운드 스윕을 끝낸 파일(path → mtime). 세션 id가 아니라 path+mtime로
    * 기억하는 이유: 스윕의 산출물은 세션이 아니라 **디스크 캐시**이고, 디스크
@@ -716,7 +731,9 @@ function AppShell() {
    * 몇 번 축출-재오픈되어도 디스크에 쌓인 것은 그대로이므로, 같은 판을 이번
    * 실행에서 다시 열어 훑을 이유가 없다. 포토샵 재저장은 mtime이 갈려 자연히
    * 다시 돈다. 배치가 세션을 갈아치워도 이 기록은 지우지 않는다 —
-   * warmedSessionsRef와 달리 디스크는 배치에 밀려나지 않는다.
+   * warmedFilesRef와 달리 디스크는 배치에 밀려나지 않는다. 키가 같은 두 기록이
+   * 배치에서 갈리는 이유가 그것이다: 이쪽은 디스크에 무엇이 쌓였는지를,
+   * 저쪽은 이번 실행에서 무엇을 데웠는지(세션 RAM의 온기)를 적는다.
    */
   const sweptFilesRef = useRef<Map<string, number>>(new Map());
   const handleBatchRunningChange = useCallback((busy: boolean) => {
@@ -724,8 +741,9 @@ function AppShell() {
     setBatchRunning(busy);
     // 배치는 파일마다 세션을 열어 LRU(2칸)를 갈아치우므로, "데워둔 세션이 아직
     // 살아 있다"는 보장이 함께 사라진다. 완료 기록을 비워 배치 후 첫 유휴 때
-    // 다시 데운다 — 세션이 운 좋게 살아남았으면 엔진이 비용 없이 걸러 준다.
-    if (busy) warmedSessionsRef.current.clear();
+    // 다시 데운다 — 이미 디스크에 쌓인 타일은 엔진이 디코드 없이 읽으므로 다시
+    // 데우는 값이 싸고, 세션이 운 좋게 살아남았으면 아예 비용이 없다.
+    if (busy) warmedFilesRef.current.clear();
   }, []);
 
   /** 워밍업이 지금 도는 중인지. prefetchingRef와 같은 역할의 겹침 방지. */
@@ -1410,13 +1428,29 @@ function AppShell() {
     if (fullCacheOn && cacheWorkers > 1) return;
     const files = filesRef.current;
     const active = files.find((f) => f.path === activePathRef.current);
+    // 활성 파일만은 세션까지 요구한다 — 이 체인이 곧바로 데울 대상이고, 세션은
+    // 위 attach 효과가 보고 있는 파일에 반드시 붙여 준다. 붙기까지의 한 박자는
+    // 그냥 기다린다(그 dispatch가 이 효과를 다시 깨운다).
     if (!active || active.sessionId === undefined || !active.tree) return;
     const activeIndex = files.indexOf(active);
-    const next = files
-      .slice(activeIndex + 1)
-      .find((f) => f.status === "open" && f.sessionId !== undefined && f.tree !== undefined);
+    /**
+     * 준비가 끝난 파일 = 열림이고 트리가 있다. **세션은 묻지 않는다.**
+     *
+     * 이 둘은 예전에는 같은 뜻이었다 — 파일은 메인 엔진이 열어야 열림이 됐고,
+     * 열면 세션이 생겼다. 작업 프로세스가 준비한 파일은 트리·매칭·미리보기가
+     * 다 있는데 세션만 없다(설계 5절). 여기서 세션을 물으면 워커가 준비한 폴더는
+     * 아래 둘이 통째로 빈다: 다음 파일 미리 데우기(파일을 넘어간 직후의 ~2분을
+     * 없애려고 2026-08-13에 넣은 것)와 전체 캐시 스윕(빈 목록 → "다 됐다" 판정
+     * → 한 장 쓸고 완료 팝업, App.tsx의 아래 주석이 기록한 그 사고).
+     */
+    const prepared = (f: FileEntry) => f.status === "open" && f.tree !== undefined;
+    const next = files.slice(activeIndex + 1).find(prepared);
+    // 데울 것이 남았는가. 기록이 path+mtime이므로 세션이 아직 없어도 물을 수
+    // 있다(warmedFilesRef 주석). mtime을 모르는 파일은 기록할 키가 없어 건드리지
+    // 않는다 — 열림인데 mtime이 없는 경우는 엔진 응답이 그것을 빠뜨렸을 때뿐이다.
     const needsWarm = (f: FileEntry | undefined) =>
-      f !== undefined && f.sessionId !== undefined && !warmedSessionsRef.current.has(f.sessionId);
+      f !== undefined && f.mtime !== undefined &&
+      warmedFilesRef.current.get(f.path) !== f.mtime;
     // 스윕 대상: 활성·다음을 뺀 나머지 열린 파일, 목록 순서. 남은 파일들을 한
     // 바퀴 돌며 타일을 **디스크 캐시**에 쌓는다(엔진 _preview_tile이 디코드
     // 부산물을 떨군다). 세션은 LRU 2칸으로 회전하므로 RAM에 남는 것은 마지막
@@ -1428,8 +1462,7 @@ function AppShell() {
     // "전체 캐시" 버튼으로 켰을 때만 돈다(fullCacheOn). 활성·다음 워밍업은 금방
     // 끝나고 지금 작업에 직접 쓰이므로 계속 자동이다.
     const needsSweep = (f: FileEntry) =>
-      f.status === "open" && f.sessionId !== undefined && f.tree !== undefined &&
-      f !== active && f !== next &&
+      prepared(f) && f !== active && f !== next &&
       f.mtime !== undefined && sweptFilesRef.current.get(f.path) !== f.mtime;
     const sweep = fullCacheOn ? files.filter(needsSweep) : [];
     if (!needsWarm(active) && !needsWarm(next) && sweep.length === 0) {
@@ -1532,15 +1565,47 @@ function AppShell() {
       return { ok: summary !== null, reopened, sid };
     };
 
+    /**
+     * 이 파일을 데울 세션 id. 없으면 **데우기 직전에** 그 자리서 하나 연다 —
+     * warm_preview_tiles는 세션에 대고 부르는 요청이라 id 없이는 못 낸다.
+     *
+     * 여는 방식은 위 attach 효과와 같은 함수다(attachSessionEffect):
+     * openFileEffect를 쓰면 openSuccess가 ops를 다시 만들고 matchedIds를 지워
+     * 워커가 구운 미리보기를 미아로 만든다. 겹침 표시(attachingSessionRef)도
+     * 같이 쓴다 — 여는 곳이 둘이어도 같은 파일을 두 번 열지 않는다.
+     *
+     * **미리 열지 않는다.** 준비가 끝난 100장을 한꺼번에 열면 세션이 LRU 2칸이라
+     * 98장은 열자마자 죽는다 — 준비를 워커로 옮긴 이유가 정확히 그 낭비였다.
+     * 체인은 한 번에 한 파일만 데우므로 여는 것도 그 한 장뿐이고, 활성 파일은
+     * pin되어 있으니 그다음 파일이 남은 한 칸에 오른다(위 주석의 두 칸이 그것이다).
+     *
+     * 열기가 실패하면 null이고 체인은 그 자리서 접는다. 그 파일은
+     * attachSessionEffect가 status를 "error"로 세우므로 위 prepared에서 빠진다 —
+     * 같은 파일을 향한 무한 재시도가 되지 않는다.
+     */
+    const sessionFor = async (file: FileEntry): Promise<number | null> => {
+      if (file.sessionId !== undefined) return file.sessionId;
+      if (attachingSessionRef.current.has(file.path)) return null;
+      attachingSessionRef.current.add(file.path);
+      try {
+        return (await attachSessionEffect(dispatch, file.path))?.sessionId ?? null;
+      } finally {
+        attachingSessionRef.current.delete(file.path);
+      }
+    };
+
     /** 파일 하나를 통째로 데운다(활성 파일 말고는 나눌 이유가 없다). */
     const warmFile = async (file: FileEntry, alsoCancelled?: () => boolean): Promise<boolean> => {
       const leafIds = pixelLeafIds(file.tree!);
       if (leafIds.length === 0) {
-        warmedSessionsRef.current.add(file.sessionId!);
+        warmedFilesRef.current.set(file.path, file.mtime!);
         return true;
       }
-      const r = await warmIds(file, file.sessionId!, leafIds, alsoCancelled);
-      if (r.ok && !r.reopened) warmedSessionsRef.current.add(r.sid);
+      // 세션은 여기서 얻는다 — 데울 잎이 있는 파일만, 그 파일을 데우기 직전에.
+      const sid = await sessionFor(file);
+      if (sid === null) return false;
+      const r = await warmIds(file, sid, leafIds, alsoCancelled);
+      if (r.ok && !r.reopened) warmedFilesRef.current.set(file.path, file.mtime!);
       return r.ok;
     };
 
@@ -1569,8 +1634,11 @@ function AppShell() {
           const r = await warmIds(active, activeSid, activeSplit.rest);
           if (!r.ok) return true;
           // 두 단계를 다 마쳤을 때만 데운 것으로 적는다. 어느 쪽에서든 재오픈이
-          // 끼었으면 그전에 데운 타일은 새 세션에 없다.
-          if (!activeReopened && !r.reopened) warmedSessionsRef.current.add(r.sid);
+          // 끼었으면 그전에 데운 타일은 새 세션에 없다(디스크에는 있으므로 다시
+          // 도는 값은 싸다).
+          if (!activeReopened && !r.reopened) {
+            warmedFilesRef.current.set(active.path, active.mtime!);
+          }
         }
         if (next !== undefined && needsWarm(next) && !chainCancelled()) {
           if (!(await warmFile(next))) return true;
@@ -1590,8 +1658,8 @@ function AppShell() {
         // 났을 수 있다. 데움 완료 표시를 지워 체인이 한 번 더 데우게 한다 —
         // 방금 스윕이 디스크에 쌓아 둔 타일을 읽는 것이라 디코드 없이 싸게
         // 끝나고, d825139가 약속한 "다음 파일은 RAM에 핫"이 스윕 후에도 남는다.
-        if (swept && next?.sessionId !== undefined) {
-          warmedSessionsRef.current.delete(next.sessionId);
+        if (swept && next !== undefined) {
+          warmedFilesRef.current.delete(next.path);
         }
         return true;
       } catch {
@@ -1610,7 +1678,7 @@ function AppShell() {
     return () => {
       cancelled = true;
     };
-  }, [loading, prefetchProgress, batchRunning, prefetchHold, warmKick, state.activePath, state.files, refreshSession, fullCacheOn, cacheWorkers, handleFullCacheToggle]);
+  }, [loading, prefetchProgress, batchRunning, prefetchHold, warmKick, state.activePath, state.files, refreshSession, dispatch, fullCacheOn, cacheWorkers, handleFullCacheToggle]);
 
   /**
    * 파일 준비(작업 프로세스)가 이 파일을 가져가는가. 아래 준비 효과의 대상

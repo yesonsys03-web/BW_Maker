@@ -723,13 +723,21 @@ export async function openFileEffect(
  * 되는 것이 더 중요하다 — selectFile이 "error"를 다시 여는 상태로 취급하므로,
  * 그 파일을 한 번 더 누르면 정상 경로로 복구된다. 조용히 두면 세션이 영영 안
  * 붙고 썸네일·내보내기가 그 파일에서만 죽은 채로 남는다.
+ *
+ * 연 결과를 돌려주는 것은 **세션 id가 그 자리에서 필요한 호출부** 때문이다:
+ * 워밍업 체인은 warm_preview_tiles를 세션에 대고 부르므로, dispatch가 화면
+ * 상태에 반영되기를 기다릴 수 없다. 실패는 null이고, 그때는 위 openError로
+ * status가 "error"라 호출부의 선택에서 자연히 빠진다.
  */
-export async function attachSessionEffect(dispatch: Dispatch<AppAction>, path: string): Promise<void> {
+export async function attachSessionEffect(dispatch: Dispatch<AppAction>, path: string): Promise<OpenResult | null> {
   try {
-    dispatch({ type: "sessionRefreshed", path, result: await openPsd(path) });
+    const result = await openPsd(path);
+    dispatch({ type: "sessionRefreshed", path, result });
+    return result;
   } catch (e) {
     const error: EngineError = e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
     dispatch({ type: "openError", path, error });
+    return null;
   }
 }
 

@@ -1918,6 +1918,99 @@ test("a prepared file gets a session when the app actually needs it", async () =
 });
 
 /**
+ * 워커가 준비한 폴더에서도 **다음 파일 미리 데우기**가 살아 있어야 한다.
+ *
+ * 이 사슬은 2026-08-13에 아티스트 요청으로 들어왔다: 지정 작업은 목록 순서로
+ * 내려가므로, 두 번째 세션 칸에 다음 파일의 잎 타일을 미리 올려 두면 파일을
+ * 넘어간 직후의 준비 구간(~2분)이 사라진다. 준비가 굽는 것은 미리보기 PNG
+ * 한 장뿐이라 잎 타일은 여전히 콜드고, 그 2분을 덮는 것은 이 사슬뿐이다.
+ *
+ * 다음 파일을 "세션이 있는 파일"로 고르면 이 사슬이 **조용히 사라진다** —
+ * 워커가 준비한 파일에는 세션이 없어서 후보가 늘 0장이 된다. 그래서 여기서
+ * 재는 것은 "그다음 파일이 세션을 얻고 데워지는가"다.
+ */
+test("the warmup chain reaches the next prepared file, which has no session of its own", async () => {
+  const finish = captureWorkerLines(9, [0, 1]);
+
+  await renderWithPreset();
+  setWorkers(2);
+  await addFilesForPrepare();
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
+  const first = engine.warmWorkerSend.mock.calls[0] as [number, { path: string }];
+  const second = engine.warmWorkerSend.mock.calls[1] as [number, { path: string }];
+
+  // 실제 준비처럼 미리보기 PNG까지 들려 보낸다 — 그래야 미리보기 준비 큐가 할
+  // 일이 없어(캐시 적중) 이 체인만 남는다. 워커가 굽지 못한 판까지 재려는 것이
+  // 아니라, 여기서 보려는 것은 사슬의 다음 칸이다.
+  finish(first, preparedResult([1], "/tmp/a.png"));
+  finish(second, preparedResult([1], "/tmp/b.png"));
+  await waitFor(() => expect(screen.queryAllByText("열림").length).toBeGreaterThanOrEqual(2));
+
+  // 보고 있는 파일이 먼저 세션을 얻는다(위 테스트가 잠근 경로).
+  await waitFor(() => expect(opens).toHaveLength(1));
+  expect(opens[0].path).toBe(first[1].path);
+  await finishOpen(0, 11);
+
+  // 체인이 활성 파일을 데운 뒤 **그다음 파일**로 간다. 세션이 없으므로 데우기
+  // 직전에 그 자리서 하나 연다 — 그러지 않으면 warm_preview_tiles를 부를 수 없다.
+  await waitFor(() => expect(opens).toHaveLength(2));
+  expect(opens[1].path).toBe(second[1].path);
+  await finishOpen(1, 12);
+  await waitFor(() =>
+    expect(engine.warmPreviewTiles.mock.calls.map((c) => c[0])).toContain(12)
+  );
+
+  // 그리고 거기서 멈춘다. 준비된 것을 전부 열면 세션이 LRU 2칸이라 열자마자
+  // 죽고, 그 낭비를 없애려고 준비를 워커로 옮긴 것이다.
+  await new Promise((r) => setTimeout(r, 30));
+  expect(opens).toHaveLength(2);
+});
+
+/**
+ * 전체 캐시(워커 수 1 = 기본값)가 워커로 준비한 폴더를 실제로 쓸어야 한다.
+ *
+ * 스윕 대상을 "세션이 있는 파일"로 고르면 준비된 폴더에서는 목록이 통째로 비고,
+ * 그러면 이 체인은 **"다 됐다" 가지**로 떨어진다 — 한 장 남짓 쓸고 "전체 캐시
+ * 완료" 팝업이 뜬다. 실사용에서 이미 한 번 난 사고이고(App.tsx의 그 가지 주석:
+ * 스윕이 수상하게 일찍 끝나고 안 쓸린 파일의 큰 레이어가 토글에서 50초를 냈다),
+ * 이번에는 준비가 그 조건을 상시로 만든다.
+ */
+test("the full cache sweeps a worker-prepared folder instead of declaring it done", async () => {
+  const finish = captureWorkerLines(9, [0, 1, 2]);
+
+  await renderWithPreset();
+  setWorkers(2);
+  await addFilesForPrepare();
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(3));
+  for (const call of engine.warmWorkerSend.mock.calls.slice(0, 3)) {
+    // 미리보기 PNG까지 들려 보낸다(위 테스트의 같은 주석) — 미리보기 준비 큐를
+    // 비워 두어야 여기서 재는 것이 스윕 하나로 남는다.
+    finish(call as [number, { path: string }], preparedResult([1], "/tmp/p.png"));
+  }
+  await waitFor(() => expect(screen.queryAllByText("열림")).toHaveLength(3));
+
+  // 보고 있는 한 장만 세션을 얻은 상태 — 나머지 둘은 트리만 있다.
+  await waitFor(() => expect(opens).toHaveLength(1));
+  await finishOpen(0, 11);
+
+  // 워커 수를 기본값으로 되돌린다. 그러면 스윕은 워커 무리가 아니라 이 체인이
+  // 맡는다(위 게이트: fullCacheOn && cacheWorkers > 1이면 체인은 통째로 쉰다).
+  setWorkers(1);
+  click(screen.getByRole("button", { name: "전체 캐시" }));
+
+  // 다음 파일과 나머지 한 장이 차례로 세션을 얻고 데워진다. 팝업은 그 뒤다.
+  await waitFor(() => expect(opens).toHaveLength(2));
+  await finishOpen(1, 12);
+  await waitFor(() => expect(opens).toHaveLength(3));
+  await finishOpen(2, 13);
+
+  await waitFor(() => expect(screen.getByText("전체 캐시 완료")).toBeTruthy());
+  const sids = engine.warmPreviewTiles.mock.calls.map((c) => c[0]);
+  expect(sids).toContain(12);
+  expect(sids).toContain(13);
+});
+
+/**
  * 전체 캐시와 배치 내보내기가 도는 동안 준비가 작업 프로세스를 건드리면 안 된다.
  * 워커 스폰(warmWorkersStart)이 이전 세대를 **무조건 전부 죽이므로**
  * (src-tauri/src/warm.rs의 kill_all), 여기서 출발하면 몇 시간짜리 전체 캐시가
