@@ -446,3 +446,70 @@ export function runBatchExport(deps: BatchExportDeps): BatchExportHandle {
     stop: core.cancel,
   };
 }
+
+export interface PrepareProgress {
+  filesDone: number;
+  filesTotal: number;
+}
+
+export interface PrepareOutcome {
+  failed: Array<{ path: string; message: string }>;
+  /** 시작도 못 한 파일. 취소 후 현행 순차 경로가 이어받는다. */
+  remaining: string[];
+  /** 취소로 끝났는가. 전체 캐시·배치 내보내기가 작업 프로세스를 가져가면 true. */
+  stopped: boolean;
+}
+
+export interface PrepareDeps extends Omit<WorkerSweepDeps, "onProgress"> {
+  onProgress?: (p: PrepareProgress) => void;
+  /** 파일 하나가 준비될 때마다. 끝까지 기다렸다 한 번에 넘기면 100장짜리
+   * 폴더에서 화면이 오래 비어 있다 — 배치 내보내기의 onResult와 같은 약속. */
+  onResult: (path: string, result: Record<string, unknown>) => void;
+}
+
+/**
+ * 파일 준비 큐 — 폴더 로드 직후의 "여는 중"과 "미리보기 준비 중"을 작업
+ * 프로세스가 파일 단위로 나눠 처리한다. 워커가 파일을 한 번 열어 트리·프리셋
+ * 매칭·미리보기를 만들어 돌려준다(엔진 warmworker.prepare_file).
+ *
+ * 취소는 **즉시**다(drainOnCancel: false). 배치 내보내기와 달리 산출물이
+ * 디스크 캐시와 PNG 한 장뿐이라 도중에 죽여도 반쪽 파일이 안 남는다 —
+ * tilecache의 쓰기가 원자적이다. 남은 파일은 현행 순차 경로가 이어받는다.
+ */
+export function runPrepareQueue(deps: PrepareDeps) {
+  const failed: Array<{ path: string; message: string }> = [];
+  let done = 0;
+
+  const core = runWorkerQueue(deps as WorkerSweepDeps, {
+    drainOnCancel: false,
+    onOther: () => {},
+    onFile: (ev) => {
+      const path = ev.path!;
+      done += 1;
+      if (ev.ok && ev.result !== undefined) {
+        deps.onResult(path, ev.result as unknown as Record<string, unknown>);
+      } else {
+        failed.push({ path, message: ev.message ?? "unknown" });
+      }
+    },
+    // 취소로 죽은 워커의 남은 파일은 여기 오지 않는다(코어가 cancelled면
+    // onAbandoned를 안 부른다). 여기 오는 것은 배선 고장·전멸뿐이다.
+    onAbandoned: (path, message) => {
+      failed.push({ path, message });
+    },
+    report,
+  });
+
+  function report() {
+    deps.onProgress?.({ filesDone: done + failed.length, filesTotal: deps.paths.length });
+  }
+
+  return {
+    finished: core.finished.then((kind) => ({
+      failed,
+      remaining: core.remaining(),
+      stopped: kind === "cancelled",
+    })),
+    cancel: core.cancel,
+  };
+}

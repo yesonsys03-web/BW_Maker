@@ -1,5 +1,11 @@
 import { expect, test, vi } from "vitest";
-import { runWorkerSweep, type WorkerEvent, type WorkerSweepDeps } from "./warmWorkers";
+import {
+  runWorkerSweep,
+  runPrepareQueue,
+  type WorkerEvent,
+  type WorkerSweepDeps,
+  type PrepareDeps,
+} from "./warmWorkers";
 
 /** 가짜 워커판. 이벤트를 손으로 흘려보내며 디스패처 규칙을 검증한다. */
 function harness(paths: string[], workerCount: number, ids = [0, 1]) {
@@ -288,4 +294,82 @@ test("batch export wiring failures land in the report, loudly", async () => {
   expect(outcome.results.map((r) => r.ok)).toEqual([false, false]);
   const err = outcome.results[0].error as { message: string };
   expect(err.message).toContain("no such worker");
+});
+
+// ---- 파일 준비 큐 어댑터 ----
+
+/** 준비 큐용 가짜 워커판. harness와 같은 모양이되 결과를 모은다. */
+function prepareHarness(paths: string[], workerCount: number, ids = [0, 1]) {
+  let lineCb: ((e: { generation: number; id: number; line: string }) => void) | undefined;
+  let exitCb: ((e: { generation: number; id: number }) => void) | undefined;
+  const sends: Array<{ id: number; path: string }> = [];
+  const results: Array<{ path: string; result: Record<string, unknown> }> = [];
+  const deps: PrepareDeps = {
+    paths,
+    workerCount,
+    start: async () => ({ generation: 7, ids: ids.slice(0, workerCount) }),
+    send: async (id, path) => void sends.push({ id, path }),
+    stop: vi.fn(async () => {}),
+    onLine: async (cb) => { lineCb = cb; return () => (lineCb = undefined); },
+    onExit: async (cb) => { exitCb = cb; return () => (exitCb = undefined); },
+    onResult: (path, result) => void results.push({ path, result }),
+  };
+  // 준비 잡의 result는 배치 내보내기의 BatchWorkerResultEntry(ok 필수)와 다른
+  // 모양(Record<string, unknown>)이라 WorkerEvent를 그대로는 못 쓴다 — result
+  // 필드만 느슨하게 다시 잡는다.
+  const emit = (
+    id: number,
+    ev: Omit<WorkerEvent, "result"> & { result?: Record<string, unknown> },
+    generation = 7
+  ) => lineCb?.({ generation, id, line: JSON.stringify(ev) });
+  const exit = (id: number, generation = 7) => exitCb?.({ generation, id });
+  return { deps, sends, results, emit, exit };
+}
+
+test("prepare hands each result to the caller as soon as that file lands", async () => {
+  const h = prepareHarness(["a", "b", "c"], 2);
+  const run = runPrepareQueue(h.deps);
+  await tick();
+  expect(h.sends).toEqual([{ id: 0, path: "a" }, { id: 1, path: "b" }]);
+
+  // 파일 하나가 끝나면 끝까지 기다리지 않고 그 자리에서 넘긴다 — 100장짜리
+  // 폴더에서 다 끝나야 화면이 채워지면 아무것도 안 보이는 시간이 길어진다.
+  h.emit(1, { event: "file", path: "b", ok: true, result: { path: "b", mtime: 2 } });
+  await tick();
+  expect(h.results).toEqual([{ path: "b", result: { path: "b", mtime: 2 } }]);
+  // 그리고 빈 워커가 다음 파일을 당겨 간다.
+  expect(h.sends[2]).toEqual({ id: 1, path: "c" });
+
+  h.emit(0, { event: "file", path: "a", ok: true, result: { path: "a", mtime: 1 } });
+  h.emit(1, { event: "file", path: "c", ok: true, result: { path: "c", mtime: 3 } });
+  const out = await run.finished;
+  expect(out.failed).toEqual([]);
+  expect(out.stopped).toBe(false);
+});
+
+test("prepare records a failed file and keeps going", async () => {
+  const h = prepareHarness(["a", "b"], 2);
+  const run = runPrepareQueue(h.deps);
+  await tick();
+
+  h.emit(0, { event: "file", path: "a", ok: false, message: "boom" });
+  h.emit(1, { event: "file", path: "b", ok: true, result: { path: "b" } });
+  const out = await run.finished;
+  expect(out.failed).toEqual([{ path: "a", message: "boom" }]);
+  expect(h.results.map((r) => r.path)).toEqual(["b"]);
+});
+
+test("cancel is not a failure — the remaining files stay unclaimed", async () => {
+  const h = prepareHarness(["a", "b", "c"], 1, [0]);
+  const run = runPrepareQueue(h.deps);
+  await tick();
+
+  // 전체 캐시가 시작하면 작업 프로세스가 전부 죽는다. 그때 남은 파일을
+  // "실패"로 적으면 가짜 오류 카드("미리보기를 미리 만들지 못한 파일 N개")가
+  // 뜬다 — 취소는 실패가 아니다.
+  run.cancel();
+  const out = await run.finished;
+  expect(out.stopped).toBe(true);
+  expect(out.failed).toEqual([]);
+  expect(out.remaining).toEqual(["b", "c"]);
 });
