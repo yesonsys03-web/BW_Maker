@@ -14,6 +14,12 @@ import sys
 
 def main(argv=None):
     argv = sys.argv if argv is None else argv
+    if "--view-worker" in argv:
+        # 판 하나의 뷰를 나눠 굽는 자식(viewpool.py). 메인 엔진이 자기 자신을
+        # 이 플래그로 띄운다 — 위와 같은 이유로 분기는 여기 하나뿐이어야 한다.
+        from .viewpool import child_main
+
+        sys.exit(child_main())
     if "--warm-worker" in argv:
         # 전체 캐시 워커 모드(warmworker.py). 메인 엔진과 같은 동결 바이너리·
         # 같은 venv를 그대로 쓰려고 별도 실행 파일 대신 플래그로 가른다.

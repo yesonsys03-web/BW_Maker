@@ -20,7 +20,7 @@ from .matching import (auto_merge_operations, auto_merge_preview,
 from .ops import build_export_plan, finalize_names
 from .raster import export_raster as _export_raster
 from .raster import export_raster_split as _export_raster_split
-from . import tilecache
+from . import tilecache, viewpool
 from .render import (_perf, assign_line_color, render_document_preview,
                      render_preview, render_thumbnails, warm_preview_tiles)
 from .session import SessionStore
@@ -111,6 +111,21 @@ def _cached_plan_overlays(session, views, opts):
     # 고정된 세션 하나만 남았을 때 내리는 판단과 같다: 상한 초과가 스래싱보다 낫다.
     wanted = {(tuple(v["colourIds"]), tuple(v["lineIds"]), settings_key)
               for v in views}
+    # 아직 아무 데도 없는 뷰가 둘 이상이면 자식들에게 나눠 굽게 한다. 자식은
+    # 디스크 캐시에 넣고, 아래 루프가 평소처럼 거기서 읽는다 — 실패하면 그냥
+    # 미스로 남아 부모가 순차로 굽는다(viewpool 문서 참고).
+    missing = [v for v in views
+               if (tuple(v["colourIds"]), tuple(v["lineIds"]), settings_key)
+               not in cache
+               and tilecache.load_overlays(
+                   session, tilecache.overlay_key(
+                       v["colourIds"], v["lineIds"], settings_key)) is None]
+    if len(missing) > 1:
+        t0 = time.perf_counter()
+        n = viewpool.fill_overlay_cache(session, missing, opts, settings_key)
+        if n > 1:
+            _perf(perf="overlay_pool", n=n, views=len(missing),
+                  s=round(time.perf_counter() - t0, 4))
     plans = []
     for view in views:
         key = (tuple(view["colourIds"]), tuple(view["lineIds"]), settings_key)

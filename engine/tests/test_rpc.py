@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 
-from psd_engine import rpc
+from psd_engine import rpc, viewpool
 
 
 class EngineProc:
@@ -471,7 +471,14 @@ def test_render_preview_given_the_export_inclusion_list_agrees_with_export_on_wh
 
 
 def _spy_on_plan_overlays(monkeypatch):
-    """rpc.plan_overlays 호출을 가로채 넘어온 views를 기록한다. 실제 계산은 그대로 돈다."""
+    """rpc.plan_overlays 호출을 가로채 넘어온 views를 기록한다. 실제 계산은 그대로 돈다.
+
+    **부모가 순차로 굽는다고 못박는다.** 뷰가 둘 이상 미스면 출고 기본값은 그것을
+    자식 작업 프로세스로 나눠 굽고(viewpool), 그러면 부모의 plan_overlays는 아예
+    안 불린다 — 이 자로 재는 것은 캐시 판정이지 어디서 계산했느냐가 아니므로,
+    세는 쪽을 부모로 고정한다. 나누는 경로는 test_viewpool.py가 따로 잰다.
+    """
+    monkeypatch.setenv(viewpool.WORKERS_ENV, "1")
     calls = []
     real_plan_overlays = rpc.plan_overlays
 
