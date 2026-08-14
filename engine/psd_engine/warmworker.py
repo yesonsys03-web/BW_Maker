@@ -261,7 +261,7 @@ def export_file(path, job, out, store):
                                     "traceback": traceback.format_exc()}}}, out)
 
 
-def prepare_file(path, preset, max_size, out):
+def prepare_file(path, job, max_size, out):
     """
     파일 하나의 "준비" — 앱이 폴더를 로드하며 파일마다 하던 일 전부를 워커가
     한 번의 열기로 끝낸다. 지금까지는 메인 엔진이 "여는 중"(open_psd +
@@ -274,6 +274,10 @@ def prepare_file(path, preset, max_size, out):
     만든다(App.tsx의 restoreProject 주석).
 
     한 파일의 실패로 워커를 죽이지 않는다 — 워밍업·내보내기와 같은 규율이다.
+    job(=msg["prepare"])을 통째로 받아 "preset" 접근까지 이 try 안에서 하는
+    것이 그 규율의 일부다 — export_file(job["preset"]을 자기 try 안에서 읽는다)
+    과 같은 모양이어야, preset이 빠진 잘못된 요청도 이벤트 하나로 끝나고
+    main()의 for 루프가 죽지 않는다.
     """
     import traceback
     from pathlib import Path as _Path
@@ -281,6 +285,8 @@ def prepare_file(path, preset, max_size, out):
     from .matching import match_preset, preset_operations
 
     try:
+        preset = job["preset"]
+        max_size = job.get("maxSize", max_size)
         mtime = os.path.getmtime(path)
         psd = PSDImage.open(path)
         # 메인 엔진(session.open)과 같은 제한 — 거기서 못 여는 파일을 여기서
@@ -354,9 +360,10 @@ def main(stdin=None, stdout=None, max_size=1500):
             export_file(path, msg["export"], stdout, export_store)
             continue
         if "prepare" in msg:
-            # 실패 항목도 prepare_file이 만들어 보낸다 — 여기서 또 감싸지 않는다.
-            prepare_file(path, msg["prepare"]["preset"],
-                         msg["prepare"].get("maxSize", max_size), stdout)
+            # job 통째로 넘긴다 — export_file과 같은 모양. "preset"이 없는
+            # 잘못된 요청이라도 prepare_file의 try 안에서 읽히므로 여기서는
+            # KeyError가 날 수 없다(그러면 이 for 루프, 즉 워커 전체가 죽는다).
+            prepare_file(path, msg["prepare"], max_size, stdout)
             continue
         try:
             mtime = os.path.getmtime(path)

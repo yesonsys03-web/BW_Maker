@@ -343,3 +343,21 @@ def test_prepare_reports_a_failure_without_killing_the_worker(tmp_path):
     done = [e for e in events if e["event"] == "file"]
     assert len(done) == 1 and done[0]["ok"] is False
     assert "message" in done[0]
+
+
+def test_prepare_survives_a_malformed_job_and_continues(fixture_psd):
+    # "preset"이 빠진 prepare 잡. main()이 msg["prepare"]["preset"]을 자기
+    # try 밖에서 읽으면 여기서 KeyError가 나 for 루프(워커 전체)가 죽는다 —
+    # export_file과 같은 모양(job을 통째로 받아 자기 try 안에서 읽는다)이어야
+    # 이 잡도 그냥 실패 이벤트 하나로 끝나고 다음 줄을 계속 읽는다.
+    events = _run([
+        json.dumps({"path": str(fixture_psd), "prepare": {}}) + "\n",
+        json.dumps(
+            {"path": str(fixture_psd),
+             "prepare": {"preset": _PREPARE_PRESET, "maxSize": 256}}
+        ) + "\n",
+    ])
+    files = [e for e in events if e["event"] == "file"]
+    assert len(files) == 2
+    assert files[0]["ok"] is False and "message" in files[0]
+    assert files[1]["ok"] is True and "result" in files[1]
