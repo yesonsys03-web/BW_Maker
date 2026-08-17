@@ -298,7 +298,7 @@ def main():
                 view_job.encode("utf-8"), timeout=60)
         except subprocess.TimeoutExpired:
             view_worker.kill()
-            vw_out, vw_err = b"", b"(시간 초과)"
+            vw_out, vw_err = b"", "(시간 초과)".encode("utf-8")
         check(
             "뷰 워커 모드 기동(응답 없이 종료)",
             view_worker.returncode == 0 and not vw_out.strip(),
