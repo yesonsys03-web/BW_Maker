@@ -162,12 +162,19 @@ def fill_overlay_cache(session, views, opts, settings_key, count=None):
             p.kill()
             continue
         procs.append(p)
+    failed = 0
     for p in procs:
         try:
-            p.wait()
+            failed += bool(p.wait())
         except KeyboardInterrupt:      # pragma: no cover - 부모가 죽는 경우
             p.kill()
             raise
+    if failed:
+        # 결과는 안 바뀐다(부모가 그 뷰를 순차로 굽는다). 바뀌는 것은 속도뿐이고,
+        # 그래서 아무도 모르게 지나간다 — 남겨야 진단할 수 있다.
+        print(json.dumps({"event": "warn", "what": "view_worker_failed",
+                          "failed": failed, "of": len(procs)}),
+              file=sys.stderr, flush=True)
     return len(procs) or 1
 
 
@@ -179,7 +186,17 @@ def child_main(stdin=None):
     from .edges import EDGE_DEFAULTS, plan_overlays
     from .tree import build_tree
 
-    raw = (stdin or sys.stdin).read()
+    # stdin을 **UTF-8로 못박아** 읽는다. 부모는 잡을 UTF-8 바이트로 써 보내는데
+    # 파이썬은 stdin을 로케일 인코딩으로 읽으므로, 한글 윈도우(cp949)에서는
+    # 한글 경로가 깨져 `PSDImage.open`이 FileNotFoundError로 죽는다. 실제로 났다 —
+    # 0.3.2 빌드의 윈도우 러너에서 이 자식이 그렇게 죽었고, 자식이 죽어도 부모가
+    # 대신 구우므로 **그림은 멀쩡한 채 속도만 조용히 사라졌다.**
+    # 메인 엔진(rpc.main)과 전체 캐시 워커(warmworker.main)가 쓰는 것과 같은 장치다.
+    if stdin is None:
+        from .rpc import _as_utf8
+
+        stdin = _as_utf8(sys.stdin)
+    raw = stdin.read()
     if not raw.strip():
         return 0
     job = json.loads(raw)

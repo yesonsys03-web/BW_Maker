@@ -6,6 +6,7 @@
 """
 import io
 import json
+import os
 
 import numpy as np
 import pytest
@@ -243,3 +244,45 @@ def test_more_children_than_views_leaves_no_child_empty_handed():
     # worker_count가 뷰 수로 상한을 두는 이유가 그것이고, 여기서 그것을 확인한다.
     views = [{"colourIds": [0], "lineIds": [1]}, {"colourIds": [2], "lineIds": [3]}]
     assert all(viewpool.shares(views, 2))
+
+
+def test_a_child_reads_its_job_as_utf8_whatever_the_locale_says(tmp_path, monkeypatch):
+    # 자식은 stdin을 **로케일 인코딩으로 읽으면 안 된다.** 부모는 잡을 UTF-8
+    # 바이트로 써 보내므로, 한글 경로가 든 잡이 cp949로 읽히면 경로가 깨져
+    # `PSDImage.open`이 FileNotFoundError로 죽는다.
+    #
+    # **실제로 났다** — 0.3.2 빌드의 윈도우 러너에서 이 자식이 정확히 그렇게
+    # 죽었고, 자식이 죽어도 부모가 그 뷰를 대신 구우므로 **그림은 멀쩡한 채
+    # 속도만 조용히 사라졌다.** 결과 비교로는 영원히 안 잡히는 종류다.
+    #
+    # macOS는 기본이 UTF-8이라 그냥은 재현이 안 된다. `PYTHONIOENCODING`으로
+    # 자식의 로케일을 cp949로 강제해 윈도우와 같은 상황을 만든다.
+    import subprocess
+
+    from psd_engine.character import find_views
+    from psd_engine.edges import EDGE_DEFAULTS
+    from psd_engine.session import SessionStore
+
+    korean = tmp_path / "한글 폴더"
+    korean.mkdir()
+    p = _two_view_psd(korean)
+    opts = {**EDGE_DEFAULTS}
+    store = SessionStore()
+    s = store.get(store.open(str(p)))
+    views = find_views(s)
+    skey = rpc._edge_settings_key(opts)
+    job = json.dumps({"path": str(p), "opts": opts, "settingsKey": list(skey),
+                      "views": [{"colourIds": list(v["colourIds"]),
+                                 "lineIds": list(v["lineIds"])} for v in views]},
+                     ensure_ascii=False)
+
+    proc = subprocess.run(
+        viewpool._child_command(), input=job.encode("utf-8"),
+        capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "cp949",
+             "PSD_ENGINE_TILE_CACHE_DIR": os.environ["PSD_ENGINE_TILE_CACHE_DIR"]})
+    assert proc.returncode == 0, (
+        "로케일이 cp949일 때 자식이 죽었다 — stdin을 UTF-8로 안 읽는다\n"
+        + proc.stderr.decode("utf-8", "replace")[-800:])
+    got = _overlay_arrays(s, views, opts)
+    assert all(g is not None for g in got), "자식이 한글 경로에서 아무것도 못 구웠다"
