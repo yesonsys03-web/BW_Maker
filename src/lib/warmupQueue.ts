@@ -79,3 +79,56 @@ export async function drainWarmupQueue({
   }
   return { warmed, skipped };
 }
+
+export interface PooledWarmupResult {
+  warmed: number;
+  skipped: number;
+  /** 풀이 끝났는데 디스크에 안 놓인 잎 — 호출자가 디코드 경로로 마저 굽는다. */
+  leftover: number[];
+}
+
+export interface PooledWarmupOptions extends Omit<WarmupOptions, "request"> {
+  /** 디스크 전용 warm_preview_tiles 한 번(diskOnly=true). 절대 디코드하지 않는다. */
+  request: (ids: number[]) => Promise<WarmupRequestResult & { poolAlive: boolean }>;
+}
+
+/**
+ * 타일 자식들(warm_tiles_pooled)이 디스크에 굽는 동안, 놓인 타일을 RAM으로
+ * 쓸어담는 루프. 진행바는 이 루프가 움직인다.
+ *
+ * drainWarmupQueue와 계약이 하나 다르다: **진행이 없어도 풀이 살아 있으면
+ * 끝내지 않는다.** 디스크 전용 요청은 자식이 아직 안 구운 잎을 못 담는 것이
+ * 정상이므로, 무진행은 "자식이 굽는 중"이지 프로토콜 위반이 아니다 — 기다렸다가
+ * 다시 묻는다. 풀이 죽었는데 남은 잎이 있으면 그 목록을 leftover로 돌려주고,
+ * 호출자(App의 warmIds)가 기존 디코드 경로로 마저 굽는다 — 자식이 몇 개가
+ * 죽든 결과는 안 바뀌고 속도만 준다.
+ */
+export async function drainPooledWarmup({
+  leafIds,
+  request,
+  shouldPause,
+  cancelled,
+  wait = defaultWait,
+  onProgress,
+}: PooledWarmupOptions): Promise<PooledWarmupResult | null> {
+  let pending = leafIds;
+  let warmed = 0;
+  let skipped = 0;
+  while (pending.length > 0) {
+    if (cancelled()) return null;
+    if (shouldPause()) {
+      await wait(WARMUP_POLL_MS);
+      continue;
+    }
+    const res = await request(pending);
+    warmed += res.warmed.length;
+    skipped += res.skipped.length;
+    if (res.warmed.length + res.skipped.length > 0) onProgress?.(warmed, skipped);
+    const progressed = res.remaining.length < pending.length;
+    pending = res.remaining;
+    if (pending.length === 0) break;
+    if (!res.poolAlive) return { warmed, skipped, leftover: pending };
+    if (!progressed) await wait(WARMUP_POLL_MS);
+  }
+  return { warmed, skipped, leftover: [] };
+}

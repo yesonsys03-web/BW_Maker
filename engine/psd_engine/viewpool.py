@@ -47,6 +47,11 @@ PER_WORKER_BYTES = 5 << 30
 #: 앱·OS·파일 작업 프로세스에게 남겨 두는 몫. 이만큼을 뺀 나머지로만 나눈다.
 RESERVE_BYTES = 8 << 30
 
+#: 타일 자식 하나의 메모리 추정치. 뷰 자식(5 GB)보다 가볍다 — 타일 굽기는 잎을
+#: 한 장씩 디코드하고 세션 RAM 캐시가 예산 LRU로 눌러 준다. 판 20 실측(2026-08-18):
+#: 순차 한 벌이 최대 2.2 GB, 4개로 나눠도 자식당 평균 1.6 GB. 3 GB면 여유가 남는다.
+TILE_WORKER_BYTES = 3 << 30
+
 
 def available_bytes():
     """지금 쓸 수 있는 물리 메모리(바이트). 못 읽으면 None.
@@ -78,12 +83,18 @@ def available_bytes():
 WORKERS_ENV = "PSD_ENGINE_VIEW_WORKERS"
 
 
-def worker_count(n_views, available=None):
+def worker_count(n_views, available=None, per_worker=None):
     """이 판을 몇 개로 나눌지. 1이면 나누지 않는다는 뜻이다.
 
     뷰가 하나뿐이면 나눌 것이 없다 — 판 안의 병렬화는 뷰 단위이고 뷰 하나는 못 쪼갠다.
     메모리를 못 읽으면 나누지 않는다: 모르면서 4벌 여는 것보다 느린 쪽이 낫다.
+
+    per_worker는 자식 하나의 메모리 추정치다. 뷰 자식(기본, PER_WORKER_BYTES)과
+    타일 자식(TILE_WORKER_BYTES)이 실측으로 두 배쯤 다르다 — 무거운 쪽 하나로 재면
+    가벼운 일까지 필요 없이 적게 나눈다.
     """
+    if per_worker is None:
+        per_worker = PER_WORKER_BYTES
     if n_views < 2:
         return 1
     forced = os.environ.get(WORKERS_ENV, "").strip()
@@ -97,9 +108,9 @@ def worker_count(n_views, available=None):
     if available is None:
         return 1
     room = available - RESERVE_BYTES
-    if room < PER_WORKER_BYTES:
+    if room < per_worker:
         return 1
-    return max(1, min(MAX_WORKERS, n_views, room // PER_WORKER_BYTES))
+    return max(1, min(MAX_WORKERS, n_views, room // per_worker))
 
 
 def shares(views, n):
@@ -178,8 +189,78 @@ def fill_overlay_cache(session, views, opts, settings_key, count=None):
     return len(procs) or 1
 
 
+def start_tile_pool(session, layer_ids, max_size, count=None):
+    """드로잉 레이어 타일을 자식들에게 나눠 굽게 **시작만** 하고 바로 돌아온다.
+
+    뷰 굽기(fill_overlay_cache)와 두 가지가 다르고, 둘 다 이유가 있다:
+
+    - **기다리지 않는다.** 이 함수는 rpc 요청 처리 중에 불리는데 stdin이 직렬이라,
+      여기서 자식을 기다리면 그 뒤의 사용자 렌더가 전부 줄을 선다. 자식은 디스크
+      타일 캐시에 굽고, 프런트가 디스크 전용 모드(warm_preview_tiles diskOnly)로
+      폴링하며 쓸어담는다 — 진행바도 그 폴링이 움직인다.
+    - **메모리 추정치가 가볍다**(TILE_WORKER_BYTES). 실측 근거는 그 상수 주석에.
+
+    돌려주는 값은 띄운 자식 수다(1이면 나누지 않았다는 뜻 — 호출자는 기존 디코드
+    경로를 그대로 쓰면 된다). 띄운 자식들은 `session["_tile_pool"]`에 남고
+    `tile_pool_alive`가 그 생사를 답한다. 자식이 죽으면 그 몫의 타일이 디스크에
+    안 남을 뿐이고, 기존 디코드 경로가 미스를 보고 마저 굽는다 — 결과 불변.
+
+    이미 살아 있는 풀이 있으면 새로 띄우지 않는다(그 수를 돌려준다) — 프런트
+    효과가 재실행돼 두 번 불려도 자식이 겹으로 늘지 않는다.
+    """
+    if not tilecache.ENABLED or len(layer_ids) < 2:
+        return 1
+    path, mtime = session.get("path"), session.get("mtime")
+    if not path or mtime is None:
+        return 1
+    alive = [p for p in session.get("_tile_pool", []) if p.poll() is None]
+    if alive:
+        session["_tile_pool"] = alive
+        return max(2, len(alive))
+    n = worker_count(len(layer_ids), None, per_worker=TILE_WORKER_BYTES)         if count is None else count
+    if n < 2:
+        return 1
+
+    procs = []
+    for share in shares(list(layer_ids), n):
+        if not share:
+            continue
+        job = json.dumps({"path": str(path),
+                          "tiles": {"layerIds": [int(x) for x in share],
+                                    "maxSize": int(max_size)}})
+        try:
+            p = subprocess.Popen(_child_command(), stdin=subprocess.PIPE,
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL,
+                                 env={**os.environ, WORKERS_ENV: "1"})
+        except OSError:
+            break                      # 못 띄우면 기존 디코드 경로가 다 한다
+        try:
+            p.stdin.write(job.encode("utf-8"))
+            p.stdin.close()
+        except OSError:
+            p.kill()
+            continue
+        procs.append(p)
+    session["_tile_pool"] = procs
+    return len(procs) or 1
+
+
+def tile_pool_alive(session):
+    """타일 자식이 아직 굽는 중인가. 끝났거나 죽었으면 False — 프런트는 이 신호로
+    디스크 쓸어담기를 끝내고 남은 몫을 기존 디코드 경로로 넘긴다."""
+    alive = [p for p in session.get("_tile_pool", []) if p.poll() is None]
+    session["_tile_pool"] = alive
+    return bool(alive)
+
+
 def child_main(stdin=None):
-    """`--view-worker`로 뜬 자식. 받은 뷰만 구워 디스크 캐시에 넣고 끝난다."""
+    """`--view-worker`로 뜬 자식. 받은 몫만 구워 디스크 캐시에 넣고 끝난다.
+
+    잡은 두 종류다 — `views`(뷰 오버레이)와 `tiles`(드로잉 레이어 타일). 같은
+    자식·같은 플래그를 쓴다: 둘 다 "판을 열고, 몫을 굽고, 디스크 캐시에 넣는"
+    일이라 프로세스 모양이 같고, 진입점 분기(entry.main)를 하나 더 늘리지 않는다.
+    """
     from psd_tools import PSDImage
     from psd_tools.constants import ColorMode
 
@@ -207,12 +288,25 @@ def child_main(stdin=None):
     built = build_tree(psd)
     session = {"psd": psd, "path": str(path), "mtime": os.path.getmtime(path),
                "tree": built["tree"], "layers_by_id": built["layers_by_id"]}
-    opts = {**EDGE_DEFAULTS, **(job.get("opts") or {})}
-    skey = tuple(job["settingsKey"])
-    for view in job["views"]:
-        vkey = tilecache.overlay_key(view["colourIds"], view["lineIds"], skey)
-        if tilecache.load_overlays(session, vkey) is not None:
-            continue
-        made = plan_overlays(session, [view], opts)
-        tilecache.store_overlays(session, vkey, made)
+    tiles = job.get("tiles")
+    if tiles:
+        from . import render
+
+        scale = render.preview_scale(psd, tiles.get("maxSize", 1500))
+        for lid in tiles["layerIds"]:
+            layer = built["layers_by_id"].get(lid)
+            if layer is None or layer.is_group():
+                continue
+            # 디스크에 이미 있으면 _preview_tile이 디코드 없이 지나간다 —
+            # 부모의 라인 단계가 먼저 구운 잎을 자식이 다시 굽지 않는다.
+            render._preview_tile(session, lid, scale)
+    if job.get("views"):
+        opts = {**EDGE_DEFAULTS, **(job.get("opts") or {})}
+        skey = tuple(job["settingsKey"])
+        for view in job["views"]:
+            vkey = tilecache.overlay_key(view["colourIds"], view["lineIds"], skey)
+            if tilecache.load_overlays(session, vkey) is not None:
+                continue
+            made = plan_overlays(session, [view], opts)
+            tilecache.store_overlays(session, vkey, made)
     return 0

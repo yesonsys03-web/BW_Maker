@@ -202,12 +202,32 @@ export async function renderDocumentPreview(
 export async function warmPreviewTiles(
   sessionId: number,
   layerIds: number[],
-  maxSize: number
-): Promise<{ warmed: number[]; skipped: number[]; remaining: number[] }> {
-  return callEngine("warm_preview_tiles", { sessionId, layerIds, maxSize }) as Promise<{
+  maxSize: number,
+  diskOnly = false
+): Promise<{ warmed: number[]; skipped: number[]; remaining: number[]; poolAlive?: boolean }> {
+  return callEngine("warm_preview_tiles", {
+    sessionId, layerIds, maxSize, ...(diskOnly ? { diskOnly: true } : {}),
+  }) as Promise<{
     warmed: number[];
     skipped: number[];
     remaining: number[];
+    poolAlive?: boolean;
+  }>;
+}
+
+/**
+ * 드로잉 레이어 타일을 엔진의 작업 프로세스들에 나눠 굽게 시작한다(기다리지
+ * 않음). workers가 1이면 못 나눈 것 — 호출자는 기존 디코드 루프를 그대로 쓴다.
+ * 2 이상이면 warmPreviewTiles(diskOnly)로 폴링하며 쓸어담는다
+ * (lib/warmupQueue.ts drainPooledWarmup). 판 20 실측: 145장 216초 → 4개 80초.
+ */
+export async function warmTilesPooled(
+  sessionId: number,
+  layerIds: number[],
+  maxSize: number
+): Promise<{ workers: number }> {
+  return callEngine("warm_tiles_pooled", { sessionId, layerIds, maxSize }) as Promise<{
+    workers: number;
   }>;
 }
 

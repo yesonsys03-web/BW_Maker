@@ -285,7 +285,7 @@ def _emit(obj, out):
 class Engine:
     _ALLOWED_METHODS = {
         "open_psd", "psd_mtimes", "close_session", "pin_file", "render_thumbnails",
-        "render_preview", "render_document_preview", "warm_preview_tiles",
+        "render_preview", "render_document_preview", "warm_preview_tiles", "warm_tiles_pooled",
         "apply_preset", "auto_merge_operations", "auto_merge_preview",
         "export_psd", "batch_run",
     }
@@ -372,14 +372,35 @@ class Engine:
         out_dir = self._fresh_render_dir("thumbnails")
         return {"thumbs": render_thumbnails(s, layerIds, maxSize, out_dir)}
 
-    def warm_preview_tiles(self, sessionId, layerIds, maxSize=1500, budgetMs=2000):
+    def warm_preview_tiles(self, sessionId, layerIds, maxSize=1500, budgetMs=2000,
+                           diskOnly=False):
         """
         미리보기 타일 워밍업. 프런트가 유휴 시간에 잘게 나눠 부른다 —
         maxSize는 render_preview와 같아야 같은 배율의 타일이 데워진다
         (배율이 키에 들어간다, render._preview_tile 참고).
+
+        diskOnly는 타일 자식들(warm_tiles_pooled)이 굽는 동안의 폴링 모드다:
+        디코드 없이 디스크에 놓인 타일만 RAM으로 쓸어담고, 풀 생사(poolAlive)를
+        같이 알린다 — 자식이 다 끝났는데 remaining이 남았으면 그 몫은 프런트가
+        이 플래그를 끄고 다시 불러 기존 디코드 경로로 마저 굽는다.
         """
         s = self.store.get(sessionId)
-        return warm_preview_tiles(s, layerIds, maxSize, budgetMs / 1000.0)
+        out = warm_preview_tiles(s, layerIds, maxSize, budgetMs / 1000.0,
+                                 disk_only=diskOnly)
+        if diskOnly:
+            out["poolAlive"] = viewpool.tile_pool_alive(s)
+        return out
+
+    def warm_tiles_pooled(self, sessionId, layerIds, maxSize=1500):
+        """
+        드로잉 레이어 타일을 작업 프로세스들에 나눠 굽게 **시작**한다(기다리지
+        않음 — stdin이 직렬이라 여기서 기다리면 사용자 렌더가 줄을 선다).
+        판 20 실측: 145장 순차 216초 → 4개 80초(2.71배). 몇 개로 나눌지는 그때
+        남은 메모리가 정한다(viewpool.worker_count) — 폴더 준비·뷰 굽기가 도는
+        중이면 가용량이 낮아 저절로 줄고, 1이면 프런트가 기존 경로를 그대로 쓴다.
+        """
+        s = self.store.get(sessionId)
+        return {"workers": viewpool.start_tile_pool(s, layerIds, maxSize)}
 
     def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None,
                        lineColorIds=None, edgeLines=None, includedIds=None):

@@ -874,3 +874,50 @@ def test_export_plans_overlays_only_for_views_with_included_lines(tmp_path, monk
                       outputPath=str(tmp_path / "산출_LINE.psd"),
                       edgeLines={"enabled": True})
     assert planned == ["FRONT"], f"계획된 뷰: {planned}"
+
+
+def test_warm_tiles_pooled_children_bake_while_disk_only_sweeps(
+        fixture_psd, monkeypatch):
+    # "나머지 레이어 준비 중"의 병렬화 경로 전체를 배포되는 rpc 층으로 돈다:
+    # 풀 시작(기다리지 않음) → 프런트처럼 디스크 전용 폴링 → 전부 RAM까지.
+    # 부모는 이 동안 **한 장도 디코드하면 안 된다** — 디코드는 자식들 몫이다.
+    import time
+
+    from psd_engine import render as render_mod, viewpool
+
+    monkeypatch.setenv(viewpool.WORKERS_ENV, "2")
+    engine = rpc.Engine(out=io.StringIO())
+    sid, leaf_ids = _open_leaves(engine, fixture_psd)
+
+    def boom(layer):
+        raise AssertionError(f"디스크 전용 폴링 중에 부모가 디코드했다: {layer.name}")
+
+    monkeypatch.setattr(render_mod, "extract_rgba", boom)
+    res = engine.warm_tiles_pooled(sid, layerIds=leaf_ids)
+    assert res["workers"] == 2, f"자식 {res['workers']}개 — 나누지 않았다면 공허하다"
+
+    pending = list(leaf_ids)
+    warmed = []
+    deadline = time.time() + 60
+    while pending and time.time() < deadline:
+        out = engine.warm_preview_tiles(sid, layerIds=pending, diskOnly=True)
+        warmed += out["warmed"]
+        pending = out["remaining"]
+        assert "poolAlive" in out, "디스크 전용 응답에 풀 생사가 없다"
+        if pending and not out["poolAlive"]:
+            break                      # 자식이 다 끝났는데 남았다 = 실패 몫
+        if pending:
+            time.sleep(0.1)
+    assert pending == [], f"자식이 안 구운 드로잉 레이어: {pending}"
+    assert sorted(warmed) == sorted(leaf_ids)
+
+
+def test_warm_tiles_pooled_says_one_when_it_cannot_split(fixture_psd, monkeypatch):
+    # 1이면 프런트는 지금까지의 디코드 경로를 그대로 쓴다 — 못 나누는 상황
+    # (메모리 부족·캐시 꺼짐·드로잉 레이어 1장)이 조용히 느려질 뿐 깨지지 않는다.
+    from psd_engine import viewpool
+
+    monkeypatch.setenv(viewpool.WORKERS_ENV, "1")
+    engine = rpc.Engine(out=io.StringIO())
+    sid, leaf_ids = _open_leaves(engine, fixture_psd)
+    assert engine.warm_tiles_pooled(sid, layerIds=leaf_ids)["workers"] == 1

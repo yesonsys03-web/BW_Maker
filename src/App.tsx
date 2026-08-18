@@ -12,7 +12,7 @@ import { OpsHistory } from "./components/OpsHistory";
 import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { loadPngDataUrl, onWarmWorkerExit, onWarmWorkerLine, pinFile, psdMtimes, renderDocumentPreview, renderPreview, renderThumbnails, warmPreviewTiles, warmWorkerSend, warmWorkersStart, warmWorkersStop } from "./lib/engine";
+import { loadPngDataUrl, onWarmWorkerExit, onWarmWorkerLine, pinFile, psdMtimes, renderDocumentPreview, renderPreview, renderThumbnails, warmPreviewTiles, warmTilesPooled, warmWorkerSend, warmWorkersStart, warmWorkersStop } from "./lib/engine";
 import { runPrepareQueue, runWorkerSweep } from "./lib/warmWorkers";
 import { ProjectBar, type ProjectBusy } from "./components/ProjectBar";
 import {
@@ -47,7 +47,7 @@ import { undrawableReport } from "./lib/skippedReport";
 import { suggestLineLayers } from "./lib/suggestLines";
 import { missingFromChunk, nextThumbnailChunk } from "./lib/thumbnailQueue";
 import { withEvictedSessionRetry } from "./lib/sessionRetry";
-import { drainWarmupQueue } from "./lib/warmupQueue";
+import { drainPooledWarmup, drainWarmupQueue } from "./lib/warmupQueue";
 import type { EdgeLines, Preset } from "./lib/types";
 
 type BottomTab = "history" | "batch";
@@ -1564,29 +1564,83 @@ function AppShell() {
       file: FileEntry,
       sid0: number,
       leafIds: number[],
-      alsoCancelled?: () => boolean
+      alsoCancelled?: () => boolean,
+      pooled = false
     ): Promise<{ ok: boolean; reopened: boolean; sid: number }> => {
       if (leafIds.length === 0) return { ok: true, reopened: false, sid: sid0 };
       let sid = sid0;
       const base = doneLeaves;
       let reopened = false;
+      const onReopen = (r: { sessionId: number } & Parameters<typeof refreshSession>[1]) => {
+        reopened = true;
+        sid = r.sessionId;
+        refreshSession(file.path, r);
+      };
+      const shouldPause = () => canvasRenderingRef.current || prefetchingRef.current;
+      const cancelled = () => chainCancelled() || (alsoCancelled?.() ?? false);
+
+      // 나머지 단계는 엔진의 작업 프로세스들에 나눠 굽는다(판 20 실측: 145장
+      // 216초 → 4개 80초). 시작은 기다리지 않고, 자식이 디스크에 놓는 타일을
+      // 디스크 전용 폴링으로 쓸어담는다 — 진행바는 그 폴링이 움직인다. 못
+      // 나누면(메모리 부족·캐시 꺼짐 = workers 1) 아래 디코드 루프 그대로다.
+      // 자식이 죽어 못 구운 몫(leftover)도 아래 루프가 마저 굽는다 — 몇 개가
+      // 죽든 결과는 같고 속도만 준다.
+      let pending = leafIds;
+      let pooledDone = 0;
+      if (pooled && pending.length > 1) {
+        let workers = 1;
+        try {
+          workers = (
+            await withEvictedSessionRetry(
+              file.path, sid,
+              (s) => warmTilesPooled(s, pending, PREVIEW_MAX_SIZE),
+              onReopen
+            )
+          ).workers;
+        } catch {
+          workers = 1; // 시작 실패 = 안 나눈 것과 같다 — 디코드 루프가 다 한다
+        }
+        if (workers > 1) {
+          const res = await drainPooledWarmup({
+            leafIds: pending,
+            request: (ids) =>
+              withEvictedSessionRetry(
+                file.path, sid,
+                (s) => warmPreviewTiles(s, ids, PREVIEW_MAX_SIZE, true),
+                onReopen
+              ).then((r) => ({ ...r, poolAlive: r.poolAlive ?? false })),
+            shouldPause,
+            cancelled,
+            onProgress: (w, s) => {
+              doneLeaves = base + w + s;
+              setWarmProgress({ done: doneLeaves, total: phaseTotal, phase });
+            },
+          });
+          if (res === null) return { ok: false, reopened, sid };
+          pooledDone = res.warmed + res.skipped;
+          pending = res.leftover;
+          if (pending.length === 0) {
+            doneLeaves = base + leafIds.length;
+            setWarmProgress({ done: doneLeaves, total: phaseTotal, phase });
+            return { ok: true, reopened, sid };
+          }
+        }
+      }
+
+      const decodeBase = base + pooledDone;
       const summary = await drainWarmupQueue({
-        leafIds,
+        leafIds: pending,
         request: (ids) =>
           withEvictedSessionRetry(
             file.path,
             sid,
             (s) => warmPreviewTiles(s, ids, PREVIEW_MAX_SIZE),
-            (r) => {
-              reopened = true;
-              sid = r.sessionId;
-              refreshSession(file.path, r);
-            }
+            onReopen
           ),
-        shouldPause: () => canvasRenderingRef.current || prefetchingRef.current,
-        cancelled: () => chainCancelled() || (alsoCancelled?.() ?? false),
+        shouldPause,
+        cancelled,
         onProgress: (w, s) => {
-          doneLeaves = base + w + s;
+          doneLeaves = decodeBase + w + s;
           setWarmProgress({ done: doneLeaves, total: phaseTotal, phase });
         },
       });
@@ -1636,7 +1690,7 @@ function AppShell() {
       // 세션은 여기서 얻는다 — 데울 잎이 있는 파일만, 그 파일을 데우기 직전에.
       const sid = await sessionFor(file);
       if (sid === null) return false;
-      const r = await warmIds(file, sid, leafIds, alsoCancelled);
+      const r = await warmIds(file, sid, leafIds, alsoCancelled, true);
       if (r.ok && !r.reopened) warmedFilesRef.current.set(file.path, file.mtime!);
       return r.ok;
     };
@@ -1663,7 +1717,7 @@ function AppShell() {
           setWarmProgress({ done: 0, total: restTotal, phase });
         }
         if (needsWarm(active)) {
-          const r = await warmIds(active, activeSid, activeSplit.rest);
+          const r = await warmIds(active, activeSid, activeSplit.rest, undefined, true);
           if (!r.ok) return true;
           // 두 단계를 다 마쳤을 때만 데운 것으로 적는다. 어느 쪽에서든 재오픈이
           // 끼었으면 그전에 데운 타일은 새 세션에 없다(디스크에는 있으므로 다시

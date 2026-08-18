@@ -286,3 +286,116 @@ def test_a_child_reads_its_job_as_utf8_whatever_the_locale_says(tmp_path, monkey
         + proc.stderr.decode("utf-8", "replace")[-800:])
     got = _overlay_arrays(s, views, opts)
     assert all(g is not None for g in got), "자식이 한글 경로에서 아무것도 못 구웠다"
+
+
+# ── 드로잉 레이어 타일도 나눠 굽는다 ──────────────────────────────────────
+#
+# "나머지 레이어 준비 중"의 정체는 드로잉 레이어를 메인 엔진 하나가 한 장씩
+# 디코드하는 것이다. 판 20 실측(2026-08-18): 145장 순차 216초, 작업 프로세스
+# 4개로 80초(2.71배), 자식 RSS 합 6.4 GB. 뷰 굽기와 같은 패턴으로 나눈다 —
+# 결과는 같은 디스크 타일 캐시, 실패한 자식의 몫은 기존 디코드 경로가 마저 굽는다.
+#
+# 뷰 굽기와 다른 점 하나: **시작이 기다리지 않는다.** 메인 엔진 stdin이 직렬이라
+# 80초짜리 호출로 막으면 그 뒤의 사용자 렌더가 전부 줄을 선다. 그래서 부모는
+# 자식을 띄우고 바로 돌아오고, 프런트가 디스크 전용 모드로 쓸어담는다.
+
+def _leaf_ids(session):
+    return [lid for lid, l in session["layers_by_id"].items() if not l.is_group()]
+
+
+def test_the_tile_pool_bakes_layer_tiles_into_the_disk_cache(tmp_path, monkeypatch):
+    # 자식이 진짜로 굽는가 — 뷰 테스트와 같은 이유로 진짜 프로세스를 띄운다.
+    from psd_engine import render
+    from psd_engine.session import SessionStore
+
+    p = _two_view_psd(tmp_path)
+    monkeypatch.setenv(viewpool.WORKERS_ENV, "2")
+    store = SessionStore()
+    s = store.get(store.open(str(p)))
+    leaves = _leaf_ids(s)
+    assert len(leaves) >= 2, "픽스처에 드로잉 레이어가 둘 미만 — 나눌 것이 없다"
+
+    n = viewpool.start_tile_pool(s, leaves, 256)
+    assert n == 2, f"자식을 {n}개 띄웠다 — 나누지 않았다면 이 테스트는 공허하다"
+    for proc in s["_tile_pool"]:
+        assert proc.wait(timeout=60) == 0, "타일 자식이 실패로 끝났다"
+    scale = render.preview_scale(s["psd"], 256)
+    missing = [lid for lid in leaves if not tilecache.has(s, lid, scale)]
+    assert not missing, f"자식이 안 구운 드로잉 레이어: {missing}"
+
+
+def test_start_tile_pool_returns_before_the_children_finish(tmp_path, monkeypatch):
+    # 메인 엔진 stdin이 직렬이다 — 여기서 기다리면 그 뒤의 사용자 렌더가 전부
+    # 줄을 선다. 자식이 5초를 자도 시작은 즉시 돌아와야 한다.
+    import time
+
+    monkeypatch.setenv(viewpool.WORKERS_ENV, "2")
+    monkeypatch.setattr(viewpool, "_child_command", lambda: ["/bin/sleep", "5"])
+    session = {"path": str(tmp_path / "x.psd"), "mtime": 1.0}
+    t = time.perf_counter()
+    n = viewpool.start_tile_pool(
+        session, [1, 2, 3, 4], 256)
+    dt = time.perf_counter() - t
+    try:
+        assert n == 2
+        assert dt < 2.0, f"시작이 {dt:.1f}초를 기다렸다 — 자식이 끝나기를 기다리고 있다"
+        assert viewpool.tile_pool_alive(session), "자식이 사는 동안 alive여야 한다"
+    finally:
+        for proc in session.get("_tile_pool", []):
+            proc.kill()
+
+
+def test_tile_pool_alive_goes_false_when_the_children_exit(tmp_path, monkeypatch):
+    # 프런트는 이 신호로 "디스크만 쓸어담기"를 끝내고 남은 몫을 디코드 경로로
+    # 넘긴다 — 이게 거짓말하면 자식이 죽었을 때 폴링이 영원히 돈다.
+    monkeypatch.setenv(viewpool.WORKERS_ENV, "2")
+    monkeypatch.setattr(viewpool, "_child_command", lambda: ["/bin/cat"])
+    session = {"path": str(tmp_path / "x.psd"), "mtime": 1.0}
+    n = viewpool.start_tile_pool(session, [1, 2], 256)
+    assert n == 2
+    for proc in session["_tile_pool"]:
+        proc.wait(timeout=10)
+    assert not viewpool.tile_pool_alive(session), "자식이 다 끝났는데 alive다"
+
+
+def test_the_tile_pool_stays_out_when_the_disk_cache_is_off(tmp_path, monkeypatch):
+    # 결과 통로가 디스크 캐시다 — 꺼져 있으면 자식이 구워도 돌려줄 길이 없다.
+    monkeypatch.setattr(tilecache, "ENABLED", False)
+    monkeypatch.setenv(viewpool.WORKERS_ENV, "4")
+    spawned = []
+    monkeypatch.setattr(viewpool, "_child_command",
+                        lambda: spawned.append(1) or ["/bin/true"])
+    session = {"path": str(tmp_path / "x.psd"), "mtime": 1.0}
+    n = viewpool.start_tile_pool(session, [1, 2, 3], 256)
+    assert n == 1 and not spawned, "캐시가 꺼져 있는데 자식을 띄웠다"
+
+
+def test_worker_count_takes_a_lighter_estimate_for_tile_children(monkeypatch):
+    # 타일 자식은 뷰 자식보다 가볍다(실측 최대 2.2 GB 대 4.65 GB). 뷰 기준
+    # 5 GB로 재면 32GB 기계에서 2개로 깎인다 — 같은 메모리로 4개가 안전한데도.
+    monkeypatch.delenv(viewpool.WORKERS_ENV, raising=False)
+    avail = viewpool.RESERVE_BYTES + 4 * viewpool.TILE_WORKER_BYTES
+    assert viewpool.worker_count(
+        8, available=avail, per_worker=viewpool.TILE_WORKER_BYTES) == 4
+    # 같은 메모리를 뷰 기준으로 재면 더 적게 나온다 — 추정치가 실제로 쓰인다는 뜻
+    assert viewpool.worker_count(8, available=avail) < 4
+
+
+def test_the_child_bakes_only_the_tiles_it_was_given(tmp_path):
+    # 자식은 자기 몫만 — 겹치면 결과는 맞고 시간만 N배 낭비라 결과 비교로는
+    # 못 잡는다(뷰와 같은 이유).
+    from psd_engine import render
+    from psd_engine.session import SessionStore
+
+    p = _two_view_psd(tmp_path)
+    store = SessionStore()
+    s = store.get(store.open(str(p)))
+    leaves = _leaf_ids(s)
+    mine, theirs = leaves[::2], leaves[1::2]
+    job = json.dumps({"path": str(p),
+                      "tiles": {"layerIds": mine, "maxSize": 256}})
+    viewpool.child_main(stdin=io.StringIO(job))
+    scale = render.preview_scale(s["psd"], 256)
+    assert all(tilecache.has(s, lid, scale) for lid in mine), "자기 몫을 안 구웠다"
+    assert not any(tilecache.has(s, lid, scale) for lid in theirs), \
+        "받지도 않은 드로잉 레이어를 구웠다"

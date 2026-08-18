@@ -1126,7 +1126,7 @@ def _warm_cost(layer):
     return mpx / WARM_RATE_MPX_S[kind]
 
 
-def warm_preview_tiles(session, layer_ids, max_size, budget_s):
+def warm_preview_tiles(session, layer_ids, max_size, budget_s, disk_only=False):
     """
     토글이 켤 수 있는 잎들의 미리보기 타일을 유휴 시간에 미리 디코드한다.
 
@@ -1140,10 +1140,16 @@ def warm_preview_tiles(session, layer_ids, max_size, budget_s):
     stdin이 직렬이라 긴 워밍업 뒤에 사용자 렌더가 줄을 서기 때문이다. 예산과
     무관하게 호출당 최소 한 장은 데운다(예산 0으로 불러도 전진해야 끝이 난다).
     그룹·모르는 id는 조용히 버린다 — remaining에 안 남으므로 다시 오지 않는다.
+
+    ``disk_only``는 타일 자식들(viewpool.start_tile_pool)이 굽는 동안 프런트가
+    폴링하는 모드다: **절대 디코드하지 않고**, 디스크에 이미 있는 잎만 RAM으로
+    쓸어담는다. 콜드 잎은 remaining으로 돌아가고, 자식이 그 잎을 디스크에 놓으면
+    다음 폴링이 담는다. 여기서 디코드가 새면 부모가 자식과 같은 잎을 겹으로
+    굽는다 — 나눈 뜻이 사라진다.
     """
     scale = preview_scale(session["psd"], max_size)
     cache = session.setdefault("preview_tiles", OrderedDict())
-    warmed, skipped, todo = [], [], []
+    warmed, skipped, todo, remaining_cold = [], [], [], []
     for lid in layer_ids:
         layer = session["layers_by_id"].get(lid)
         if layer is None or layer.is_group():
@@ -1159,6 +1165,10 @@ def warm_preview_tiles(session, layer_ids, max_size, budget_s):
         if layer.width <= 0 or layer.height <= 0 \
                 or tilecache.has(session, lid, scale):
             cost = 0.0
+        elif disk_only:
+            # 콜드 잎은 자식들 몫이다 — 건드리지 않고 다음 폴링을 기다린다.
+            remaining_cold.append(lid)
+            continue
         else:
             cost = _warm_cost(layer)
         todo.append((cost, lid))
@@ -1179,6 +1189,7 @@ def warm_preview_tiles(session, layer_ids, max_size, budget_s):
         did_work = True
     # 예산에 걸려 남은 것 중 상한 초과분은 다음 호출에서도 skipped가 될 뿐이니
     # 그대로 remaining에 둔다 — 분류를 여기서 미리 하면 코드만 두 벌이 된다.
+    remaining.extend(remaining_cold)
     _perf(perf="warm", warmed=len(warmed), skipped=len(skipped),
           remaining=len(remaining), s=round(time.perf_counter() - t0, 4))
     return {"warmed": warmed, "skipped": skipped, "remaining": remaining}

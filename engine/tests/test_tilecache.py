@@ -233,3 +233,33 @@ def test_preview_cache_disabled_is_a_clean_miss(fixture_psd, tmp_path, monkeypat
     key = tilecache.preview_key([256, [1], None, None, "off"])
     tilecache.store_preview(s, key, _png(tmp_path, "src.png"))
     assert tilecache.load_preview(s, key, str(tmp_path / "o.png")) is None
+
+
+def test_warm_disk_only_never_decodes_a_cold_leaf(fixture_psd, monkeypatch):
+    # 디스크 전용 모드는 타일 자식들이 굽는 동안 프런트가 폴링하는 길이다.
+    # 여기서 디코드가 새면 부모가 자식과 같은 잎을 겹으로 굽는다 — 나눈 뜻이
+    # 사라진다. 콜드 잎은 건드리지 말고 remaining으로 돌려줘야 한다.
+    def boom(layer):
+        raise AssertionError(f"디스크 전용인데 디코드했다: {layer.name}")
+
+    monkeypatch.setattr(render_mod, "extract_rgba", boom)
+    cold = _session(fixture_psd)
+    res = warm_preview_tiles(cold, [2, 4, 5], max_size=256, budget_s=10.0,
+                             disk_only=True)
+    assert res["warmed"] == [] and sorted(res["remaining"]) == [2, 4, 5]
+
+
+def test_warm_disk_only_sweeps_what_is_already_on_disk(fixture_psd, monkeypatch):
+    # 자식이 구워 둔 잎은 디스크→RAM으로 쓸어담아야 한다 — 이게 진행바를
+    # 움직이는 값이고, 그 뒤 토글이 핫인 이유다.
+    hot = _session(fixture_psd)
+    render_preview(hot, [2, 4, 5], max_size=256, out_dir=fixture_psd.parent)
+
+    def boom(layer):
+        raise AssertionError(f"디스크에 있는데 디코드했다: {layer.name}")
+
+    monkeypatch.setattr(render_mod, "extract_rgba", boom)
+    fresh = _session(fixture_psd)
+    res = warm_preview_tiles(fresh, [2, 4, 5], max_size=256, budget_s=10.0,
+                             disk_only=True)
+    assert sorted(res["warmed"]) == [2, 4, 5] and res["remaining"] == []

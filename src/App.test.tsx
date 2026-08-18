@@ -29,6 +29,7 @@ const engine = vi.hoisted(() => ({
   callEngine: vi.fn(),
   psdMtimes: vi.fn(),
   warmPreviewTiles: vi.fn(),
+  warmTilesPooled: vi.fn(),
   warmWorkersStart: vi.fn(),
   warmWorkerSend: vi.fn(),
   warmWorkersStop: vi.fn(),
@@ -196,6 +197,9 @@ beforeEach(() => {
   // 기본은 "전부 한 번에 데워짐" — 워밍업 큐가 한 번 부르고 끝난다. 워밍업의
   // 반복·양보 규약 자체는 lib/warmupQueue.test.ts가 잠근다.
   engine.warmPreviewTiles.mockResolvedValue({ warmed: [], skipped: [], remaining: [] });
+  // 기본은 "못 나눔"(workers 1) — 나머지 단계가 지금까지의 디코드 경로를 그대로
+  // 탄다. 나눠 굽는 경로는 자기 테스트가 2 이상으로 올려서 밟는다.
+  engine.warmTilesPooled.mockResolvedValue({ workers: 1 });
   // 워커 모드 기본 대역. 앱의 기본 작업 프로세스 수가 2라 이 대역은 **기본으로**
   // 밟힌다 — 프리셋이 걸린 채 파일이 들어오는 테스트는 전부 여기로 온다. 워커 수를
   // 1로 못박은 테스트(seedWorkerCount 참고)만 이 자리를 안 지난다.
@@ -2569,4 +2573,63 @@ test("bulk-apply turns a needs-line file into exportable entries", async () => {
   await waitFor(() => expect(screen.getByText("3장")).toBeTruthy());
   expect(screen.queryByText("라인필요")).toBeNull();
   expect(screen.queryByText("후보 일괄 지정")).toBeNull();
+});
+
+/**
+ * 나머지 단계의 나눠 굽기 배선. 루프 자체의 규약(무진행 대기·풀 사망 시
+ * leftover)은 lib/warmupQueue.test.ts가 잠그므로, 여기서는 App이 ① 풀을
+ * 시작하고 ② 디스크 전용 폴링으로 갈아타며 ③ 죽은 자식의 몫을 디코드
+ * 경로로 되돌리는 배선만 본다.
+ */
+test("the rest phase bakes on worker processes and sweeps disk-only", async () => {
+  engine.warmTilesPooled.mockResolvedValue({ workers: 2 });
+  engine.warmPreviewTiles.mockImplementation(
+    async (_sid: number, ids: number[], _size: number, diskOnly?: boolean) => {
+      if (!diskOnly) return { warmed: ids, skipped: [], remaining: [] };
+      return { warmed: ids, skipped: [], remaining: [], poolAlive: true };
+    }
+  );
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+  await finishOpen(1, 2);
+  await finishOpen(2, 3);
+
+  await waitFor(() => expect(engine.warmTilesPooled).toHaveBeenCalled());
+  // 어느 파일이 먼저 풀로 가는지는 라인 분류에 달렸다(이 픽스처는 이름 규칙으로
+  // 전부 라인이라, 활성 파일은 라인 단계(의도적으로 순차)에서 끝나고 다음
+  // 파일이 첫 풀 대상이 된다). 여기서 잠그는 것은 배선이다: 풀을 시작한 그
+  // 파일의 워밍업은 전부 디스크 전용이어야 한다 — 디코드가 새면 부모가
+  // 자식과 같은 잎을 겹으로 굽는다.
+  const [sid, ids] = engine.warmTilesPooled.mock.calls[0];
+  expect(ids).toEqual([1, 2, 3]);
+  await waitFor(() =>
+    expect(engine.warmPreviewTiles.mock.calls.some((c: unknown[]) => c[0] === sid)).toBe(true)
+  );
+  for (const call of engine.warmPreviewTiles.mock.calls.filter((c: unknown[]) => c[0] === sid)) {
+    expect(call[3]).toBe(true);
+  }
+});
+
+test("tiles a dead child never baked fall back to the decode path", async () => {
+  engine.warmTilesPooled.mockResolvedValue({ workers: 2 });
+  const decoded: number[][] = [];
+  engine.warmPreviewTiles.mockImplementation(
+    async (_sid: number, ids: number[], _size: number, diskOnly?: boolean) => {
+      if (diskOnly) {
+        // 자식 하나가 죽었다: 1번만 디스크에 놓였고 풀은 끝났다.
+        return { warmed: [1], skipped: [], remaining: ids.filter((i) => i !== 1), poolAlive: false };
+      }
+      decoded.push(ids);
+      return { warmed: ids, skipped: [], remaining: [] };
+    }
+  );
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1);
+  await finishOpen(1, 2);
+  await finishOpen(2, 3);
+
+  // 죽은 자식의 몫(2, 3)이 기존 디코드 경로로 넘어와 마저 구워진다.
+  await waitFor(() => expect(decoded.some((ids) => ids.join() === "2,3")).toBe(true));
 });
