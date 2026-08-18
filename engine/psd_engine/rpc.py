@@ -79,7 +79,21 @@ _PIXEL_SETTINGS = ("threshold", "gap", "width", "minLength", "lineAlpha",
 
 
 def _edge_settings_key(opts):
-    return tuple(opts.get(k) for k in _PIXEL_SETTINGS)
+    """
+    숫자는 전부 float로 접는다 — 같은 값이 경로에 따라 int/float로 갈리기 때문이다.
+
+    프리셋 파일의 widthScale 1.0을 파이썬 json.load는 float 1.0으로, 프런트를
+    거친 요청은 JS 숫자를 지나며 int 1로 가져온다. 키는 json.dumps 문자열의
+    해시라 "1"과 "1.0"이 다른 키가 되고, 그러면 **풀이 방금 구운 오버레이를
+    준비 워커가 절대 못 찾는다** — 판 20 실측에서 뷰 9개를 통째로 두 번
+    굽고(두 벌 npz가 그 증거) 캐시완료가 ~95초 늦었다(2026-08-18).
+    """
+    def fold(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return v
+        return float(v)
+
+    return tuple(fold(opts.get(k)) for k in _PIXEL_SETTINGS)
 
 
 def _cached_plan_overlays(session, views, opts):

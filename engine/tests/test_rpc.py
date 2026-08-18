@@ -921,3 +921,23 @@ def test_warm_tiles_pooled_says_one_when_it_cannot_split(fixture_psd, monkeypatc
     engine = rpc.Engine(out=io.StringIO())
     sid, leaf_ids = _open_leaves(engine, fixture_psd)
     assert engine.warm_tiles_pooled(sid, layerIds=leaf_ids)["workers"] == 1
+
+
+def test_edge_settings_key_folds_int_and_float_to_the_same_key():
+    """widthScale 1(JS 경유)과 1.0(프리셋 json.load)이 같은 캐시 키가 돼야 한다.
+
+    키는 json.dumps 문자열의 해시라 "1"과 "1.0"이 다른 키다 — 실제로 풀이 구운
+    오버레이를 준비 워커가 못 찾아 뷰 9개를 통째로 두 번 구웠다(2026-08-18,
+    한 디렉터리에 npz 두 벌). 숫자 타입은 값이 같으면 접혀야 한다.
+    """
+    from psd_engine import tilecache
+    from psd_engine.rpc import _edge_settings_key
+
+    js = {"threshold": 24, "gap": 4, "width": 0, "minLength": 8,
+          "lineAlpha": 64, "colourMode": "composite", "edgeMode": "region",
+          "widthScale": 1}
+    py = {**js, "threshold": 24.0, "widthScale": 1.0}
+    k_js, k_py = _edge_settings_key(js), _edge_settings_key(py)
+    assert k_js == k_py
+    assert tilecache.overlay_key([1, 2], [3], k_js) == \
+        tilecache.overlay_key([1, 2], [3], k_py)
