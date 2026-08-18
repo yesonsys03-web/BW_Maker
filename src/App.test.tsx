@@ -1821,6 +1821,13 @@ test("with multiple workers the full cache covers files the app has not opened y
   // 안 연 파일까지 목록 전체가 워커에 넘어갔다.
   const sent = engine.warmWorkerSend.mock.calls.map((c) => (c[1] as { path: string }).path);
   expect(new Set(sent)).toEqual(new Set(PATHS));
+  // 그리고 프리셋은 **선택된 하나만** 실려 간다. 목록 전체(소스 내장 PROP 포함)를
+  // 보내면 캐릭터 판마다 안 쓸 change 모드 오버레이를 구워 판당 ~2분을 냈다
+  // (2026-08-18 판 20 perf 타임라인 — 전체 캐시 완료의 대부분이 그 몫이었다).
+  for (const c of engine.warmWorkerSend.mock.calls) {
+    const presets = (c[1] as { presets?: unknown[] }).presets ?? [];
+    expect(presets.length).toBeLessThanOrEqual(1);
+  }
 });
 
 /**

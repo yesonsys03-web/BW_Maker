@@ -31,7 +31,7 @@ import {
 } from "./lib/layout";
 import { splitLineLeafIds } from "./lib/layerFilter";
 import { drainLoadQueue } from "./lib/loadQueue";
-import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY, loadPresets } from "./lib/presets";
+import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError, visibleIdsForPreview } from "./lib/preview";
 import { PreviewCache, needsPrefetch, previewRenderSpec } from "./lib/previewCache";
 import { openFailureReport, type FailedOpen } from "./lib/openReport";
@@ -1953,23 +1953,17 @@ function AppShell() {
     // 워커 스윕은 폴더 전체를 한 덩어리로 돈다 — 라인/나머지로 나누지 않는다.
     // 문구도 fullCacheOn이 "전체 캐시 만드는 중"으로 덮으므로 단계는 all이다.
     setWarmProgress({ done: 0, total: estimated, phase: "all" });
-    // 프리셋 목록을 함께 보낸다 — 워커가 각 파일의 뷰 오버레이(뷰당 9~36초)와
-    // 프리셋마다 갓 적용한 화면의 미리보기 PNG까지 미리 구워 디스크에 쌓아야,
-    // "전체 캐시 완료 = 어떤 파일이든 즉시"가 BG·CHAR 어느 프리셋을 골라도
-    // 참이 된다. 목록은 PresetBar와 같은 원본(presets.json)에서 읽고, 지금
-    // 선택이 프로젝트에서 올라온 판(목록에 없는 편집본)이면 그것도 보탠다 —
-    // 화면이 실제로 렌더할 설정이 빠지면 그 파일들만 캐시가 안 듣는다. 읽기
-    // 실패는 선택된 프리셋 하나로 강등한다(스윕이 프리셋 파일 문제로 서면 안
-    // 된다 — 미리보기만 못 굽고 타일·오버레이는 그대로 쌓인다).
-    const presetsPromise = loadPresets()
-      .catch(() => [] as Preset[])
-      .then((list) => {
-        const cur = presetRef.current;
-        if (cur && !list.some((p) => JSON.stringify(p) === JSON.stringify(cur))) {
-          list.push(cur);
-        }
-        return list;
-      });
+    // **선택된 프리셋 하나만** 보낸다. 예전에는 presets.json 전체(+소스 내장
+    // 탑업까지)를 보내 "어떤 프리셋을 골라도 즉시"를 노렸는데, 그 대가로
+    // 캐릭터 폴더에서 아무도 안 고를 PROP(change 모드 — 검출이 제일 느린
+    // 프리셋)의 오버레이까지 판마다 구웠다 — 판 20 실측에서 전체 캐시 완료의
+    // ~2분이 통째로 그 몫이었다(뷰당 15.5초 × 9뷰, 2026-08-18 perf 타임라인).
+    // 화면이 실제로 렌더하는 설정은 선택된 프리셋뿐이다. 프리셋을 바꾸면 그
+    // 파일의 첫 렌더가 그 자리에서 비용을 내는 것으로 충분하다 — 폴더 작업에서
+    // 프리셋은 폴더 종류에 묶이지 파일마다 오가는 값이 아니다.
+    const presetsPromise = Promise.resolve(
+      presetRef.current ? [presetRef.current] : ([] as Preset[])
+    );
     const handle = runWorkerSweep({
       paths: targets.map((f) => f.path),
       workerCount: cacheWorkers,
