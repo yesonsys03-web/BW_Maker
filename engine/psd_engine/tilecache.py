@@ -23,6 +23,7 @@ mtime이 키에 들어 있어 포토샵 재저장이면 자동으로 새 디렉�
 """
 import hashlib
 import json
+import time
 import os
 import sys
 import tempfile
@@ -318,6 +319,7 @@ def store_overlays(session, key, plans):
     나머지 필드(lineIds/left/top)는 meta JSON으로 — 한 파일이라 쓰기가
     원자적이다(타일과 같은 임시파일+os.replace).
     """
+    _t0 = time.perf_counter()
     skey = _session_key(session)
     if not ENABLED or skey is None:
         return
@@ -342,6 +344,8 @@ def store_overlays(session, key, plans):
             _prune(keep=d)
     except OSError:
         pass
+    from .render import _perf
+    _perf(perf="overlay_store", s=round(time.perf_counter() - _t0, 3))
 
 
 #: 미리보기 PNG 캐시의 형식·알고리즘 판. OVERLAY_FORMAT과 같은 규칙이다 —

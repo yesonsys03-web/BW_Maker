@@ -562,7 +562,18 @@ class Engine:
         if method_name not in self._ALLOWED_METHODS:
             raise ValueError(f"unknown method: {method_name!r}")
         method = getattr(self, method_name)
-        return method(**request.get("params", {}))
+        # 요청 단위 계측. 단계별 이벤트만으로는 "그 사이"가 안 보인다 — 판 20
+        # 앱 타임라인에서 뷰당 17.5초짜리 공백의 주인을 이틀에 걸쳐 셋(오버레이
+        # 재생성→썸네일→?)이나 잘못 짚었다. 어떤 요청이 큐를 차지했는지가
+        # 이름으로 찍히면 그 추리는 애초에 필요가 없다. 0.05초 미만은 버린다 —
+        # 미리보기 한 번에 타일 요청이 수백 개다.
+        t0 = time.perf_counter()
+        try:
+            return method(**request.get("params", {}))
+        finally:
+            dt = time.perf_counter() - t0
+            if dt >= 0.05:
+                _perf(perf="rpc.request", method=method_name, s=round(dt, 4))
 
 
 def _as_utf8(stream):

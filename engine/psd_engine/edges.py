@@ -6,6 +6,7 @@
 
 scipy를 쓰지 않는다(엔진 venv에 없다). 모폴로지는 PIL, 연결 요소는 직접 구현한다.
 """
+import time
 from contextlib import contextmanager
 
 import numpy as np
@@ -975,7 +976,10 @@ def _composite_colour(psd, colour_layers, box):
     visible = [l for l in colour_layers if l.is_visible() and l.bbox != (0, 0, 0, 0)]
     if visible and render.FAST_MERGE and render._fast_mergeable(
             psd, visible, allow_clipping=True):
-        return render._merge_rgba_fast(psd, visible, box)[0]
+        t0 = time.perf_counter()
+        out = render._merge_rgba_fast(psd, visible, box)[0]
+        render._perf(perf="colour_fast", s=round(time.perf_counter() - t0, 3))
+        return out
     # 조상까지 포함해야 한다. 잎만 통과시키면 그 위 그룹이 필터에서 걸려 재귀가
     # 거기서 멈추고, 잎에 닿지도 못한다.
     #
@@ -989,10 +993,14 @@ def _composite_colour(psd, colour_layers, box):
     # 그룹에서 멈춘다. `render.py`의 BG 경로(render_thumbnails)도 같은 이유로
     # `.visible`을 쓴다.
     wanted = render._wanted_ids(psd, colour_layers)
+    t0 = time.perf_counter()
     img = psd.composite(
         viewport=box, force=True, color=1.0, alpha=0.0,
         layer_filter=lambda l: l.visible and id(l) in wanted,
     )
+    # 이 느린 갈래가 언제 밟히는지가 계측에 보여야 한다 — 빠른 경로를 못 타는
+    # 뷰는 뷰포트 크기에 비례한 값(33Mpx에 ~17초)을 그대로 낸다.
+    render._perf(perf="colour_slow", s=round(time.perf_counter() - t0, 3))
     return np.array(img.convert("RGBA"))
 
 
@@ -1064,6 +1072,7 @@ def overlay_for_view(session, colour_ids, line_ids, opts):
         return None
 
     o = {**EDGE_DEFAULTS, **(opts or {})}
+    t0 = time.perf_counter()
     with _opacity_neutralised(session["psd"], colour_layers):
         if o.get("colourMode") == "paste":
             # paste는 원본 픽셀을 그대로 붙여 원래도 불투명도를 안 읽지만,
@@ -1071,12 +1080,20 @@ def overlay_for_view(session, colour_ids, line_ids, opts):
             colour_rgba = _paste_colour(colour_layers, box)
         else:
             colour_rgba = _composite_colour(session["psd"], colour_layers, box)
+    t1 = time.perf_counter()
     # 채우기를 걸러내면서 알파도 같이 받는다 — 거르려면 어차피 디코드해야 하므로
     # 살아남은 잎을 다시 읽을 이유가 없다(_drop_filled 문서 참고).
     _, line_alpha = _drop_filled(
         [layers_by_id[i] for i in line_ids], box, o["lineAlpha"])
 
+    t2 = time.perf_counter()
     out = build_overlay(colour_rgba, line_alpha, opts)
+    # 뷰 하나의 세 단계 시각 — 판 20 조사에서 "뷰당 18초 중 15.5초가 계측 밖"
+    # 이라 범인을 세 번 잘못 짚었다. 시각이 다 찍히면 그 빈칸이 없다.
+    render._perf(perf="view_overlay", colour_s=round(t1 - t0, 3),
+                 line_s=round(t2 - t1, 3),
+                 build_s=round(time.perf_counter() - t2, 3),
+                 mpx=round((box[2] - box[0]) * (box[3] - box[1]) / 1e6, 1))
     if out[..., 3].max() == 0:
         return None
     return out, box[0], box[1]
