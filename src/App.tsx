@@ -2121,6 +2121,12 @@ function AppShell() {
         // 버려진 인스턴스에서도 멈춘다 — activePathRef는 언마운트 뒤에도 값을
         // 들고 있어, 이 확인이 없으면 죽은 화면이 남은 청크를 계속 받아간다.
         if (abandonedRef.current || !path || loadingRef.current || batchRunningRef.current) return;
+        // 활성 파일 워밍업이 도는 동안도 양보한다. 타일은 일찍 다 구워지는데
+        // "다 데웠다" 확인 요청이 stdin 큐에서 썸네일 청크 뒤에 줄을 서면
+        // 캐시완료 표시가 그만큼 늦는다 — 판 20 perf 타임라인(2026-08-18)에서
+        // 그 지연이 ~50초였다. 아이콘은 워밍이 끝난 뒤 채워도 되는 그림이다.
+        // 전체 캐시 스윕(몇 시간짜리)은 예외 — 거기 양보하면 스윕 내내 굶는다.
+        if (warmingRef.current && !fullCacheOnRef.current) return;
         const file = filesRef.current.find((f) => f.path === path);
         if (file?.sessionId === undefined) return;
         const chunk = nextThumbnailChunk(
@@ -2176,11 +2182,14 @@ function AppShell() {
     [drainThumbnails]
   );
 
-  // 로드 큐가 끝났거나 파일이 열렸을 때 멈춰 있던 큐를 다시 깨운다. 보이는 행은
-  // 그대로인데 그때는 양보하느라(또는 세션이 없어) 받지 못했을 수 있다.
+  // 로드 큐가 끝났거나 파일이 열렸을 때, 그리고 워밍업이 끝났을 때 멈춰 있던
+  // 큐를 다시 깨운다. 보이는 행은 그대로인데 그때는 양보하느라(또는 세션이
+  // 없어) 받지 못했을 수 있다. warmProgress는 진행 중에도 바뀌지만 그때는
+  // drainThumbnails가 워밍 가드에서 바로 돌아온다 — null이 되는 마지막 변화가
+  // 실제로 큐를 굴린다.
   useEffect(() => {
     if (!loading) void drainThumbnails();
-  }, [loading, state.activePath, activeFile?.sessionId, drainThumbnails]);
+  }, [loading, state.activePath, activeFile?.sessionId, warmProgress, drainThumbnails]);
 
   // Removing a file (FilePanel's "×") drops its thumbnails/fetch-marker too,
   // so re-adding the same path later re-fetches instead of reusing stale

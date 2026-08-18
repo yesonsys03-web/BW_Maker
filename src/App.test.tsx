@@ -2633,3 +2633,43 @@ test("tiles a dead child never baked fall back to the decode path", async () => 
   // 죽은 자식의 몫(2, 3)이 기존 디코드 경로로 넘어와 마저 구워진다.
   await waitFor(() => expect(decoded.some((ids) => ids.join() === "2,3")).toBe(true));
 });
+
+/**
+ * 워밍업이 도는 동안 썸네일 큐가 양보하는 규약(2026-08-18).
+ *
+ * 타일은 일찍 다 구워지는데 "다 데웠다" 확인 요청이 stdin 큐에서 썸네일 청크
+ * 뒤에 줄을 서면 캐시완료 표시가 그만큼 늦는다 — 판 20 perf 타임라인에서 그
+ * 지연이 ~50초였다. 아이콘은 워밍이 끝난 뒤 채워도 되는 그림이다. 전체 캐시
+ * 스윕은 예외(몇 시간짜리라 거기 양보하면 아이콘이 스윕 내내 굶는다) — 그
+ * 가지는 fullCacheOnRef 조건이고, 여기서는 기본값(꺼짐) 경로를 잠근다.
+ */
+test("thumbnails yield to the active file's warmup and resume after it", async () => {
+  const warmHeld = deferred<{ warmed: number[]; skipped: number[]; remaining: number[] }>();
+  engine.warmPreviewTiles.mockImplementation(() => warmHeld.promise);
+
+  render(<App />);
+  await addFiles({ click });
+  await finishOpen(0, 1, [1, 2, 3]);
+  await waitFor(() => expect(opens).toHaveLength(2));
+
+  // 로드 큐를 세운다 — 안 세우면 양보의 원인이 워밍이 아니라 큐가 된다.
+  click(screen.getByRole("button", { name: "중지" }));
+  await finishOpen(1, 2);
+  await waitFor(() => expect(screen.getByText(/중지됨/)).toBeTruthy());
+
+  // 워밍업이 실제로 돌기 시작한 것을 확인한 뒤에 행을 보여준다.
+  await waitFor(() => expect(engine.warmPreviewTiles).toHaveBeenCalled());
+  const observer = await waitFor(() => {
+    const o = FakeIntersectionObserver.latest();
+    expect(o).toBeTruthy();
+    return o;
+  });
+  observer.reveal([1, 2, 3]);
+
+  await new Promise((r) => setTimeout(r, 30));
+  expect(engine.renderThumbnails).not.toHaveBeenCalled();
+
+  // 워밍업이 끝나면 그때 나간다.
+  warmHeld.resolve({ warmed: [1, 2, 3], skipped: [], remaining: [] });
+  await waitFor(() => expect(engine.renderThumbnails).toHaveBeenCalled());
+});
