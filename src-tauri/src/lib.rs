@@ -4,7 +4,43 @@ mod files;
 mod project_fs;
 mod warm;
 
-use tauri::Manager;
+use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+/// 도움말 창을 띄운다(이미 있으면 앞으로 가져온다).
+///
+/// 매뉴얼은 프런트 번들에 함께 실리는 정적 파일(`public/help/index.html` →
+/// `help/index.html`)이라 오프라인에서도 열린다. 별도 창으로 띄우는 것은 작업
+/// 화면을 가리지 않고 나란히 두고 보기 위해서다.
+fn open_help(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("help") {
+        let _ = w.set_focus();
+        return;
+    }
+    let _ = WebviewWindowBuilder::new(app, "help", WebviewUrl::App("help/index.html".into()))
+        .title("BW Maker 사용법")
+        .inner_size(1100.0, 860.0)
+        .build();
+}
+
+/// 상단 메뉴. 기본 메뉴를 그대로 두고 **도움말만** 얹는다 — 편집/창 메뉴의
+/// 복사·붙여넣기·최소화가 macOS에서 기본 메뉴에 딸려 오므로, 직접 만들면
+/// 그것들을 전부 다시 세워야 한다.
+fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app)?;
+    let help = Submenu::with_items(
+        app,
+        "도움말",
+        true,
+        &[
+            &MenuItem::with_id(app, "help-manual", "BW Maker 사용법", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::about(app, Some("BW Maker 정보"), Some(AboutMetadata::default()))?,
+        ],
+    )?;
+    menu.append(&help)?;
+    Ok(menu)
+}
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -34,7 +70,31 @@ pub fn run() {
             warm::warm_worker_send,
             warm::warm_workers_stop
         ])
+        .setup(|app| {
+            // 메뉴는 setup에서 세운다 — 실패해도 앱은 살아야 하므로 로그만 남기고
+            // 계속한다(엔진과 달리 메뉴가 없어도 작업은 된다).
+            match build_menu(app.handle()) {
+                Ok(menu) => {
+                    if let Err(e) = app.set_menu(menu) {
+                        eprintln!("menu install failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("menu build failed: {e}"),
+            }
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if event.id() == "help-manual" {
+                open_help(app);
+            }
+        })
         .on_window_event(|window, event| {
+            // **메인 창일 때만** 엔진을 정리한다. 이 핸들러는 모든 창에 걸리므로,
+            // 라벨을 안 보면 도움말 창을 닫는 것만으로 엔진과 작업 프로세스가
+            // 통째로 죽는다 — 작업 중인 파일이 그 자리서 멈춘다.
+            if window.label() != "main" {
+                return;
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 engine::kill_engine(window.app_handle());
                 warm::kill_warm_workers(window.app_handle());
