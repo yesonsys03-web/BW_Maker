@@ -1,5 +1,44 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { appDataDir, join } from "@tauri-apps/api/path";
+import { mkdir, writeTextFile } from "@tauri-apps/plugin-fs";
 import { loadPngDataUrl, renderDocumentPreview, renderPreview } from "../lib/engine";
+
+/**
+ * 간헐 "흰 화면" 증상의 남은 부류(렌더 응답이 화면에 반영되지 않음)를 다음
+ * 발생 때 지목하기 위한 흔적. 2026-08-19 계측으로 확정한 것: 포함 0장 판의
+ * 흰 화면은 빈 상태 안내로 해결(위 empty-visible), 그런데 렌더가 완료되고도
+ * 흰 화면인 사건이 남아 있다 — 이 버그는 추론으로 원인을 두 번 틀린 전력이
+ * 있어 계측만 믿는다(메모리 blank-preview-on-open).
+ *
+ * localStorage가 아니라 **파일**(appDataDir/preview-trace.json)에 쓴다.
+ * WKWebView의 localStorage 디스크 반영은 분 단위로 늦고 종료 때 유실될 수
+ * 있음을 같은 날 실증했다 — 재시작 후 세션의 흔적이 통째로 사라졌다. 파일은
+ * 1초 디바운스로 통짜 갱신하고, 앱 밖에서 그대로 읽는다. 그림 경로는
+ * 파일명이 기밀이라 뒤 8자만 남긴다. Tauri 밖(테스트)에서는 쓰기가 조용히
+ * 실패한다 — 기록이 실패해도 미리보기는 미리보기다.
+ */
+const previewTrace: object[] = [];
+let traceFile: Promise<string> | null = null;
+let traceTimer: ReturnType<typeof setTimeout> | null = null;
+function flushTrace(): void {
+  traceTimer = null;
+  traceFile ??= (async () => {
+    const dir = await appDataDir();
+    await mkdir(dir, { recursive: true });
+    return join(dir, "preview-trace.json");
+  })();
+  void traceFile
+    .then((file) => writeTextFile(file, JSON.stringify(previewTrace)))
+    .catch(() => {});
+}
+function traceGuard(step: string, detail: Record<string, unknown>): void {
+  previewTrace.push({ t: Date.now(), step, ...detail });
+  while (previewTrace.length > 200) previewTrace.shift();
+  traceTimer ??= setTimeout(flushTrace, 1000);
+}
+function tracePath(path: string | undefined): string {
+  return path ? path.slice(-8) : "";
+}
 import {
   PREVIEW_BACKGROUNDS,
   PREVIEW_BACKGROUND_LABELS,
@@ -416,6 +455,7 @@ export function PreviewCanvas({
     // 상태에서 새로 만드므로, 비웠다가 잃는 것은 없다.
     pendingRef.current = null;
     if (!path) return;
+    traceGuard("effect", { p: tracePath(path), vis: visibleIds.length, paused, doc: documentView });
 
     // 이미 렌더해 본 조합이면 엔진에 가지 않는다. 파일을 오갈 때 위의 [path]
     // 효과가 화면의 이미지를 버리기 때문에, 이게 없으면 돌아올 때마다 같은
@@ -436,6 +476,7 @@ export function PreviewCanvas({
     if (cacheKey) {
       const cached = cache.get(cacheKey);
       if (cached !== undefined) {
+        traceGuard("cache-hit", { p: tracePath(path), len: cached.length });
         // 아직 안 돌아온 이전 요청이 이 그림을 덮어쓰지 못하게 무효화한다.
         requestIdRef.current += 1;
         imageKindRef.current = "real";
@@ -447,8 +488,12 @@ export function PreviewCanvas({
     }
 
     // 큐가 끝나면 paused가 false로 바뀌면서 이 효과가 다시 돌아 그때 그린다.
-    if (paused) return;
+    if (paused) {
+      traceGuard("paused", { p: tracePath(path) });
+      return;
+    }
     if (visibleIds.length === 0) {
+      traceGuard("empty-visible", { p: tracePath(path) });
       requestIdRef.current += 1; // invalidate any in-flight render from a prior toggle
       imageKindRef.current = "none";
       setPlaceholderShown(false);
@@ -512,6 +557,7 @@ export function PreviewCanvas({
     // 엔진에 이미 하나 걸려 있으면 자리에만 적어두고 물러난다. 타이머는 세우지
     // 않는다 — 기다릴 것은 시간이 아니라 사건이고, 그 사건은 아래 finally다.
     if (inFlightRef.current > 0) {
+      traceGuard("queued-behind-inflight", { p: tracePath(path) });
       pendingRef.current = spec;
       return;
     }
@@ -532,6 +578,7 @@ export function PreviewCanvas({
       // 사이에 올라간 번호(캐시 적중, 빈 집합, 파일 전환)에 밀려 자기 결과를
       // 스스로 버린다 — 화면은 옛 그림에 멈춘 채로 남는다.
       const requestId = ++requestIdRef.current;
+      traceGuard("dispatch", { p: tracePath(next.path), vis: next.visibleIds.length, rid: requestId, doc: next.documentView });
       setLoading(true);
       inFlightRef.current += 1;
       onRenderingChange(true);
@@ -553,12 +600,17 @@ export function PreviewCanvas({
           // 시각 기준이라, 중간에 축출-재오픈이 끼어 세션 id가 바뀌어도 그대로
           // 유효하다.
           if (next.cacheKey) cache.set(next.cacheKey, dataUrl);
-          if (requestIdRef.current !== requestId) return; // superseded by a newer request
+          if (requestIdRef.current !== requestId) {
+            traceGuard("superseded", { p: tracePath(next.path), rid: requestId, now: requestIdRef.current });
+            return; // superseded by a newer request
+          }
+          traceGuard("painted", { p: tracePath(next.path), rid: requestId, len: dataUrl.length });
           imageKindRef.current = "real";
           setPlaceholderShown(false);
           showImage(dataUrl);
           setLoading(false);
         } catch (e) {
+          traceGuard("render-failed", { p: tracePath(next.path), rid: requestId, msg: String(e).slice(0, 120) });
           if (requestIdRef.current !== requestId) return;
           setLoading(false);
           onError("미리보기 렌더링 실패", toEngineError(e));
@@ -699,7 +751,21 @@ export function PreviewCanvas({
     }
 
     if (visibleIds.length === 0) {
-      return <div className="preview-canvas preview-empty">표시할 레이어 없음</div>;
+      // "흰 화면 버그" 신고의 한 부류가 이것이었다(2026-08-19): 군중 판은
+      // 프리셋 매칭이 0장이라 포함이 비고, 화면은 아무 설명 없이 비어 있었다.
+      // 이유와 다음 손잡이까지 말해줘야 고장으로 읽히지 않는다.
+      return (
+        <div className="preview-canvas preview-empty">
+          <div className="preview-empty-note">
+            <p>포함된 레이어가 없습니다.</p>
+            <p>
+              프리셋이 이 판에서 라인을 찾지 못했거나 전부 해제된 상태입니다. 왼쪽 파일
+              목록의 <strong>후보 일괄 지정</strong>(라인필요 막대)이나 레이어 트리의{" "}
+              <strong>라인 지정</strong>으로 내보낼 레이어를 담으면 미리보기가 그려집니다.
+            </p>
+          </div>
+        </div>
+      );
     }
   }
 
@@ -721,6 +787,13 @@ export function PreviewCanvas({
           cursorRef.current = null;
         }}
       >
+        {!imgSrc && (
+          // 합성 응답을 기다리는 동안의 표시. 이게 없으면 흰색 배경 모드에서
+          // 아무 글자 없는 흰 사각형이 떠 "죽었다"로 읽힌다 — 그리고 응답이
+          // 유실되는 결함(부류 2, 미해결)이 생기면 이 문구가 화면에 남아
+          // "합성 대기에서 멈췄다"는 사실 자체를 알려준다.
+          <div className="preview-compositing-note">합성 중...</div>
+        )}
         {imgSrc && (
           <img
             className="preview-image"
