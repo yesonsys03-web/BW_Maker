@@ -1531,3 +1531,26 @@ def test_group_thumbnail_keeps_full_resolution_for_small_groups(
     got = render_mod._group_rgba_scaled(s["psd"], group, group.bbox, session=s)
     assert not calls, "작은 그룹까지 타일 해상도로 떨어뜨렸다"
     assert (ref == got).all()
+
+
+def test_preview_tile_skips_a_shape_layer_without_raster():
+    """
+    래스터 채널이 없는 도형(shape) 레이어 — bbox는 커도 has_pixels()가 False고
+    topil()이 None이다(납품 판 실측: 4350×2261 'parallel_x'). 워밍업의 잎 목록은
+    "그룹 아닌 레이어 전부"라 이런 레이어도 들어오는데, 가드가 0×0만 보면
+    extract_rgba가 ValueError를 던져 전체 캐시 스윕이 파일째 실패한다.
+    0×0 빈 레이어와 같은 None 계약으로 건너뛰어야 한다.
+    """
+    import psd_engine.render as render_mod
+
+    class ShapeHusk:
+        width, height = 4350, 2261
+
+        @staticmethod
+        def has_pixels():
+            return False
+
+    session = {"layers_by_id": {7: ShapeHusk()}}
+    assert render_mod._preview_tile(session, 7, 0.25) is None
+    # 두 번째 호출은 RAM 캐시로 답해야 한다(디스크에 묻지 않는 것까지 포함).
+    assert render_mod._preview_tile(session, 7, 0.25) is None

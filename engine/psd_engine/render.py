@@ -1536,9 +1536,12 @@ def _preview_tile(session, layer_id, scale):
 
     t0 = time.perf_counter()
     layer = session["layers_by_id"][layer_id]
-    # 그린 적 없는 빈 레이어(0x0). extract_rgba/PIL이 터지므로 렌더 대상이 아니다.
+    # 그릴 픽셀이 없는 레이어는 렌더 대상이 아니다 — extract_rgba/PIL이 터진다.
+    # 두 형태다: 그린 적 없는 빈 레이어(0×0)와, 래스터 채널이 없어 topil이
+    # None인 도형 레이어(납품 판 실측: bbox 4350×2261인데 has_pixels가 False).
+    # 워밍업 잎 목록은 "그룹 아닌 레이어 전부"라 이 가드가 마지막 문이다.
     # 디스크에도 묻지 않는다 — 비용이 0이라 기억할 것이 없다.
-    if layer.width <= 0 or layer.height <= 0:
+    if layer.width <= 0 or layer.height <= 0 or not layer.has_pixels():
         entry = None
     else:
         entry = tilecache.load(session, layer_id, scale)
