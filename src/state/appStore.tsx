@@ -866,13 +866,18 @@ export async function detectDrawnLinesEffect(
   sessionId: number,
   tree: TreeNode[],
   matchedIds: number[],
-  preset: Preset
+  preset: Preset,
+  waitQuiet?: () => Promise<void>
 ): Promise<void> {
   const candidates = drawnLineCandidateIds(tree, matchedIds, preset);
   const features: Record<string, StrokeFeatures | null> = {};
   try {
     let sid = sessionId;
     for (let i = 0; i < candidates.length; i += STROKE_CHUNK) {
+      // 디코드는 엔진이 조용할 때만 나간다. 청크마다 다시 묻는 것이 요점이다 —
+      // 재는 도중에 시작된 조작(파일 전환의 워밍업·썸네일)에 다음 청크부터
+      // 양보하고, 조작이 끝나면 이어서 잰다.
+      await waitQuiet?.();
       const chunk = candidates.slice(i, i + STROKE_CHUNK);
       const part = await withEvictedSessionRetry(
         path,
@@ -892,6 +897,102 @@ export async function detectDrawnLinesEffect(
     dispatch({ type: "pushError", title: `선 그림 검출 실패: ${path}`, error });
     dispatch({ type: "drawnLinesDetected", path, layerIds: [] });
   }
+}
+
+/**
+ * 검출을 한 번에 한 파일로 묶는 대기열. 감시 그물(App.tsx)은 조건에 맞는 열린
+ * 파일 전부에 효과를 쏘는데, 엔진 세션은 LRU 두 칸이라 검출 여럿이 동시에
+ * 돌면 각자의 재열기가 서로의 세션을 걷어찬다 — 걷어차기가 재시도 상한
+ * (sessionRetry의 MAX_REOPENS)까지 겹치면 "선 그림 검출 실패"가 되고, 그동안
+ * 직렬 엔진 큐가 수백 MB 재파싱으로 막혀 파일 클릭의 나머지 레이어 로딩이 그
+ * 뒤에 줄을 선다. 한 번에 한 파일이면 두 칸이 "검출 1 + 보는 파일 1"로 맞아
+ * 걷어차기가 구조적으로 사라진다.
+ *
+ * 사슬이 아니라 대기열인 이유는 내보내기다. 내보내기는 자기 파일의 검출이
+ * 끝난 그림을 담아야 하는데(frontloadDetection), 줄 선 순서대로만 돌면 판
+ * 여러 장의 디코드 뒤에서 기다리게 된다 — 그래서 맨 앞으로 당길 수 있어야
+ * 하고, 당겨진 일은 "조용할 때" 대기(waitQuiet)도 그만둔다(urgent).
+ */
+interface DetectJob {
+  path: string;
+  urgent: boolean;
+  run: () => Promise<void>;
+  done: Promise<void>;
+  resolve: () => void;
+}
+
+const detectQueue: DetectJob[] = [];
+const pendingDetections = new Map<string, DetectJob>();
+let detectPumping = false;
+
+async function pumpDetections(): Promise<void> {
+  if (detectPumping) return;
+  detectPumping = true;
+  try {
+    for (;;) {
+      const job = detectQueue.shift();
+      if (!job) return;
+      try {
+        await job.run();
+      } catch {
+        // 효과는 실패를 카드 한 장 + 빈 래치로 삼키므로 여기 올 일이 없지만,
+        // 혹시 모를 거부가 펌프를 죽이면 뒤에 선 파일 전부가 영영 안 돈다.
+      } finally {
+        pendingDetections.delete(job.path);
+        job.resolve();
+      }
+    }
+  } finally {
+    detectPumping = false;
+  }
+}
+
+export function queueDetectDrawnLines(
+  dispatch: Dispatch<AppAction>,
+  path: string,
+  sessionId: number,
+  tree: TreeNode[],
+  matchedIds: number[],
+  preset: Preset,
+  waitQuiet?: (isUrgent: () => boolean) => Promise<void>
+): Promise<void> {
+  // 경로당 한 예약. 파일당 한 번은 감시 그물의 래치·inFlight가 보장하지만,
+  // 겹쳐 들어와도 대기열이 같은 파일을 두 번 재지 않게 이중으로 막는다.
+  const existing = pendingDetections.get(path);
+  if (existing) return existing.done;
+  let resolve!: () => void;
+  const done = new Promise<void>((r) => { resolve = r; });
+  const job: DetectJob = {
+    path,
+    urgent: false,
+    run: () =>
+      detectDrawnLinesEffect(dispatch, path, sessionId, tree, matchedIds, preset,
+        waitQuiet && (() => waitQuiet(() => job.urgent))),
+    done,
+    resolve,
+  };
+  pendingDetections.set(path, job);
+  detectQueue.push(job);
+  void pumpDetections();
+  return done;
+}
+
+/**
+ * path의 검출을 맨 앞으로 당기고 그 완료 약속을 돌려준다. 실행 중이면 당길
+ * 것 없이 그 약속을, 예약도 실행도 없으면(래치가 이미 섰거나 대상 아님) null.
+ * 당겨진 일은 urgent가 되어 waitQuiet 대기를 그만둔다 — 내보내기가 로드 큐
+ * 같은 긴 배경 작업 뒤에서 검출을 기다리다 굳으면 안 된다.
+ */
+export function frontloadDetection(path: string): Promise<void> | null {
+  const job = pendingDetections.get(path);
+  if (!job) return null;
+  job.urgent = true;
+  const i = detectQueue.indexOf(job);
+  if (i > 0) {
+    detectQueue.splice(i, 1);
+    detectQueue.unshift(job);
+  }
+  return job.done;
 }
 
 /**

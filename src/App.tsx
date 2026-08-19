@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import { AppProvider, applyPresetEffect, attachSessionEffect, buildInitialOpsState, detectDrawnLinesEffect, openFileEffect, useAppStore, type AppState, type FileEntry, type PreparedFileResult } from "./state/appStore";
+import { AppProvider, applyPresetEffect, attachSessionEffect, buildInitialOpsState, frontloadDetection, openFileEffect, queueDetectDrawnLines, useAppStore, type AppState, type FileEntry, type PreparedFileResult } from "./state/appStore";
 import type { SkippedLayer } from "./lib/engine";
 import { FilePanel } from "./components/FilePanel";
 import { LayerTree } from "./components/LayerTree";
@@ -2060,13 +2060,29 @@ function AppShell() {
   /**
    * "선으로 그려진 레이어" 검출의 감시 그물. 프리셋이 붙는 경로가 셋이라(열기
    * 큐의 자동 적용·준비 워커·명시 "적용") 호출부마다 검출을 잇는 대신, "매칭은
-   * 있는데 검출 기록이 없는 열린 파일"을 보고 돈다 — detectDrawnLinesEffect의
-   * 결과 dispatch가 래치(drawnLineIdsByPath)를 세우므로 파일당 한 번이다.
+   * 있는데 검출 기록이 없는 열린 파일"을 보고 돈다 — 결과 dispatch가
+   * 래치(drawnLineIdsByPath)를 세우므로 파일당 한 번이다. 쏘는 건 사슬
+   * (queueDetectDrawnLines)이라 실제로는 한 번에 한 파일씩 돈다 — 이유는
+   * 그쪽 주석(세션 두 칸 걷어차기).
    *
    * 복원한 파일은 건너뛴다(openSuccess의 isRestoredMatch와 같은 판정). 검출
    * 지정은 저장 당시의 ops에 이미 들어 있고, 다시 돌리면 아티스트가 일부러
    * 해제한 잎이 소리 없이 되살아난다.
    */
+  /**
+   * 검출이 "엔진이 조용한가"를 묻는 창구. 조용함 = 로드 큐·워밍업·썸네일
+   * 받기·배치가 전부 쉬는 상태다. 전체 캐시 스윕 중에도 미룬다 — 스윕은
+   * 파일마다 세션을 붙이며 도는데 검출까지 끼면 세 세션이 두 칸을 놓고
+   * 싸운다. isUrgent(내보내기가 당긴 일)면 그만 기다린다 — 검출이 긴 배경
+   * 작업 뒤에서 내보내기를 굳히면 안 된다.
+   */
+  const waitForEngineQuiet = useCallback(async (isUrgent: () => boolean) => {
+    for (;;) {
+      if (abandonedRef.current || isUrgent()) return;
+      if (!loadingRef.current && !warmingRef.current && !drainingThumbsRef.current && !batchRunningRef.current) return;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }, []);
   const detectInFlightRef = useRef(new Set<string>());
   useEffect(() => {
     const preset = selectedPreset;
@@ -2080,11 +2096,11 @@ function AppShell() {
       if (file.path in state.restoredMtimeByPath && state.restoredMtimeByPath[file.path] === file.mtime) continue;
       if (detectInFlightRef.current.has(file.path)) continue;
       detectInFlightRef.current.add(file.path);
-      void detectDrawnLinesEffect(dispatch, file.path, file.sessionId, file.tree, matched, preset).finally(
+      void queueDetectDrawnLines(dispatch, file.path, file.sessionId, file.tree, matched, preset, waitForEngineQuiet).finally(
         () => detectInFlightRef.current.delete(file.path)
       );
     }
-  }, [state.files, state.matchedIdsByPath, state.drawnLineIdsByPath, state.restoredMtimeByPath, selectedPreset, dispatch]);
+  }, [state.files, state.matchedIdsByPath, state.drawnLineIdsByPath, state.restoredMtimeByPath, selectedPreset, waitForEngineQuiet, dispatch]);
 
   /**
    * "라인필요" 파일 전부에 라인 후보를 일괄 지정한다. 규칙과 측정 근거는
@@ -2504,6 +2520,7 @@ function AppShell() {
           onClose={() => setExportOpen(false)}
           onSessionRefreshed={refreshSession}
           onError={pushError}
+          onWaitDetection={() => frontloadDetection(activeFile.path)}
         />
       )}
 

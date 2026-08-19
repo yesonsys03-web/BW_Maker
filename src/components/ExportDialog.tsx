@@ -21,6 +21,12 @@ interface ExportDialogProps {
    * 아직 프리셋을 적용하지 않았으면 undefined이고, 그때는 예전처럼 전부 건다.
    */
   matchedIds: number[] | undefined;
+  /**
+   * 이 파일의 선 그림 검출이 대기·실행 중이면 그 완료 약속(맨 앞으로 당겨진),
+   * 없으면 null — appStore.frontloadDetection. 내보내기 직전에 기다려서 검출
+   * 지정이 빠진 라인판이 나가는 일을 막는다.
+   */
+  onWaitDetection?: () => Promise<void> | null;
   onPushOp: (op: Operation) => void;
   onClose: () => void;
   onSessionRefreshed: (path: string, result: OpenResult) => void;
@@ -54,6 +60,7 @@ export function ExportDialog({
   tree,
   preset,
   matchedIds,
+  onWaitDetection,
   onPushOp,
   onClose,
   onSessionRefreshed,
@@ -73,6 +80,14 @@ export function ExportDialog({
   const [normalizeColor, setNormalizeColor] = useState((preset?.lineColor ?? null) !== null);
   const [lineColor, setLineColor] = useState(preset?.lineColor ?? DEFAULT_LINE_COLOR);
   const [exporting, setExporting] = useState(false);
+  const [waitingDetection, setWaitingDetection] = useState(false);
+  // 검출을 기다린 뒤에는 이 렌더의 ops가 낡았을 수 있다(지정이 그 사이 실렸다).
+  // 렌더마다 갱신되는 ref에서 내보내기 직전에 다시 읽는다.
+  const opsRef = useRef(ops);
+  opsRef.current = ops;
+  // 닫기는 취소다 — 검출을 기다리는 동안 닫혔으면 내보내지 않는다.
+  const closedRef = useRef(false);
+  useEffect(() => () => { closedRef.current = true; }, []);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [result, setResult] = useState<ExportResult | null>(null);
 
@@ -182,6 +197,19 @@ export function ExportDialog({
       });
       if (!outputPath) return;
 
+      // 이 파일의 선 그림 검출이 아직이면 끝내고 담는다. 검출을 "한가할 때"로
+      // 미루면서, 지정이 실리기 전에 내보내는 창이 넓어졌다 — 여기서 닫는다.
+      const wait = onWaitDetection?.();
+      if (wait) {
+        setWaitingDetection(true);
+        try {
+          await wait;
+        } finally {
+          setWaitingDetection(false);
+        }
+        if (closedRef.current) return;
+      }
+
       setExporting(true);
       setProgress(null);
       setResult(null);
@@ -193,9 +221,9 @@ export function ExportDialog({
           // ops.edgeColourIds(수동 지정)를 넘긴다 — PreviewCanvas가 미리보기에
           // 쓰는 것과 같은 값이어야 한다. 하나라도 다르면 아티스트가 미리보기로
           // 승인한 그림과 실제 내보낸 파일이 갈린다.
-          exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true,
+          exportPsd(sid, opsRef.current.includedIds, opsRef.current.ops, naming, outputPath, embedPreview, true, true,
                     normalizeColor ? lineColor : null, splitLayers, outputFormat,
-                    matchedIds ?? null, preset?.edgeLines ?? null, ops.edgeColourIds),
+                    matchedIds ?? null, preset?.edgeLines ?? null, opsRef.current.edgeColourIds),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);
@@ -408,8 +436,8 @@ export function ExportDialog({
           <button type="button" onClick={onClose} disabled={exporting}>
             닫기
           </button>
-          <button type="button" onClick={() => void handleExport()} disabled={exporting || ops.entries.length === 0}>
-            {exporting ? "내보내는 중..." : "내보내기"}
+          <button type="button" onClick={() => void handleExport()} disabled={exporting || waitingDetection || ops.entries.length === 0}>
+            {exporting ? "내보내는 중..." : waitingDetection ? "선 그림 검출 확인 중..." : "내보내기"}
           </button>
         </div>
       </div>

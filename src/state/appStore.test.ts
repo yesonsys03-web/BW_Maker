@@ -23,6 +23,8 @@ import {
   appReducer,
   applyPresetEffect,
   detectDrawnLinesEffect,
+  queueDetectDrawnLines,
+  frontloadDetection,
   buildInitialOpsState,
   EMPTY_OPS,
   initialAppState,
@@ -1279,5 +1281,76 @@ describe("detectDrawnLinesEffect (선 그림 검출의 실제 동작)", () => {
     await detectDrawnLinesEffect((a) => actions.push(a), "/a.psd", 3, [], [], preset);
     expect(mockMeasureLeafStrokes).not.toHaveBeenCalled();
     expect(actions).toEqual([{ type: "drawnLinesDetected", path: "/a.psd", layerIds: [] }]);
+  });
+
+  test("two files' detections never overlap — the chain runs one at a time", async () => {
+    // 첫 파일의 측정을 붙들어 두고, 그동안 둘째 파일이 시작하는지 본다.
+    // 겹치면 안 되는 이유는 queueDetectDrawnLines 주석 — 세션 두 칸을 놓고
+    // 검출끼리 서로의 세션을 걷어차며 재열기(수백 MB 재파싱)를 주고받는다.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const sids: number[] = [];
+    mockMeasureLeafStrokes.mockImplementation(async (sid: number) => {
+      sids.push(sid);
+      if (sid === 1) await gate;
+      return {};
+    });
+    const p1 = queueDetectDrawnLines(() => {}, "/a.psd", 1, detectTree, [], preset);
+    const p2 = queueDetectDrawnLines(() => {}, "/b.psd", 2, detectTree, [], preset);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sids).toEqual([1]); // 둘째는 첫째가 끝나기 전에 시작하지 않는다
+    release();
+    await Promise.all([p1, p2]);
+    expect(sids).toEqual([1, 1, 2, 2]); // 후보 8 → 청크 6+2, 넣은 순서대로
+  });
+
+  test("waitQuiet gates every chunk — a busy engine defers measurement", async () => {
+    // 미루기의 핵심: 잰다는 결정은 그대로 두고, 실제 디코드는 엔진이 조용할
+    // 때만 나간다. 청크마다 물어야 도중에 온 조작(파일 전환 등)에 양보한다.
+    let releaseQuiet!: () => void;
+    const quietGate = new Promise<void>((r) => { releaseQuiet = r; });
+    const waits: number[] = [];
+    mockMeasureLeafStrokes.mockResolvedValue({});
+    const waitQuiet = async () => { waits.push(mockMeasureLeafStrokes.mock.calls.length); await quietGate; };
+    const p = detectDrawnLinesEffect(() => {}, "/quiet.psd", 3, detectTree, [], preset, waitQuiet);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockMeasureLeafStrokes).not.toHaveBeenCalled(); // 조용해지기 전엔 안 잰다
+    releaseQuiet();
+    await p;
+    expect(mockMeasureLeafStrokes).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([0, 1]); // 청크마다 한 번씩, 측정보다 먼저
+  });
+
+  test("frontloadDetection pulls a queued file ahead; a running one hands back its promise", async () => {
+    let releaseA!: () => void;
+    const gateA = new Promise<void>((r) => { releaseA = r; });
+    const order: number[] = [];
+    mockMeasureLeafStrokes.mockImplementation(async (sid: number) => {
+      order.push(sid);
+      if (sid === 1) await gateA;
+      return {};
+    });
+    const pa = queueDetectDrawnLines(() => {}, "/fa.psd", 1, detectTree, [], preset);
+    const pb = queueDetectDrawnLines(() => {}, "/fb.psd", 2, detectTree, [], preset);
+    const pc = queueDetectDrawnLines(() => {}, "/fc.psd", 3, detectTree, [], preset);
+    expect(frontloadDetection("/no-such.psd")).toBeNull(); // 예약 없음 — 기다릴 것도 없다
+    expect(frontloadDetection("/fc.psd")).toBe(pc); // 대기열에 있으면 맨 앞으로
+    expect(frontloadDetection("/fa.psd")).toBe(pa); // 이미 실행 중이면 그 약속 그대로
+    releaseA();
+    await Promise.all([pa, pb, pc]);
+    expect(order).toEqual([1, 1, 3, 3, 2, 2]); // C가 B를 앞지른다
+  });
+
+  test("urgent detection stops waiting for quiet — export must not stall behind a busy engine", async () => {
+    mockMeasureLeafStrokes.mockResolvedValue({});
+    const waitQuiet = async (isUrgent: () => boolean) => {
+      while (!isUrgent()) await new Promise((r) => setTimeout(r, 1));
+    };
+    const p = queueDetectDrawnLines(() => {}, "/fu.psd", 9, detectTree, [], preset, waitQuiet);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(mockMeasureLeafStrokes).not.toHaveBeenCalled(); // 엔진이 계속 바쁨 — 대기
+    expect(frontloadDetection("/fu.psd")).toBe(p);
+    await p; // 앞당기면 조용함을 더 기다리지 않는다
+    expect(mockMeasureLeafStrokes).toHaveBeenCalledTimes(2);
   });
 });
