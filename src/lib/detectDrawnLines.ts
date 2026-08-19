@@ -1,0 +1,92 @@
+import { hasAnyToken } from "./layerNames";
+import { SUGGEST_EXCLUDE_GROUPS, SUGGEST_EXCLUDE_TOKENS } from "./suggestLines";
+import type { StrokeFeatures } from "./engine";
+import type { Preset, TreeNode } from "./types";
+
+/**
+ * "이름은 라인이 아닌데 그림은 선인" 드로잉 레이어의 검출(2026-08-19 아티스트
+ * 결정). 신고 사례: 캐릭터 판의 ROPE DETAILS — 로프 빗금 획인데 이름에 line이
+ * 없어 매칭이 놓친다. 어휘를 늘리는 것(rope…)은 다음 판에서 다른 이름으로 또
+ * 뚫리는 두더지잡기라, 이름 대신 픽셀 굵기를 본다.
+ *
+ * 분업: 엔진은 수치만 잰다(measure_leaf_strokes). 여기가 무엇을 잴지(후보)와
+ * 문턱을 정하고, 통과한 잎은 군중 후보와 같은 수동 지정 경로로 라인이 된다 —
+ * 내보내기·저장·해제가 전부 검증된 길이다. 트리에는 네온과 같은 "라인인지
+ * 확인 필요" 배지가 붙는다.
+ *
+ * 군중 판의 실루엣은 획이 아니라서 여기로는 원리적으로 안 잡힌다 — 그쪽은
+ * 기존 "후보 일괄 지정"(suggestLines)이 계속 담당한다(사용자 확인 2026-08-19).
+ */
+
+/**
+ * 확실 구간 문턱. 납품 BG 26장 실측(1,756장)에서 나온 값들이다:
+ * - survive2 < 0.25: 이름으로 잡힌 라인의 95%가 0.3 미만이고, 눈 검증에서
+ *   0.25 미만 표본은 오탐 0이었다. 경계 사례(벽지 패턴·몰딩 띠·스우시)는
+ *   전부 0.28~0.47 구간이라 이 문턱 밖이다.
+ * - coverage < 0.15: 진짜 라인의 칠 면적은 1~9%. 경계 사례는 면적이 크다.
+ * - nNative >= 20000: 부스러기(빈 타일 조각) 가드 — 군중 판에서 획 검출기가
+ *   낸 오탐이 전부 이 아래였다.
+ */
+export const SURVIVE2_MAX = 0.25;
+export const COVERAGE_MAX = 0.15;
+export const MIN_NATIVE_PX = 20000;
+
+/**
+ * 한 RPC에 실어 보내는 잎 수. 엔진은 요청을 직렬로 처리하므로 파일의 후보를
+ * 한 번에 다 재면 그동안 미리보기가 줄을 선다 — 큰 잎 몇 장 단위로 끊어야
+ * 다른 요청이 사이에 낄 수 있다.
+ */
+export const STROKE_CHUNK = 6;
+
+/**
+ * 굵기를 재 볼 후보. 매칭이 놓친 그릴 수 있는 잎 중, 검출이 손대면 안 되는
+ * 것들을 이름 규칙으로 먼저 뺀다:
+ * - 프리셋 제외 그룹·토큰: 매칭과 같은 이유 — HEIGHTS·TEMPLATE 같은 참고
+ *   그룹과 col류(색 지정 이름)는 라인이 아니라고 이미 정해져 있다.
+ * - suggestLines 제외 어휘: 참고자료(REF·Field Guide류)·발광·글자 상자.
+ *   주석 낙서는 굵기로는 선이라 이름으로만 걸러진다(BG 26장 실측에서 주석
+ *   부류 17장 확인).
+ * - normal 블렌드만: 진짜 라인 645장이 전부 normal이었다(매칭과 같은 게이트).
+ */
+export function drawnLineCandidateIds(
+  tree: TreeNode[],
+  matchedIds: readonly number[],
+  preset: Preset,
+): number[] {
+  const matched = new Set(matchedIds);
+  const prefixes = preset.excludeGroupPrefixes ?? [];
+  const excludeTokens = [...(preset.excludeTokens ?? []), ...SUGGEST_EXCLUDE_TOKENS];
+  const out: number[] = [];
+  const walk = (nodes: TreeNode[]) => {
+    for (const node of nodes) {
+      const name = (node.name ?? "").trim();
+      if (node.kind === "group") {
+        if (prefixes.some((p) => name.startsWith(p))) continue;
+        if (SUGGEST_EXCLUDE_GROUPS.includes(name.toLowerCase())) continue;
+        if (hasAnyToken(name, excludeTokens)) continue;
+        walk(node.children ?? []);
+        continue;
+      }
+      if (node.kind !== "pixel") continue;
+      if (node.hasPixels === false) continue;
+      if (matched.has(node.id)) continue;
+      if (node.blendMode !== "normal") continue;
+      if (hasAnyToken(name, excludeTokens)) continue;
+      out.push(node.id);
+    }
+  };
+  walk(tree);
+  return out;
+}
+
+/** 측정 결과에서 확실 구간을 통과한 잎. null(못 잰 잎)은 그냥 넘어간다. */
+export function judgeDrawnLines(features: Record<string, StrokeFeatures | null>): number[] {
+  const out: number[] = [];
+  for (const [id, f] of Object.entries(features)) {
+    if (!f) continue;
+    if (f.survive2 < SURVIVE2_MAX && f.coverage < COVERAGE_MAX && f.nNative >= MIN_NATIVE_PX) {
+      out.push(Number(id));
+    }
+  }
+  return out.sort((a, b) => a - b);
+}

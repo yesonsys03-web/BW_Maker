@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 const mockOpenPsd = vi.fn();
 const mockCloseSession = vi.fn();
 const mockApplyPreset = vi.fn();
+const mockMeasureLeafStrokes = vi.fn();
 vi.mock("../lib/engine", async () => {
   const actual = await vi.importActual<typeof import("../lib/engine")>("../lib/engine");
   return {
@@ -11,6 +12,7 @@ vi.mock("../lib/engine", async () => {
     openPsd: (...a: unknown[]) => mockOpenPsd(...a),
     closeSession: (...a: unknown[]) => mockCloseSession(...a),
     applyPreset: (...a: unknown[]) => mockApplyPreset(...a),
+    measureLeafStrokes: (...a: unknown[]) => mockMeasureLeafStrokes(...a),
   };
 });
 
@@ -20,6 +22,7 @@ import type { Preset, TreeNode } from "../lib/types";
 import {
   appReducer,
   applyPresetEffect,
+  detectDrawnLinesEffect,
   buildInitialOpsState,
   EMPTY_OPS,
   initialAppState,
@@ -48,7 +51,8 @@ const preset: Preset = {
 } as unknown as Preset;
 
 const initial: AppState = {
-  files: [], activePath: null, opsByPath: {}, matchedIdsByPath: {}, errors: [], restoredMtimeByPath: {},
+  files: [], activePath: null, opsByPath: {}, matchedIdsByPath: {}, drawnLineIdsByPath: {},
+  errors: [], restoredMtimeByPath: {},
 };
 
 const leaf = (id: number, kind: string, visible = true): TreeNode => ({
@@ -1189,5 +1193,91 @@ describe("restoreProject", () => {
     });
 
     expect(s.files[0].presetApplied).toBe(false);
+  });
+});
+
+describe("drawnLinesDetected (픽셀 굵기 검출의 지정과 래치)", () => {
+  function opened(): AppState {
+    let s = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
+    s = appReducer(s, { type: "openStart", path: "/a.psd", activate: true });
+    return appReducer(s, {
+      type: "openSuccess",
+      path: "/a.psd",
+      result: { sessionId: 1, width: 1, height: 1, colorMode: "RGB", depth: 8, tree },
+    });
+  }
+
+  test("designates through the manual-line path and records the badge ids", () => {
+    const s = appReducer(opened(), { type: "drawnLinesDetected", path: "/a.psd", layerIds: [1] });
+    // 수동 지정과 같은 경로 — 포함까지 함께 켜진다(opsReducer의 setManualLine).
+    expect(s.opsByPath["/a.psd"].manualLineIds).toContain(1);
+    expect(s.opsByPath["/a.psd"].includedIds).toContain(1);
+    expect(s.drawnLineIdsByPath["/a.psd"]).toEqual([1]);
+  });
+
+  test("an empty result still latches, so the watcher stops re-measuring", () => {
+    const s0 = opened();
+    const s = appReducer(s0, { type: "drawnLinesDetected", path: "/a.psd", layerIds: [] });
+    expect(s.drawnLineIdsByPath["/a.psd"]).toEqual([]);
+    expect(s.opsByPath["/a.psd"]).toBe(s0.opsByPath["/a.psd"]);
+  });
+
+  test("a file that is not open ignores the action", () => {
+    const s = appReducer(initial, { type: "drawnLinesDetected", path: "/x.psd", layerIds: [1] });
+    expect(s).toBe(initial);
+  });
+
+  test("re-applying a preset drops the latch so detection reruns", () => {
+    const s0 = appReducer(opened(), { type: "drawnLinesDetected", path: "/a.psd", layerIds: [1] });
+    const s = appReducer(s0, {
+      type: "applyPresetResult", path: "/a.psd", matchedLayerIds: [2], operations: [],
+    });
+    expect(s.drawnLineIdsByPath).not.toHaveProperty("/a.psd");
+  });
+});
+
+describe("detectDrawnLinesEffect (선 그림 검출의 실제 동작)", () => {
+  // 후보 산정(제외 어휘)과 문턱은 detectDrawnLines.test.ts가 잠근다. 여기서는
+  // 오케스트레이션만 본다: 청크로 끊어 부르는지, 결과·실패가 래치로 끝나는지.
+  const detectTree: TreeNode[] = Array.from({ length: 8 }, (_, i) => ({
+    id: i + 1, name: `detail ${i + 1}`, kind: "pixel", visible: true, blendMode: "normal",
+    opacity: 255, bbox: [0, 0, 10, 10], hasMask: false, hasPixels: true,
+    path: [`detail ${i + 1}`],
+  })) as TreeNode[];
+
+  beforeEach(() => {
+    mockMeasureLeafStrokes.mockReset();
+  });
+
+  test("measures in chunks and lands the judged ids on that path", async () => {
+    mockMeasureLeafStrokes.mockImplementation(async (_sid: number, ids: number[]) =>
+      Object.fromEntries(ids.map((id) => [String(id), {
+        survive1: 0, survive2: 0, coverage: 0.02,
+        // 잎 1만 부스러기 가드 위 — 나머지는 너무 작아 걸러진다
+        nNative: id === 1 ? 120000 : 100,
+      }]))
+    );
+    const actions: AppAction[] = [];
+    await detectDrawnLinesEffect((a) => actions.push(a), "/a.psd", 3, detectTree, [], preset);
+
+    // 후보 8장, 청크 6 → 두 번에 나눠 잰다. 엔진이 직렬이라 이 틈이 미리보기의 숨구멍이다.
+    expect(mockMeasureLeafStrokes).toHaveBeenCalledTimes(2);
+    expect(mockMeasureLeafStrokes.mock.calls[0][1]).toHaveLength(6);
+    expect(actions).toEqual([{ type: "drawnLinesDetected", path: "/a.psd", layerIds: [1] }]);
+  });
+
+  test("a failure raises one card and still latches — no endless retry loop", async () => {
+    mockMeasureLeafStrokes.mockRejectedValue(new EngineRpcError({ message: "boom", traceback: "" }));
+    const actions: AppAction[] = [];
+    await detectDrawnLinesEffect((a) => actions.push(a), "/a.psd", 3, detectTree, [], preset);
+    expect(actions.map((a) => a.type)).toEqual(["pushError", "drawnLinesDetected"]);
+    expect(actions[1]).toEqual({ type: "drawnLinesDetected", path: "/a.psd", layerIds: [] });
+  });
+
+  test("no candidates means one empty latch and no engine call", async () => {
+    const actions: AppAction[] = [];
+    await detectDrawnLinesEffect((a) => actions.push(a), "/a.psd", 3, [], [], preset);
+    expect(mockMeasureLeafStrokes).not.toHaveBeenCalled();
+    expect(actions).toEqual([{ type: "drawnLinesDetected", path: "/a.psd", layerIds: [] }]);
   });
 });

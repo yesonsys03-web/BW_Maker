@@ -15,6 +15,7 @@ from .character import find_views, manual_views
 from .edges import EDGE_DEFAULTS, attach_overlays, plan_overlays
 from .export import export_psd as _export
 from .export import export_psd_split as _export_split
+from .linedetect import measure_strokes
 from .matching import (auto_merge_operations, auto_merge_preview,
                        match_preset, preset_operations)
 from .ops import build_export_plan, finalize_names
@@ -300,8 +301,8 @@ class Engine:
     _ALLOWED_METHODS = {
         "open_psd", "psd_mtimes", "close_session", "pin_file", "render_thumbnails",
         "render_preview", "render_document_preview", "warm_preview_tiles", "warm_tiles_pooled",
-        "apply_preset", "auto_merge_operations", "auto_merge_preview",
-        "export_psd", "batch_run",
+        "apply_preset", "measure_leaf_strokes", "auto_merge_operations",
+        "auto_merge_preview", "export_psd", "batch_run",
     }
 
     def __init__(self, out=None):
@@ -460,6 +461,38 @@ class Engine:
             "operations": preset_operations(s["tree"], matched, preset,
                                             source_stem=Path(s["path"]).stem),
         }
+
+    def measure_leaf_strokes(self, sessionId, layerIds):
+        """
+        잎들의 굵기 특징(linedetect.measure_strokes). 프런트의 "선으로 그려진
+        레이어" 검출이 프리셋 적용 뒤에 부른다 — 무엇을 잴지(후보)와 문턱은
+        저쪽이 정하고, 여기는 픽셀만 본다.
+
+        디코드가 비싸므로 두 가지로 지킨다: 세션에 잎 단위로 캐시해서 프리셋을
+        다시 적용해도 같은 잎을 두 번 디코드하지 않고, 호출자는 잎 몇 개씩
+        끊어 부른다 — 엔진은 요청을 직렬로 처리하므로 한 번에 다 재면 그동안
+        미리보기가 줄을 선다.
+
+        잎 하나가 못 재어져도(픽셀 없음·디코드 실패) 나머지는 잰다 — 그 잎만
+        None이다. 전체를 실패시키면 이상한 잎 하나가 파일 전체의 검출을 막는다.
+        """
+        s = self.store.get(sessionId)
+        cache = s.setdefault("stroke_features", {})
+        out = {}
+        for lid in layerIds:
+            if lid not in cache:
+                layer = s["layers_by_id"].get(lid)
+                node = s["nodes_by_id"].get(lid)
+                if layer is None or node is None or node["kind"] == "group":
+                    cache[lid] = None
+                else:
+                    try:
+                        cache[lid] = measure_strokes(layer)
+                    except Exception as e:
+                        _perf(perf="strokes", error=type(e).__name__, layer=lid)
+                        cache[lid] = None
+            out[str(lid)] = cache[lid]
+        return {"features": out}
 
     def batch_run(self, paths, preset, outputDir=None, overwrite=False,
                   manualLineIds=None):

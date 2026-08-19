@@ -1,4 +1,4 @@
-import { tokenMatchAny } from "./layerNames";
+import { isNeonName, tokenMatchAny } from "./layerNames";
 import type { Entry } from "./opsReducer";
 import type { TreeNode } from "./types";
 
@@ -292,4 +292,23 @@ function elementNameOf(leaf: FlatLeaf, roleTokens: string[]): string {
     }
   }
   return "";
+}
+
+/**
+ * 매칭된 레이어 중 네온 어휘로 걸린 leaf 수. FilePanel의 파일 행 "네온 N"
+ * 배지가 이 수를 단다 — 트리의 "라인인지 확인 필요" 배지(LayerTree,
+ * isNeonName)와 같은 판정이어야 목록과 트리가 다른 수를 말하지 않는다.
+ * path가 조상 이름까지 담으므로 NEON 그룹에 딸려온 자식도 센다.
+ */
+export function countNeonMatches(
+  nodes: TreeNode[],
+  matchedIds: readonly number[] | undefined,
+): number {
+  if (!matchedIds || matchedIds.length === 0) return 0;
+  const matched = new Set(matchedIds);
+  let count = 0;
+  for (const { node } of flattenLeaves(nodes)) {
+    if (matched.has(node.id) && node.path.some(isNeonName)) count++;
+  }
+  return count;
 }

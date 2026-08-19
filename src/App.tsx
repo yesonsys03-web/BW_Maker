@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import { AppProvider, applyPresetEffect, attachSessionEffect, buildInitialOpsState, openFileEffect, useAppStore, type AppState, type FileEntry, type PreparedFileResult } from "./state/appStore";
+import { AppProvider, applyPresetEffect, attachSessionEffect, buildInitialOpsState, detectDrawnLinesEffect, openFileEffect, useAppStore, type AppState, type FileEntry, type PreparedFileResult } from "./state/appStore";
 import type { SkippedLayer } from "./lib/engine";
 import { FilePanel } from "./components/FilePanel";
 import { LayerTree } from "./components/LayerTree";
@@ -29,7 +29,7 @@ import {
   clampTreePanelWidth,
   parseTreePanelWidth,
 } from "./lib/layout";
-import { splitLineLeafIds } from "./lib/layerFilter";
+import { countNeonMatches, splitLineLeafIds } from "./lib/layerFilter";
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError, visibleIdsForPreview } from "./lib/preview";
@@ -2039,6 +2039,54 @@ function AppShell() {
   );
 
   /**
+   * 파일별 "라인확인 N" 배지(FilePanel) — 확인이 필요한 라인의 수. 두 출처를
+   * 합친다: 네온 어휘로 걸린 매칭(countNeonMatches)과 픽셀 굵기 검출
+   * (drawnLineIdsByPath). 검출 후보는 비매칭 잎에서만 나오므로 둘은 겹치지
+   * 않는다. 트리 안의 배지만으로는 어느 파일에 확인할 것이 있는지 목록에서
+   * 안 보인다 — 파일을 하나씩 클릭해 봐야 한다.
+   */
+  const reviewCounts = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const file of state.files) {
+      if (!file.tree) continue;
+      const count =
+        countNeonMatches(file.tree, state.matchedIdsByPath[file.path]) +
+        (state.drawnLineIdsByPath[file.path]?.length ?? 0);
+      if (count > 0) out[file.path] = count;
+    }
+    return out;
+  }, [state.files, state.matchedIdsByPath, state.drawnLineIdsByPath]);
+
+  /**
+   * "선으로 그려진 레이어" 검출의 감시 그물. 프리셋이 붙는 경로가 셋이라(열기
+   * 큐의 자동 적용·준비 워커·명시 "적용") 호출부마다 검출을 잇는 대신, "매칭은
+   * 있는데 검출 기록이 없는 열린 파일"을 보고 돈다 — detectDrawnLinesEffect의
+   * 결과 dispatch가 래치(drawnLineIdsByPath)를 세우므로 파일당 한 번이다.
+   *
+   * 복원한 파일은 건너뛴다(openSuccess의 isRestoredMatch와 같은 판정). 검출
+   * 지정은 저장 당시의 ops에 이미 들어 있고, 다시 돌리면 아티스트가 일부러
+   * 해제한 잎이 소리 없이 되살아난다.
+   */
+  const detectInFlightRef = useRef(new Set<string>());
+  useEffect(() => {
+    const preset = selectedPreset;
+    if (!preset) return;
+    for (const file of state.files) {
+      if (file.status !== "open" || !file.tree || file.sessionId === undefined) continue;
+      if (!file.presetApplied) continue;
+      const matched = state.matchedIdsByPath[file.path];
+      if (matched === undefined) continue;
+      if (state.drawnLineIdsByPath[file.path] !== undefined) continue;
+      if (file.path in state.restoredMtimeByPath && state.restoredMtimeByPath[file.path] === file.mtime) continue;
+      if (detectInFlightRef.current.has(file.path)) continue;
+      detectInFlightRef.current.add(file.path);
+      void detectDrawnLinesEffect(dispatch, file.path, file.sessionId, file.tree, matched, preset).finally(
+        () => detectInFlightRef.current.delete(file.path)
+      );
+    }
+  }, [state.files, state.matchedIdsByPath, state.drawnLineIdsByPath, state.restoredMtimeByPath, selectedPreset, dispatch]);
+
+  /**
    * "라인필요" 파일 전부에 라인 후보를 일괄 지정한다. 규칙과 측정 근거는
    * lib/suggestLines.ts — 군중 판에는 획 선화가 없어서 이름 규칙이 원리적으로
    * 못 잡고, 납품에는 실루엣 그림이 그대로 나가야 한다.
@@ -2296,6 +2344,7 @@ function AppShell() {
         onCacheWorkersChange={handleCacheWorkersChange}
         stopped={stoppedLabel}
         entryCounts={entryCounts}
+        reviewCounts={reviewCounts}
         needsLineCount={needsLineCount}
         onApplyLineSuggestions={handleApplyLineSuggestions}
         staleProjectPaths={staleProjectPaths}
@@ -2383,6 +2432,7 @@ function AppShell() {
           status={activeFile?.status}
           ops={ops}
           matchedIds={(state.activePath && state.matchedIdsByPath[state.activePath]) || []}
+          drawnLineIds={(state.activePath && state.drawnLineIdsByPath[state.activePath]) || []}
           thumbs={(state.activePath && thumbsByPath[state.activePath]) || {}}
           onSetIncluded={setIncluded}
           onTogglePreview={togglePreview}

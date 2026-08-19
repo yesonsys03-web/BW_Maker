@@ -101,6 +101,8 @@ function Harness(props: {
   initialOps: OpsState;
   onSetManualLine: (ids: number[], on: boolean) => void;
   onSetIncluded?: (ids: number[]) => void;
+  matchedIds?: number[];
+  drawnLineIds?: number[];
 }) {
   const [ops, dispatch] = useReducer(opsReducer, props.initialOps);
   const spy = useRef(props.onSetManualLine);
@@ -126,7 +128,8 @@ function Harness(props: {
       path="/cuts/a.psd"
       status="open"
       ops={ops}
-      matchedIds={[]}
+      matchedIds={props.matchedIds ?? []}
+      drawnLineIds={props.drawnLineIds ?? []}
       thumbs={{}}
       onSetIncluded={setIncluded}
       onTogglePreview={vi.fn()}
@@ -911,4 +914,65 @@ test("a group that only holds other groups gets no row of its own", () => {
 
   const names = groupRows().map((r) => r.querySelector(".node-name")?.textContent);
   expect(names).toEqual(["CROWD / MID", "CROWD / FRONT"]);
+});
+
+/**
+ * 네온 어휘로 걸린 행의 "라인인지 확인 필요" 배지(BG 프리셋, presets.ts 주석).
+ * 간판·튜브는 획 그림이 맞지만 점 전구·글로 막대가 같은 이름 아래 섞여 있어,
+ * 기계가 포함하고 사람이 확인한다 — 배지가 그 확인의 손잡이다.
+ */
+function mountMatched(tree: TreeNode[], includedIds: number[], matchedIds: number[]) {
+  render(
+    <Harness
+      tree={tree}
+      initialOps={opsOf(includedIds)}
+      onSetManualLine={vi.fn()}
+      matchedIds={matchedIds}
+    />
+  );
+}
+
+test("a neon-matched row wears the needs-review badge", () => {
+  mountMatched([leaf(1, "NEON red", "pixel")], [1], [1]);
+  expect(screen.getByText("라인인지 확인 필요")).toBeTruthy();
+});
+
+test("a leaf pulled in by a NEON group wears the badge too", () => {
+  // path는 조상 이름까지 담는다(엔진 tree.py) — 그룹 이름이 걸린 딸림도 표시.
+  const child = { ...leaf(2, "sign", "pixel"), path: ["NEON", "sign"] };
+  mountMatched([group(1, "NEON", [child])], [2], [2]);
+  expect(screen.getByText("라인인지 확인 필요")).toBeTruthy();
+});
+
+test("an ordinary matched line row wears no badge", () => {
+  mountMatched([leaf(1, "Wall_Line", "pixel")], [1], [1]);
+  expect(screen.queryByText("라인인지 확인 필요")).toBeNull();
+});
+
+test("a neon row the preset did not match wears no badge", () => {
+  // CHAR 프리셋에는 네온 어휘가 없다 — 매칭이 안 잡은 행에 배지가 붙으면
+  // "프리셋이 잡았다"는 말 자체가 거짓이 된다.
+  mountMatched([leaf(1, "NEON red", "pixel")], [], []);
+  expect(screen.queryByText("라인인지 확인 필요")).toBeNull();
+});
+
+test("unchecking a neon row keeps the badge", () => {
+  // 배지는 "매칭이 왜 잡았는지"의 표시라 체크 해제로 사라지면 안 된다 —
+  // 확인을 마친 행과 아직 안 본 행이 화면에서 같아진다.
+  mountMatched([leaf(1, "NEON red", "pixel")], [], [1]);
+  expect(screen.getByText("라인인지 확인 필요")).toBeTruthy();
+});
+
+test("a pixel-detected drawn-line row wears the same needs-review badge", () => {
+  // 이름에 네온도 라인도 없는 잎 — 픽셀 굵기 검출(drawnLineIds)만으로 배지가
+  // 붙어야 한다. 신고 사례가 정확히 이 모양이다(ROPE DETAILS).
+  render(
+    <Harness
+      tree={[leaf(1, "ROPE DETAILS", "pixel")]}
+      initialOps={opsOf([1])}
+      onSetManualLine={vi.fn()}
+      drawnLineIds={[1]}
+    />
+  );
+  expect(screen.getByText("라인인지 확인 필요")).toBeTruthy();
 });

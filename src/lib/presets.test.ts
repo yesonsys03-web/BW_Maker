@@ -59,8 +59,10 @@ test("BG_PRESET matches the brief contract", () => {
   expect(BG_PRESET).toEqual({
     name: "BG",
     // 어휘가 둘인 이유는 include_terms 주석에 있다 — lineart는 토큰 하나라
-    // line으로는 영영 안 걸린다(납품 캐릭터 100장에서 83개).
-    include: { type: "contains", value: "line, lineart", caseSensitive: false },
+    // line으로는 영영 안 걸린다(납품 캐릭터 100장에서 83개). neon은 BG에만
+    // 있다(2026-08-19 결정, BG_PRESET 주석) — 네온으로 걸린 레이어는 트리에
+    // "라인인지 확인 필요" 배지가 붙어 사람이 확인하고 뺄 수 있다.
+    include: { type: "contains", value: "line, lineart, neon", caseSensitive: false },
     excludeGroupPrefixes: ["-"],
     matchGroups: true,
     includeHidden: true,
@@ -83,14 +85,16 @@ test("BG_PRESET matches the brief contract", () => {
   });
 });
 
-test("CHAR_PRESET은 BG와 **두 가지만** 다르다", () => {
+test("CHAR_PRESET은 BG와 **세 가지만** 다르다", () => {
   // 목록을 두 번 적는 대신 차이를 센다. 값을 통째로 다시 쓰면 어느 쪽을 고치다
   // 다른 쪽이 따라 움직여도 테스트가 그대로 통과한다 — 두 프리셋의 관계가
   // 계약이므로 관계를 재야 한다.
   const differing = (Object.keys(BG_PRESET) as (keyof typeof BG_PRESET)[]).filter(
     (k) => JSON.stringify(BG_PRESET[k]) !== JSON.stringify(CHAR_PRESET[k]),
   );
-  expect(differing.sort()).toEqual(["edgeLines", "excludeGroupPrefixes", "name"]);
+  // include: 네온 어휘는 BG만 갖는다 — 캐릭터 판의 neon은 의상 장식일 공산이 크다.
+  expect(differing.sort()).toEqual(["edgeLines", "excludeGroupPrefixes", "include", "name"]);
+  expect(CHAR_PRESET.include.value).toBe("line, lineart");
   expect(CHAR_PRESET.name).toBe("CHAR");
   expect(CHAR_PRESET.excludeGroupPrefixes).toEqual([
     "-", "HEIGHTS", "TEMPLATE", "COLOR PALETTE",

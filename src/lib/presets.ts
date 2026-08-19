@@ -51,17 +51,28 @@ const SHARED: Omit<Preset, "name" | "excludeGroupPrefixes" | "edgeLines"> = {
   excludeTokens: [...DEFAULT_EXCLUDE_TOKENS],
 };
 
-/** 배경 판용. 경계선 생성은 끈다 — 그 기능은 캐릭터 모델 전용이다. */
+/**
+ * 배경 판용. 경계선 생성은 끈다 — 그 기능은 캐릭터 모델 전용이다.
+ *
+ * BG만 `neon`을 라인 어휘에 더한다(2026-08-19 아티스트 결정). 납품 BG 26장
+ * 전수 실측에서 도시 판의 네온 간판·튜브 47장이 전부 가는 획 그림인데 이름에
+ * line이 없어 빠지고 있었다. 다만 같은 이름 아래 빛 장식(점 전구·글로 막대)이
+ * 섞여 있으므로 자동 포함으로 끝내지 않는다 — 네온으로 걸린 레이어에는 트리에
+ * "라인인지 확인 필요" 배지가 붙는다(LayerTree + layerNames.isNeonName).
+ */
 export const BG_PRESET: Preset = {
   ...SHARED,
   name: "BG",
+  include: { type: "contains", value: "line, lineart, neon", caseSensitive: false },
   excludeGroupPrefixes: ["-"],
   edgeLines: { ...DEFAULT_EDGE_LINES },
 };
 
 /**
- * 캐릭터 모델 판용. BG와 **두 가지만** 다르다.
+ * 캐릭터 모델 판용. BG와 **세 가지만** 다르다.
  *
+ * - 라인 어휘에 `neon`이 없다(SHARED 그대로). 네온 간판은 배경 판의 물건이고,
+ *   캐릭터 판에서 neon이 걸리면 그건 의상 장식 색 레이어일 가능성이 크다.
  * - 그룹 접두사에 `HEIGHTS`, `TEMPLATE`, `COLOR PALETTE`를 더한다. 캐릭터 판에만
  *   있는 참고용 그룹이다(BG 26장 전수에서 이 이름 0건이라 BG에 넣어도 무해하지만,
  *   넣지 않는 편이 각 프리셋이 무엇을 위한 것인지 분명하다).

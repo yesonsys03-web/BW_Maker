@@ -7,7 +7,8 @@ import {
   type Dispatch,
   type ReactNode,
 } from "react";
-import { EngineRpcError, applyPreset, closeSession, openPsd, type SkippedLayer } from "../lib/engine";
+import { EngineRpcError, applyPreset, closeSession, measureLeafStrokes, openPsd, type SkippedLayer, type StrokeFeatures } from "../lib/engine";
+import { STROKE_CHUNK, drawnLineCandidateIds, judgeDrawnLines } from "../lib/detectDrawnLines";
 import { buildEntries, opsReducer, type OpsState } from "../lib/opsReducer";
 import type { ProjectEntry } from "../lib/project";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
@@ -85,6 +86,18 @@ export interface AppState {
    * 타입에서 하나도 안 걸린다.
    */
   matchedIdsByPath: Record<string, number[] | undefined>;
+  /**
+   * 픽셀 굵기 검출("선으로 그려진 레이어", lib/detectDrawnLines)이 파일별로
+   * 지정한 잎 id. 트리·파일 목록의 "라인인지 확인 필요" 배지와, "이 파일은
+   * 검출을 이미 마쳤다" 래치의 근거다 — **빈 배열도 사실이다**("검출했는데
+   * 없었다"). 키가 없어야 App의 감시 효과가 검출을 돈다.
+   *
+   * 지정 자체는 opsByPath에 있다(수동 지정과 같은 경로). 이 맵은 파생 표시라
+   * 프로젝트에 저장하지 않고, 복원한 파일은 검출 자체를 건너뛴다 — 저장된
+   * 손 작업 위에 자동 지정을 다시 걸면, 아티스트가 일부러 해제한 잎이
+   * 소리 없이 되살아난다.
+   */
+  drawnLineIdsByPath: Record<string, number[] | undefined>;
   errors: ErrorEntry[];
   /**
    * 프로젝트에서 복원한 파일의 수정시각. openSuccess가 이걸 보고 복원한 작업을
@@ -132,6 +145,7 @@ export type AppAction =
   | { type: "setSolo"; path: string; layerIds: number[]; solo: boolean }
   | { type: "setEdgeColour"; path: string; layerIds: number[]; on: boolean }
   | { type: "setManualLine"; path: string; layerIds: number[]; on: boolean }
+  | { type: "drawnLinesDetected"; path: string; layerIds: number[] }
   | { type: "pushOp"; path: string; op: Operation }
   | { type: "setIncluded"; path: string; includedIds: number[] }
   | { type: "applyPresetResult"; path: string; matchedLayerIds: number[]; operations: Operation[] }
@@ -160,6 +174,7 @@ export const initialAppState: AppState = {
   activePath: null,
   opsByPath: {},
   matchedIdsByPath: {},
+  drawnLineIdsByPath: {},
   errors: [],
   restoredMtimeByPath: {},
 };
@@ -198,6 +213,13 @@ export function buildInitialOpsState(tree: TreeNode[]): OpsState {
     includedIds, previewHiddenIds, soloIds: [], edgeColourIds: [],
     manualLineIds: [], ops: [], entries: buildEntries(includedIds, []),
   };
+}
+
+/** 맵에서 키 하나를 뺀 사본. 파일 단위 기록을 그 파일만 버릴 때 쓴다. */
+function dropKey<T>(map: Record<string, T>, key: string): Record<string, T> {
+  const next = { ...map };
+  delete next[key];
+  return next;
 }
 
 function updateFile(files: FileEntry[], path: string, patch: Partial<FileEntry>): FileEntry[] {
@@ -252,9 +274,14 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       // 다시 그린다(설계 7절).
       const matchedIdsByPath = { ...state.matchedIdsByPath };
       if (!isRestoredMatch) delete matchedIdsByPath[path];
+      // 검출 기록은 무조건 버린다 — 배지는 저장 안 되는 파생 정보라 지킬 것이
+      // 없고, 남기면 감시 효과가 "이미 검출했다"로 읽어 다시 재지 않는다.
+      // (복원 파일은 감시 효과 쪽 가드가 검출을 건너뛴다.)
+      const drawnLineIdsByPath = dropKey(state.drawnLineIdsByPath, path);
       return {
         ...state,
         matchedIdsByPath,
+        drawnLineIdsByPath,
         files: updateFile(state.files, path, {
           status: "open",
           sessionId: result.sessionId,
@@ -350,6 +377,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           presetApplied: true,
         }),
         matchedIdsByPath: { ...state.matchedIdsByPath, [path]: result.matchedLayerIds },
+        drawnLineIdsByPath: dropKey(state.drawnLineIdsByPath, path),
         opsByPath: {
           ...state.opsByPath,
           [path]: { ...initial, includedIds, entries: buildEntries(includedIds, initial.ops) },
@@ -427,6 +455,23 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         type: "setManualLine", layerIds: action.layerIds, on: action.on,
       });
       return { ...state, opsByPath: { ...state.opsByPath, [action.path]: next } };
+    }
+
+    // 픽셀 굵기 검출이 "선으로 그려진" 잎을 라인으로 지정한다. 지정 자체는
+    // 수동 지정(setManualLine)과 같은 경로라 내보내기·저장·해제가 전부 검증된
+    // 길을 탄다. 빈 배열도 기록한다 — "검출했는데 없었다"와 "아직 안 했다"가
+    // 같아지면 감시 효과가 같은 파일을 영영 다시 잰다.
+    case "drawnLinesDetected": {
+      const current = state.opsByPath[action.path];
+      if (!current) return state;
+      const next = action.layerIds.length === 0
+        ? current
+        : opsReducer(current, { type: "setManualLine", layerIds: action.layerIds, on: true });
+      return {
+        ...state,
+        opsByPath: { ...state.opsByPath, [action.path]: next },
+        drawnLineIdsByPath: { ...state.drawnLineIdsByPath, [action.path]: action.layerIds },
+      };
     }
 
     case "pushOp": {
@@ -509,6 +554,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           // 파일마다 프리셋을 붙이는데, 전역 칸 하나에 덮어쓰면 화면이 보고 있는
           // 파일의 목록이 남의 id로 바뀐다(AppState.matchedIdsByPath 주석 참고).
           matchedIdsByPath: { ...state.matchedIdsByPath, [action.path]: action.matchedLayerIds },
+          // 프리셋이 다시 걸렸으니 검출도 다시 — 감시 효과가 키 없음을 보고 돈다.
+          drawnLineIdsByPath: dropKey(state.drawnLineIdsByPath, action.path),
           // presetApplied: 사람이 "적용"을 먼저 눌렀다면 자동 적용이 그 위에 또
           // 걸릴 이유가 없다.
           //
@@ -586,6 +633,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         files: state.files.filter((f) => f.path !== action.path),
         opsByPath,
         matchedIdsByPath,
+        drawnLineIdsByPath: dropKey(state.drawnLineIdsByPath, action.path),
         restoredMtimeByPath,
         activePath: wasActive ? null : state.activePath,
       };
@@ -648,6 +696,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         // 옛 프로세스가 들고 있던 세션이 전부 사라졌으므로 그 세션에서 나온
         // 매칭 결과는 버린다(복원한 파일만 위와 같이 예외다).
         matchedIdsByPath,
+        // 검출 기록도 세션과 함께 죽는다. 파일을 다시 열어 프리셋이 붙으면
+        // 감시 효과가 다시 잰다.
+        drawnLineIdsByPath: {},
         files: state.files.map((f) => ({ path: f.path, status: "idle" })),
       };
     }
@@ -795,6 +846,51 @@ export async function applyPresetEffect(
     const error: EngineError = e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
     dispatch({ type: "pushError", title: `프리셋 자동 적용 실패: ${path}`, error });
     return [];
+  }
+}
+
+/**
+ * "이름은 라인이 아닌데 그림은 선인" 잎의 검출. 후보와 문턱의 근거는
+ * lib/detectDrawnLines.ts — 여기는 오케스트레이션만 한다. 프리셋 적용이 끝난
+ * 파일에서 App의 감시 효과가 부른다(경로가 셋이라 — 자동 적용·준비 워커·
+ * 명시 적용 — 호출부마다 잇는 대신 상태를 보고 돈다).
+ *
+ * 후보를 STROKE_CHUNK씩 끊어 재는 것은 엔진이 요청을 직렬로 처리해서다 —
+ * 한 번에 다 재면 그동안 미리보기가 줄을 선다. 결과는 0장이어도 dispatch한다
+ * (래치 — drawnLineIdsByPath 주석). 실패도 카드 한 장 + 빈 래치로 끝낸다:
+ * 래치가 없으면 감시 효과가 같은 실패를 영영 반복한다.
+ */
+export async function detectDrawnLinesEffect(
+  dispatch: Dispatch<AppAction>,
+  path: string,
+  sessionId: number,
+  tree: TreeNode[],
+  matchedIds: number[],
+  preset: Preset
+): Promise<void> {
+  const candidates = drawnLineCandidateIds(tree, matchedIds, preset);
+  const features: Record<string, StrokeFeatures | null> = {};
+  try {
+    let sid = sessionId;
+    for (let i = 0; i < candidates.length; i += STROKE_CHUNK) {
+      const chunk = candidates.slice(i, i + STROKE_CHUNK);
+      const part = await withEvictedSessionRetry(
+        path,
+        sid,
+        (s) => measureLeafStrokes(s, chunk),
+        (r) => {
+          sid = r.sessionId;
+          dispatch({ type: "sessionRefreshed", path, result: r });
+        }
+      );
+      Object.assign(features, part);
+    }
+    dispatch({ type: "drawnLinesDetected", path, layerIds: judgeDrawnLines(features) });
+  } catch (e) {
+    const error: EngineError =
+      e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
+    dispatch({ type: "pushError", title: `선 그림 검출 실패: ${path}`, error });
+    dispatch({ type: "drawnLinesDetected", path, layerIds: [] });
   }
 }
 

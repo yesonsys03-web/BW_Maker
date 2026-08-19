@@ -14,6 +14,7 @@ import {
 } from "./layerFilter";
 import { pixelLeafIds } from "./preview";
 import type { TreeNode } from "./types";
+import { countNeonMatches } from "./layerFilter";
 
 function leaf(id: number, name: string, path: string[], kind = "pixel"): TreeNode {
   return {
@@ -308,4 +309,24 @@ test("손으로 지정한 라인은 규칙이 잡은 것과 함께 라인만 목
   // 지정이 없으면 예전 그대로 — 규칙 결과만 보여준다.
   expect(lineLeafIds(leaves, [2])).toEqual([2]);
   expect(lineLeafIds(leaves, [3], [])).toEqual([3]);
+});
+
+/**
+ * countNeonMatches는 FilePanel 파일 행의 "네온 N" 배지 수다. 트리의 "라인인지
+ * 확인 필요" 배지(LayerTree, isNeonName)와 같은 판정이어야 목록과 트리가 다른
+ * 수를 말하지 않는다.
+ */
+test("countNeonMatches counts matched neon leaves, own name or ancestry", () => {
+  const t: TreeNode[] = [
+    leaf(1, "NEON red", ["NEON red"]),
+    leaf(2, "Wall_Line", ["Wall_Line"]),
+    // 매칭 안 된 네온 — 프리셋이 안 잡은 것에 배지를 달면 "잡았다"가 거짓이 된다
+    leaf(3, "NEON blue", ["NEON blue"]),
+    // NEON 그룹에 딸려온 자식 — path의 조상 이름으로 센다
+    group(10, "NEON", ["NEON"], [leaf(4, "sign", ["NEON", "sign"])]),
+  ];
+  expect(countNeonMatches(t, [1, 2, 4])).toBe(2);
+  expect(countNeonMatches(t, [2])).toBe(0);
+  expect(countNeonMatches(t, [])).toBe(0);
+  expect(countNeonMatches(t, undefined)).toBe(0);
 });

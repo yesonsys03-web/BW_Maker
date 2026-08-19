@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { hasAnyToken, includeTerms, tokenMatch, tokenMatchAny, tokenize } from "./layerNames";
+import { hasAnyToken, includeTerms, isNeonName, tokenMatch, tokenMatchAny, tokenize } from "./layerNames";
 
 /**
  * engine/tests/test_names.py와 글자 그대로 짝을 이루는 거울이다.
@@ -69,4 +69,19 @@ test("쉼표 목록 중 하나라도 걸리면 통과한다 — 엔진 include_t
   // 쉼표가 없으면 단일 어휘와 같다
   expect(tokenMatchAny("lineart - ", "line")).toBe(false);
   expect(includeTerms(" line ,, lineart , ")).toEqual(["line", "lineart"]);
+});
+
+/**
+ * isNeonName은 엔진에 짝이 없다(트리의 "라인인지 확인 필요" 배지 전용이라
+ * 거울 규칙 밖이다). 매칭과 같은 토큰 규칙을 쓰는지만 본다 — 부분 문자열로
+ * 바뀌면 "neonlight" 같은 한 덩어리 이름이 오탐으로 배지를 단다.
+ */
+test("isNeonName follows the token rule, not substrings", () => {
+  expect(isNeonName("NEON red")).toBe(true);
+  expect(isNeonName("neon2")).toBe(true); // 숫자는 별도 토큰
+  expect(isNeonName("Red_Neon")).toBe(true);
+  expect(isNeonName("NEONS")).toBe(true); // 복수형 s는 매칭과 같은 규칙으로 허용
+  expect(isNeonName("neonlight")).toBe(false); // 소문자 한 덩어리 = 한 토큰
+  expect(isNeonName("none")).toBe(false);
+  expect(isNeonName("Wall_Line")).toBe(false);
 });

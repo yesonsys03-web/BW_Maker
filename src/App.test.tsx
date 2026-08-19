@@ -12,6 +12,9 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 const engine = vi.hoisted(() => ({
   openPsd: vi.fn(),
   applyPreset: vi.fn(),
+  // 감시 효과(선 그림 검출)가 프리셋 적용 뒤에 부른다. 빈 특징을 돌려주면
+  // 판정이 0장이라 래치만 서고 화면에는 아무 일도 없다.
+  measureLeafStrokes: vi.fn(async () => ({})),
   renderThumbnails: vi.fn(),
   renderPreview: vi.fn(),
   renderDocumentPreview: vi.fn(),
@@ -2573,7 +2576,9 @@ test("bulk-apply turns a needs-line file into exportable entries", async () => {
   await waitFor(() => expect(screen.getByText("라인필요 1개")).toBeTruthy());
   expect(screen.getByText("라인필요")).toBeTruthy();
 
-  click(screen.getByText("후보 일괄 지정"));
+  // 미리보기의 빈 상태 안내문도 같은 문구를 담으므로 버튼으로 한정한다
+  // (요소를 추가하면 bare 조회부터 이름 한정으로 — flaky-resume-test 메모리).
+  click(screen.getByRole("button", { name: "후보 일괄 지정" }));
 
   // treeOf의 픽셀 잎 셋이 전부 후보다(merge 없음 → 3장). 배지와 막대는 함께
   // 사라진다 — 막대가 남아 있다면 후보를 못 찾은 파일이 남았다는 뜻이어야 한다.

@@ -25,6 +25,7 @@ import {
   type MergeDestination,
   type OpsState,
 } from "../lib/opsReducer";
+import { isNeonName } from "../lib/layerNames";
 import { groupSoloIds, toEngineError } from "../lib/preview";
 import { PLANE_TOKENS, type EngineError, type MergeRule, type Operation, type TreeNode } from "../lib/types";
 import type { FileStatus } from "../state/appStore";
@@ -38,6 +39,12 @@ interface LayerTreeProps {
   status: FileStatus | undefined;
   ops: OpsState;
   matchedIds: number[];
+  /**
+   * 픽셀 굵기 검출("선으로 그려진 레이어", lib/detectDrawnLines)이 지정한 잎.
+   * 네온과 같은 "라인인지 확인 필요" 배지를 단다 — 기계가 포함하고 사람이
+   * 확인하는 구도가 같아서다.
+   */
+  drawnLineIds?: number[];
   thumbs: Record<number, string>;
   onSetIncluded: (includedIds: number[]) => void;
   onTogglePreview: (layerId: number) => void;
@@ -183,6 +190,7 @@ export function LayerTree({
   status,
   ops,
   matchedIds,
+  drawnLineIds,
   thumbs,
   onSetIncluded,
   onTogglePreview,
@@ -233,6 +241,7 @@ export function LayerTree({
   const edgeColourSet = useMemo(() => new Set(ops.edgeColourIds), [ops.edgeColourIds]);
   const manualLineSet = useMemo(() => new Set(ops.manualLineIds), [ops.manualLineIds]);
   const matchedSet = useMemo(() => new Set(matchedIds), [matchedIds]);
+  const drawnLineSet = useMemo(() => new Set(drawnLineIds ?? []), [drawnLineIds]);
 
   const allLeaves = useMemo(() => (tree ? flattenLeaves(tree) : []), [tree]);
 
@@ -923,11 +932,20 @@ export function LayerTree({
     const lineTargets = manualLineClickTargets(node.id);
     const flat = opts.breadcrumb !== undefined;
     const exportLabel = exportLabels.get(node.id);
+    // "라인인지 확인 필요"의 두 출처. 기계가 포함하고 사람이 확인하는 구도가
+    // 같아 배지는 하나다. 체크·지정을 해제해도 배지는 남는다 — 왜 잡혔는지의
+    // 표시라서다.
+    // - 네온: 어휘로 걸린 매칭(BG 프리셋). path가 조상 이름까지 포함하므로
+    //   NEON **그룹**에 딸려온 자식도 잡는다.
+    // - 검출: 픽셀 굵기가 선 그림으로 판정한 잎(이름 규칙이 놓친 것).
+    const neonReview = isMatched && node.path.some(isNeonName);
+    const drawnReview = drawnLineSet.has(node.id);
+    const review = neonReview || drawnReview;
 
     return (
       <div
         key={node.id}
-        className={`tree-row tree-row-leaf${flat ? " tree-row-flat" : ""}${opts.nested ? " tree-row-merge-source" : ""}${selected ? " selected" : ""}${isMatched ? " matched" : ""}${edgeColour ? " edge-colour" : ""}`}
+        className={`tree-row tree-row-leaf${flat ? " tree-row-flat" : ""}${opts.nested ? " tree-row-merge-source" : ""}${selected ? " selected" : ""}${isMatched ? " matched" : ""}${edgeColour ? " edge-colour" : ""}${review ? " line-review" : ""}`}
         style={{ paddingLeft: `${opts.indentPx}px` }}
         role={flat ? "listitem" : "treeitem"}
         aria-selected={selected}
@@ -992,8 +1010,20 @@ export function LayerTree({
             </span>
           )}
         </span>
-        {(edgeColour || exportLabel) && (
+        {(edgeColour || exportLabel || review) && (
           <span className="node-trailing">
+            {review && (
+              <span
+                className="node-review-badge"
+                title={
+                  neonReview
+                    ? "이름에 NEON이 있어 라인으로 자동 포함됐습니다. 간판·튜브처럼 획으로 그린 그림이면 라인이 맞고, 점 전구·글로 막대 같은 빛 장식이면 체크를 해제하세요."
+                    : "픽셀 굵기가 선 그림으로 판정되어 라인으로 지정됐습니다(이름 규칙이 놓친 레이어). 선화가 맞으면 그대로 두고, 아니면 라인 지정을 해제하세요."
+                }
+              >
+                라인인지 확인 필요
+              </span>
+            )}
             {edgeColour && (
               <span
                 className="node-edge-colour-badge"

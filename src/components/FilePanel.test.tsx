@@ -32,6 +32,7 @@ function renderPanel(
   entryCounts: Record<string, number>,
   staleProjectPaths: string[] = [],
   onApplyLineSuggestions = vi.fn(),
+  reviewCounts: Record<string, number> = {},
 ) {
   // 막대의 수는 배지와 같은 조건(내보낼 장수 0)으로 App이 세서 내려준다.
   const needsLineCount = files.filter((f) => entryCounts[f.path] === 0).length;
@@ -49,6 +50,7 @@ function renderPanel(
       onCacheWorkersChange={vi.fn()}
       stopped={null}
       entryCounts={entryCounts}
+      reviewCounts={reviewCounts}
       needsLineCount={needsLineCount}
       onApplyLineSuggestions={onApplyLineSuggestions}
       staleProjectPaths={staleProjectPaths}
@@ -141,4 +143,21 @@ test("the bulk-apply bar stays hidden while nothing needs a line", () => {
   renderPanel([fileAt("/cuts/ok.psd")], { "/cuts/ok.psd": 5 });
 
   expect(screen.queryByText("후보 일괄 지정")).toBeNull();
+});
+
+/**
+ * "라인확인 N" 배지 — 트리의 "라인인지 확인 필요" 배지(LayerTree)의 파일 단위
+ * 표시(네온 어휘 + 픽셀 굵기 검출의 합). 목록에 없으면 어느 파일에 확인할
+ * 것이 있는지 하나씩 클릭해 봐야 안다.
+ */
+test("a file with lines needing review wears the badge in the list", () => {
+  renderPanel(
+    [fileAt("/cuts/city.psd"), fileAt("/cuts/room.psd")],
+    { "/cuts/city.psd": 12, "/cuts/room.psd": 9 },
+    [],
+    vi.fn(),
+    { "/cuts/city.psd": 3 },
+  );
+  expect(rowOf("city.psd").textContent).toContain("라인확인 3");
+  expect(rowOf("room.psd").textContent).not.toContain("라인확인");
 });

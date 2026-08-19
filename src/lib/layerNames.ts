@@ -63,3 +63,18 @@ export function hasAnyToken(name: string, wanted: string[], caseSensitive = fals
   const have = tokenize(name);
   return have.some((t) => wanted.some((w) => w.trim().length > 0 && tokenEq(t, w, caseSensitive)));
 }
+
+/**
+ * BG 프리셋이 네온을 라인 어휘로 가지면서(presets.ts BG_PRESET 주석), 네온으로
+ * 걸린 레이어는 "진짜 선화인지 확인 필요"로 표시한다 — 간판·튜브는 획 그림이
+ * 맞지만 점 전구·글로 막대 같은 빛 장식이 같은 이름 아래 섞여 있어, 기계가
+ * 포함하고 사람이 확인하는 구도다. 판정은 매칭과 같은 토큰 규칙이다 — 부분
+ * 문자열이 아니므로 "neonlight"(한 토큰)는 안 걸리고 "NEON red"·"neon2"·
+ * "Red_Neon"은 걸린다.
+ */
+export const NEON_TOKEN = "neon";
+
+/** 이름이 네온 토큰을 갖는가. 조상 그룹 이름까지 보려면 path에 some으로 건다. */
+export function isNeonName(name: string): boolean {
+  return tokenMatch(name, NEON_TOKEN);
+}

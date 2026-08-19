@@ -340,6 +340,13 @@ input[type="text"] {
   border-color: #7a6a2a;
 }
 
+/* 확인이 필요한 라인(네온 어휘·픽셀 굵기 검출)이 있는 파일 — 트리의 "라인인지
+   확인 필요" 배지와 같은 소식의 파일 단위 표시라 같은 노란 계열을 쓴다. */
+.status-badge.status-line-review {
+  color: #f2c94c;
+  border-color: #7a6a2a;
+}
+
 /* "라인필요" 파일이 있을 때만 나타나는 일괄 지정 막대. 행 배지와 같은
    노란 계열을 쓴다 — 같은 소식("규칙이 못 잡았다")의 목록 단위 손잡이다. */
 .needs-line-bar {
@@ -459,6 +466,24 @@ input[type="text"] {
 
 .preview-empty {
   color: var(--text-dim);
+}
+
+.preview-empty-note {
+  max-width: 34em;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.preview-empty-note strong {
+  color: #f2c94c; /* 라인필요·라인확인과 같은 노랑 — 같은 손잡이를 가리킨다 */
+  font-weight: 600;
+}
+
+/* 합성 대기 표시. 흰색/검정 어느 배경에서도 읽히는 중간 회색. */
+.preview-compositing-note {
+  position: absolute;
+  color: #8a8a92;
+  font-size: 0.95em;
 }
 
 .preview-viewport {
@@ -1565,6 +1590,22 @@ input[type="text"] {
 
 .tree-row.edge-colour {
   box-shadow: inset 2px 0 0 #b18cff;
+}
+
+/* 확인이 필요한 라인 행(네온 어휘·픽셀 굵기 검출) — "규칙이 잡았고 사람이
+   확인해야 한다"는 라인필요 배지와 같은 소식이라 같은 노란 계열을 쓴다. */
+.node-review-badge {
+  flex-shrink: 0;
+  font-size: 0.72em;
+  color: #f2c94c;
+  border: 1px solid #7a6a2a;
+  border-radius: 4px;
+  padding: 0 0.35em;
+  white-space: nowrap;
+}
+
+.tree-row.line-review {
+  box-shadow: inset 2px 0 0 #f2c94c;
 }
 
 /* 행 오른쪽 끝의 라인 지정 버튼.

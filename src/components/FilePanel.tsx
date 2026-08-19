@@ -72,6 +72,13 @@ interface FilePanelProps {
    * 이상한지를 임계값으로 정해두는 것보다 낫다.
    */
   entryCounts: Record<string, number>;
+  /**
+   * 파일별 "확인이 필요한 라인" 수 — 네온 어휘 매칭 + 픽셀 굵기 검출의 합.
+   * 트리의 "라인인지 확인 필요" 배지(LayerTree)와 같은 판정을 App이 세서
+   * 내려준다 — 확인할 파일을 고르려고 목록에서 하나씩 클릭해 보게 하면 안
+   * 된다. 키가 없으면 0이다.
+   */
+  reviewCounts: Record<string, number>;
   /** "라인필요"(내보낼 장수 0) 파일 수. 0이면 후보 지정 막대를 그리지 않는다. */
   needsLineCount: number;
   /**
@@ -166,6 +173,7 @@ export function FilePanel({
   onCacheWorkersChange,
   stopped,
   entryCounts,
+  reviewCounts,
   needsLineCount,
   onApplyLineSuggestions,
   staleProjectPaths,
@@ -469,6 +477,14 @@ export function FilePanel({
                         {entryCounts[file.path]}장
                       </span>
                     )
+                  )}
+                  {(reviewCounts[file.path] ?? 0) > 0 && (
+                    <span
+                      className="status-badge status-line-review"
+                      title="확인이 필요한 라인이 있습니다 — 네온 어휘로 걸렸거나 픽셀 굵기로 검출된 레이어. 레이어 트리에서 '라인인지 확인 필요' 배지가 붙은 행을 보고, 라인이 아니면 체크나 지정을 해제하세요."
+                    >
+                      라인확인 {reviewCounts[file.path]}
+                    </span>
                   )}
                 </button>
                 <button

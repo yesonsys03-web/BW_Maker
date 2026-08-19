@@ -101,6 +101,30 @@ export async function applyPreset(
   }>;
 }
 
+/** measure_leaf_strokes가 잎마다 돌려주는 굵기 특징. 못 재면 null. */
+export interface StrokeFeatures {
+  coverage: number;
+  survive1: number;
+  survive2: number;
+  nNative: number;
+}
+
+/**
+ * 잎들의 굵기 특징(엔진 linedetect). "선으로 그려진 레이어" 검출이 프리셋 적용
+ * 뒤에 부른다. 엔진이 잎 단위로 캐시하므로 같은 잎을 다시 물어도 디코드는 한
+ * 번이다. 호출자는 STROKE_CHUNK씩 끊어 부른다(detectDrawnLines.ts) — 엔진은
+ * 직렬이라 한 번에 다 재면 미리보기가 줄을 선다.
+ */
+export async function measureLeafStrokes(
+  sessionId: number,
+  layerIds: number[]
+): Promise<Record<string, StrokeFeatures | null>> {
+  const result = (await callEngine("measure_leaf_strokes", { sessionId, layerIds })) as {
+    features: Record<string, StrokeFeatures | null>;
+  };
+  return result.features;
+}
+
 /**
  * 같은 요소의 라인들을 한 장으로 묶는 연산 목록. 레이어 패널의 버튼이 쓴다.
  * 프리셋의 요소별 병합과 엔진에서 같은 함수를 공유하므로, 화면에서 누른 결과와
