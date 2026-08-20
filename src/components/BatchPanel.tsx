@@ -43,6 +43,11 @@ interface BatchPanelProps {
    */
   manualLineIdsByPath: Record<string, number[]>;
   /**
+   * 아티스트가 화면에서 뺀 검출 결과. 위 지정의 반대 방향이고, 이것을 함께
+   * 보내야 배치가 사이드카에서 그 잎을 되살리지 않는다.
+   */
+  rejectedLineIdsByPath: Record<string, number[]>;
+  /**
    * 작업 프로세스 수 — 파일 패널의 워커 드롭다운(전체 캐시와 같은 값)이다.
    * 2 이상이면 파일들을 워커 프로세스에 나눠 내보낸다: 메인 엔진(stdin 직렬)이
    * 비므로 배치 중에도 미리보기가 살고, 파일 단위 병렬이라 배치 자체도 빨라진다.
@@ -106,7 +111,7 @@ interface PendingRun {
  * independent of any currently-open session, and the engine keeps going past
  * per-file failures, so this UI only ever renders the final results list.
  */
-export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, workers, onError, onRunningChange }: BatchPanelProps) {
+export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, rejectedLineIdsByPath, workers, onError, onRunningChange }: BatchPanelProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedPresetName, setSelectedPresetName] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set(files.map((f) => f.path)));
@@ -246,6 +251,7 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, work
           send: (id, path) => {
             // 이 파일의 지정만 실어 보낸다 — 직렬 경로와 같은 판단이다.
             const manual = manualLineIdsByPath[path];
+            const rejected = rejectedLineIdsByPath[path];
             return warmWorkerSend(id, {
               path,
               export: {
@@ -257,6 +263,7 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, work
                 // 엔진이 지금까지처럼 이름 매칭 + 수동 지정만으로 돈다.
                 drawnLines: DRAWN_LINES_POLICY,
                 ...(manual && manual.length > 0 ? { manualLineIds: manual } : {}),
+                ...(rejected && rejected.length > 0 ? { rejectedIds: rejected } : {}),
               },
             });
           },
@@ -298,10 +305,12 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, work
         // 이 파일의 지정만 실어 보낸다. 전부 보내도 엔진이 경로로 골라 쓰지만,
         // 남의 파일 id가 섞여 들어갈 여지를 아예 없앤다.
         const manual = manualLineIdsByPath[paths[i]];
+        const rejected = rejectedLineIdsByPath[paths[i]];
         const { results: one } = await batchRun(
           [paths[i]], preset, dir, overwrite,
           manual && manual.length > 0 ? { [paths[i]]: manual } : {},
-          DRAWN_LINES_POLICY
+          DRAWN_LINES_POLICY,
+          rejected && rejected.length > 0 ? { [paths[i]]: rejected } : {}
         );
         collected.push(...one);
         // 파일마다 표를 갱신한다 — 끝까지 기다려야 아무것도 안 보이면, 무엇이

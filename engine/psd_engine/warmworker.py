@@ -349,7 +349,8 @@ def export_file(path, job, out, store):
         result = _process_one(store, path, job["preset"], job.get("outputDir"),
                               job.get("overwrite", False), progress,
                               manual_line_ids=job.get("manualLineIds") or (),
-                              drawn_lines=job.get("drawnLines"))
+                              drawn_lines=job.get("drawnLines"),
+                              rejected_ids=job.get("rejectedIds") or ())
         _emit({"event": "file", "path": path, "ok": result["ok"],
                "result": result}, out)
     except Exception as e:  # noqa: BLE001 — run_batch와 같은 항목별 기록 정책

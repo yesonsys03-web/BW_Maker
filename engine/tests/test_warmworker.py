@@ -540,3 +540,50 @@ def test_preview_args_skip_leaves_the_artist_had_hidden_in_photoshop(tmp_path):
     assert ids["line art"] in args["visible"]
     # 색 통일 대상도 그림을 따라간다(lineColorIdsFor는 visibleIds에서 고른다).
     assert ids["line rough"] not in args["lineColorIds"]
+
+
+def test_worker_export_honours_a_rejected_drawn_line(tmp_path):
+    """작업 프로세스 경로도 아티스트의 거절을 지켜야 한다.
+
+    배치 기본값이 작업 프로세스라 실사용은 대부분 이 길로 간다. 직렬과 같은
+    _process_one을 타는 것이 산출물 동일성의 근거이므로, 거절도 같은 자리에서
+    같이 들어와야 한다 — 여기서 빠지면 "화면과 직렬은 맞는데 실제 배치만 틀린"
+    가장 알아채기 어려운 모양이 된다.
+    """
+    from conftest import make_image, write_psd
+    from test_batch import _id_of
+    from test_linedetect import make_hatch
+
+    from psd_engine import tilecache
+    from psd_engine.linedetect import measure_strokes
+    from psd_engine.tree import build_tree
+    from psd_tools import PSDImage
+
+    src = tmp_path / "plate.psd"
+    write_psd(src, [make_hatch("rope details"),
+                    make_image("line art", 200, 4, 4, 40, 32)])
+    out_dir = tmp_path / "산출"
+    out_dir.mkdir()
+    policy = {"survive2Max": 0.25, "coverageMax": 0.15, "minNativePx": 1,
+              "excludeGroups": ["refs"], "excludeTokens": ["glow"]}
+
+    built = build_tree(PSDImage.open(str(src)))
+    feats = {str(lid): measure_strokes(layer)
+             for lid, layer in built["layers_by_id"].items()
+             if not layer.is_group()}
+    tilecache.store_strokes(str(src), os.path.getmtime(src), feats)
+
+    def run(job_extra):
+        events = _run([json.dumps({
+            "path": str(src),
+            "export": {"preset": _EXPORT_PRESET, "outputDir": str(out_dir),
+                       "overwrite": True, "drawnLines": policy, **job_extra},
+        }) + "\n"])
+        ev = [e for e in events if e["event"] == "file"][0]
+        assert ev["ok"] is True, ev.get("message")
+        return ev["result"]["layerCount"]
+
+    # 거절이 없으면 검출이 얹혀 두 장.
+    assert run({}) == 2
+    # 아티스트가 뺐으면 이름 규칙이 잡은 한 장만.
+    assert run({"rejectedIds": [_id_of(src, "rope details")]}) == 1

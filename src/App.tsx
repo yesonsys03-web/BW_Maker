@@ -30,7 +30,7 @@ import {
   parseTreePanelWidth,
 } from "./lib/layout";
 import { countNeonMatches, splitLineLeafIds } from "./lib/layerFilter";
-import { DRAWN_LINES_POLICY, judgeStoredFeatures, preparedIncludedIds } from "./lib/detectDrawnLines";
+import { DRAWN_LINES_POLICY, judgeStoredFeatures, preparedIncludedIds, rejectedDrawnLineIds } from "./lib/detectDrawnLines";
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError } from "./lib/preview";
@@ -2080,6 +2080,26 @@ function AppShell() {
   }, [state.opsByPath]);
 
   /**
+   * 파일별로 아티스트가 물린 검출 결과 — 위 지정의 반대 방향이다.
+   *
+   * 배치는 파일마다 사이드카 특징으로 검출을 다시 판단하므로, 화면에서 뺀 것을
+   * 함께 보내지 않으면 그대로 되살아난다. 그러면 같은 파일인데 화면 내보내기와
+   * 배치가 다른 답을 낸다 — 아티스트가 뺀 것이 말없이 납품 파일에 들어간다.
+   *
+   * 빈 것은 담지 않는다(manualLineIdsByPath와 같은 이유).
+   */
+  const rejectedLineIdsByPath = useMemo(() => {
+    const out: Record<string, number[]> = {};
+    for (const [path, ops] of Object.entries(state.opsByPath)) {
+      const rejected = rejectedDrawnLineIds(
+        state.drawnLineIdsByPath[path], ops.includedIds,
+      );
+      if (rejected.length > 0) out[path] = rejected;
+    }
+    return out;
+  }, [state.opsByPath, state.drawnLineIdsByPath]);
+
+  /**
    * 파일별 내보내기 장수. opsByPath에 이미 있는 값을 세는 것뿐이라 따로 저장하거나
    * 엔진을 부를 것이 없다. 프리셋이 아직 안 걸린 파일은 빠진다 — 그때의 entries는
    * 매칭 전의 전체 픽셀 leaf라 내보낼 장수가 아니다.
@@ -2592,6 +2612,7 @@ function AppShell() {
               files={state.files}
               defaultPresetName={selectedPreset?.name ?? null}
               manualLineIdsByPath={manualLineIdsByPath}
+              rejectedLineIdsByPath={rejectedLineIdsByPath}
               workers={cacheWorkers}
               onError={pushError}
               onRunningChange={handleBatchRunningChange}

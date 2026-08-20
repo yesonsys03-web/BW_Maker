@@ -51,7 +51,7 @@ def _add_manual_lines(session, matched, manual_line_ids):
 
 
 def _process_one(store, path, preset, output_dir, overwrite, progress,
-                 manual_line_ids=(), drawn_lines=None):
+                 manual_line_ids=(), drawn_lines=None, rejected_ids=()):
     # warmworker.export_file이 이 함수를 그대로 부른다 — 워커로 나눠 돌린 배치가
     # 순차 배치와 같은 산출물을 내는 근거가 "같은 함수"라는 사실 하나이므로,
     # 시그니처나 결과 모양을 바꾸면 그쪽도 같이 볼 것.
@@ -77,6 +77,18 @@ def _process_one(store, path, preset, output_dir, overwrite, progress,
                 detected = judge_drawn_lines(feats, cands, drawn_lines)
                 if detected:
                     included = sorted(set(included) | set(detected))
+        if rejected_ids:
+            # 아티스트가 화면에서 뺀 잎. 검출은 프리셋과 무관하게 늘 돌고 사이드카에
+            # 재둔 특징으로 파일마다 다시 판단하므로, 이 자리가 없으면 화면에서 뺀
+            # 것이 배치에서 그대로 되살아난다 — 같은 파일인데 화면 내보내기는 거절을
+            # 지키고 배치만 안 지키는 갈라짐이 거기서 난다.
+            #
+            # 없는 id는 조용히 넘어간다. 빼려던 것이 이 파일에 없다는 뜻이고 원하는
+            # 결과(산출물에 없음)가 이미 성립하기 때문이다 — 모르는 id를 막아서는
+            # _add_manual_lines와 방향이 반대인 이유다. 그쪽은 못 찾으면 아티스트가
+            # 넣으려던 것이 조용히 빠지지만, 이쪽은 못 찾아도 잃는 것이 없다.
+            drop = set(rejected_ids)
+            included = [i for i in included if i not in drop]
         if not included:
             raise ValueError(f"no layers matched in {path}")
         operations = preset_operations(s["tree"], included, preset,
@@ -177,20 +189,25 @@ def _process_one(store, path, preset, output_dir, overwrite, progress,
 
 
 def run_batch(paths, preset, output_dir=None, overwrite=False, progress=None,
-              manual_line_ids=None, drawn_lines=None):
+              manual_line_ids=None, drawn_lines=None, rejected_ids=None):
     """
     manual_line_ids는 {경로: [레이어 id]}. 화면에서 손으로 지정한 라인이고,
     열어둔 파일에만 있다 — 그 외의 파일은 지금까지처럼 프리셋 규칙만으로 돈다.
+
+    rejected_ids도 같은 모양이고 반대 방향이다: 아티스트가 화면에서 뺀 잎이라
+    검출이 되살리지 못하게 막는다. 이것 역시 열어둔 파일에만 있다.
     """
     store = SessionStore(max_sessions=1)
     manual = manual_line_ids or {}
+    rejected = rejected_ids or {}
     results = []
     for path in paths:
         try:
             results.append(
                 _process_one(store, path, preset, output_dir, overwrite, progress,
                              manual_line_ids=manual.get(str(path)) or (),
-                             drawn_lines=drawn_lines))
+                             drawn_lines=drawn_lines,
+                             rejected_ids=rejected.get(str(path)) or ()))
         except Exception as e:  # noqa: BLE001 — 항목별로 기록하고 계속(정책)
             results.append({
                 "path": str(path), "ok": False,

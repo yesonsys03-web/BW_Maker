@@ -233,3 +233,48 @@ def test_batch_designates_drawn_lines_from_the_sweep_sidecar(tmp_path, monkeypat
                   drawn_lines=policy, overwrite=True)
     assert r["results"][0]["ok"] is True
     assert r["results"][0]["layerCount"] == 2
+
+
+def test_batch_leaves_out_a_drawn_line_the_artist_rejected(tmp_path, monkeypatch):
+    """검출이 지정한 잎을 아티스트가 화면에서 뺐으면 배치도 빼야 한다.
+
+    지금은 뺄 방법이 없다 — 배치 페이로드에 "아니오"를 실을 칸이 아예 없어서
+    엔진이 사이드카에서 후보를 다시 검출해 무조건 합집합한다. 그래서 화면
+    내보내기는 거절을 지키는데 배치만 안 지키고, 같은 파일이 경로에 따라 다른
+    산출물을 낸다. 아티스트가 뺀 것이 말없이 납품 파일에 들어가는 자리다.
+    """
+    monkeypatch.setenv("PSD_ENGINE_TILE_CACHE_DIR", str(tmp_path / "tc"))
+    from conftest import make_image, write_psd
+    from test_linedetect import make_hatch
+
+    from psd_engine import tilecache
+    from psd_engine.linedetect import measure_strokes
+    from psd_engine.tree import build_tree
+
+    src = tmp_path / "plate.psd"
+    write_psd(src, [make_hatch("rope details"),
+                    make_image("line art", 200, 4, 4, 40, 32)])
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    policy = {"survive2Max": 0.25, "coverageMax": 0.15, "minNativePx": 1,
+              "excludeGroups": ["refs"], "excludeTokens": ["glow"]}
+
+    built = build_tree(PSDImage.open(str(src)))
+    feats = {str(lid): measure_strokes(layer)
+             for lid, layer in built["layers_by_id"].items()
+             if not layer.is_group()}
+    tilecache.store_strokes(str(src), os.path.getmtime(src), feats)
+
+    rope_id = _id_of(src, "rope details")
+
+    # 거절 없이는 검출이 얹혀 두 장(기존 동작, 위 사이드카 테스트가 고정한다).
+    r = run_batch([str(src)], PRESET, output_dir=str(out_dir),
+                  drawn_lines=policy)
+    assert r["results"][0]["layerCount"] == 2
+
+    # 아티스트가 그 잎을 뺐다 → 이름 규칙이 잡은 한 장만 나가야 한다.
+    r = run_batch([str(src)], PRESET, output_dir=str(out_dir),
+                  drawn_lines=policy, overwrite=True,
+                  rejected_ids={str(src): [rope_id]})
+    assert r["results"][0]["ok"] is True, r["results"][0].get("error")
+    assert r["results"][0]["layerCount"] == 1

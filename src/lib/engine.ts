@@ -361,10 +361,18 @@ export async function batchRun(
    * `_add_manual_lines`).
    */
   manualLineIds: Record<string, number[]> = {},
-  drawnLines?: DrawnLinesPolicy
+  drawnLines?: DrawnLinesPolicy,
+  /**
+   * manualLineIds와 같은 모양이고 반대 방향이다: 아티스트가 화면에서 뺀 잎.
+   *
+   * 검출은 프리셋과 무관하게 늘 돌고 배치는 사이드카 특징으로 파일마다 다시
+   * 판단하므로, 이것을 함께 보내지 않으면 화면에서 뺀 것이 배치에서 되살아난다.
+   * 값은 detectDrawnLines.ts의 rejectedDrawnLineIds가 만든다.
+   */
+  rejectedIds: Record<string, number[]> = {}
 ): Promise<{ results: BatchItemResult[] }> {
   return callEngine("batch_run", {
-    paths, preset, outputDir, overwrite, manualLineIds, drawnLines,
+    paths, preset, outputDir, overwrite, manualLineIds, drawnLines, rejectedIds,
   }) as Promise<{
     results: BatchItemResult[];
   }>;

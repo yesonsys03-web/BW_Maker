@@ -105,12 +105,13 @@ function finish(index: number) {
   });
 }
 
-async function startRun(manualLineIdsByPath: Record<string, number[]> = {}) {
+async function startRun(manualLineIdsByPath: Record<string, number[]> = {}, rejectedLineIdsByPath: Record<string, number[]> = {}) {
   render(
     <BatchPanel
       files={FILES}
       defaultPresetName={null}
       manualLineIdsByPath={manualLineIdsByPath}
+      rejectedLineIdsByPath={rejectedLineIdsByPath}
       workers={1}
       onError={vi.fn()}
       onRunningChange={(r) => runningSignals.push(r)}
@@ -287,6 +288,29 @@ test("a file's manual line designation rides along to the batch", async () => {
 });
 
 /**
+ * 아티스트가 물린 검출 결과가 배치까지 가야 한다 — 지정과 반대 방향의 같은 문제다.
+ *
+ * 검출은 프리셋과 무관하게 늘 돌고 배치는 파일마다 사이드카 특징으로 다시
+ * 판단하므로, 화면에서 뺀 잎이 배치에서 그대로 되살아났다. 같은 파일인데 화면
+ * 내보내기는 거절을 지키고 배치만 안 지켜서, 아티스트가 뺀 것이 말없이 납품
+ * 파일에 들어갔다.
+ */
+test("a file's rejected drawn line rides along to the batch", async () => {
+  await startRun({}, { "/cuts/b.psd": [4] });
+
+  // 거절이 없는 파일에는 빈 것이 간다(일곱째 인자).
+  expect(engine.batchRun.mock.calls[0][0]).toEqual(["/cuts/a.psd"]);
+  expect(engine.batchRun.mock.calls[0][6]).toEqual({});
+
+  finish(0);
+  await waitFor(() => expect(runs.length).toBe(2));
+
+  // b.psd 차례에는 그 파일의 거절만 실린다.
+  expect(engine.batchRun.mock.calls[1][0]).toEqual(["/cuts/b.psd"]);
+  expect(engine.batchRun.mock.calls[1][6]).toEqual({ "/cuts/b.psd": [4] });
+});
+
+/**
  * 배치의 기본 프리셋.
  *
  * 배치는 자기 목록의 첫 번째로 시작했다. 위쪽 `PresetBar`의 선택과 갈리면
@@ -315,6 +339,7 @@ function panel(defaultPresetName: string | null) {
       files={FILES}
       defaultPresetName={defaultPresetName}
       manualLineIdsByPath={{}}
+      rejectedLineIdsByPath={{}}
       workers={1}
       onError={vi.fn()}
       onRunningChange={() => {}}

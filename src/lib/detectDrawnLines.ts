@@ -123,6 +123,31 @@ export function judgeStoredFeatures(
 }
 
 /**
+ * 아티스트가 "이건 라인 아니다"라고 물린 검출 결과 — 배치에 실어 보내야 하는 목록.
+ *
+ * 검출은 프리셋과 무관하게 늘 돌고, 배치는 스윕이 재둔 특징으로 파일마다 다시
+ * 판단한다(batch.py의 judge_drawn_lines). 그래서 화면에서 뺀 것을 함께 보내지
+ * 않으면 배치가 그대로 되살린다 — 같은 파일인데 화면 내보내기는 거절을 지키고
+ * 배치만 안 지키는 갈라짐이 거기서 났다.
+ *
+ * **저장하는 상태가 아니라 뺄셈이다**: "검출이 지정했는데 지금 체크가 없는 것".
+ * 승인·거절을 따로 눌러야 하는 설계는 클릭을 요구하므로 쓰지 않았다("언제 다
+ * 클릭을 해" — 전체 캐시와 함께 끝나야 한다는 원칙). 이 정의라면 아티스트는
+ * 지금까지처럼 체크만 만지면 되고, 체크를 다시 켜면 거절도 저절로 풀린다.
+ *
+ * 검출 기록이 없는 파일(미스윕·복원)은 뺄 근거가 없으므로 빈 배열이다 —
+ * "전부 거절"이 아니다. 그쪽은 지금까지처럼 이름 매칭 + 수동 지정으로 돈다.
+ */
+export function rejectedDrawnLineIds(
+  detectedIds: readonly number[] | undefined,
+  includedIds: readonly number[],
+): number[] {
+  if (!detectedIds || detectedIds.length === 0) return [];
+  const included = new Set(includedIds);
+  return detectedIds.filter((id) => !included.has(id)).sort((a, b) => a - b);
+}
+
+/**
  * 작업 프로세스가 "갓 적용한 화면"을 구울 때 실제로 켠 포함 목록 —
  * `warmworker._preset_preview_args`의 included_set 미러다. 특징이 없으면
  * (스윕 안 한 폴더) 워커도 매칭만으로 굽는다.

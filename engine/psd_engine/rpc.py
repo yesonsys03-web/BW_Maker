@@ -527,7 +527,7 @@ class Engine:
         return {"features": out}
 
     def batch_run(self, paths, preset, outputDir=None, overwrite=False,
-                  manualLineIds=None, drawnLines=None):
+                  manualLineIds=None, drawnLines=None, rejectedIds=None):
         from .batch import run_batch
 
         def progress(path, stage, current, total):
@@ -536,7 +536,8 @@ class Engine:
 
         return run_batch(paths, preset, output_dir=outputDir,
                          overwrite=overwrite, progress=progress,
-                         manual_line_ids=manualLineIds, drawn_lines=drawnLines)
+                         manual_line_ids=manualLineIds, drawn_lines=drawnLines,
+                         rejected_ids=rejectedIds)
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
                    embedPreview=True, overwrite=False, verify=True, lineColor=None,

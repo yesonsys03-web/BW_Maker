@@ -5,6 +5,7 @@ import {
   judgeDrawnLines,
   judgeStoredFeatures,
   preparedIncludedIds,
+  rejectedDrawnLineIds,
   COVERAGE_MAX,
   MIN_NATIVE_PX,
   SURVIVE2_MAX,
@@ -106,4 +107,18 @@ test("fieldguide annotations are not drawn-line candidates, however they are spe
     leaf(14, "Wall_Line detail"),
   ];
   expect(drawnLineCandidateIds(tree, [], CHAR_PRESET)).toEqual([14]);
+});
+
+test("a detected leaf the artist unchecked becomes a rejection the batch must honour", () => {
+  // 검출은 프리셋과 무관하게 늘 돌고, 배치는 사이드카 특징으로 파일마다 다시
+  // 판단한다. 그래서 아티스트가 화면에서 뺀 것을 따로 실어 보내지 않으면 배치가
+  // 그대로 되살린다 — 화면 내보내기는 거절을 지키는데 배치만 안 지키는 갈라짐이다.
+  //
+  // 거절은 저장된 상태가 아니라 뺄셈으로 나온다: "검출이 지정했는데 지금 체크가
+  // 없는 것". 그래야 아티스트가 체크를 다시 켜면 거절도 저절로 풀린다.
+  expect(rejectedDrawnLineIds([1, 5], [5, 9])).toEqual([1]);
+  // 검출한 것이 전부 켜져 있으면 거절은 없다.
+  expect(rejectedDrawnLineIds([1, 5], [1, 5, 9])).toEqual([]);
+  // 검출이 안 돈 파일(기록 없음)은 뺄 근거가 없다 — 빈 배열이지 "전부 거절"이 아니다.
+  expect(rejectedDrawnLineIds(undefined, [5, 9])).toEqual([]);
 });
