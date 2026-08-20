@@ -38,6 +38,8 @@ const engine = vi.hoisted(() => ({
   warmWorkersStop: vi.fn(),
   onWarmWorkerLine: vi.fn(),
   onWarmWorkerExit: vi.fn(),
+  // 저장 채우기가 부른다 — 세션 없이 엔진 디스크 캐시를 묻는 통로.
+  previewCachedLookup: vi.fn(),
 }));
 
 vi.mock("./lib/engine", () => ({
@@ -2684,4 +2686,39 @@ test("thumbnails yield to the active file's warmup and resume after it", async (
   // 워밍업이 끝나면 그때 나간다.
   warmHeld.resolve({ warmed: [1, 2, 3], skipped: [], remaining: [] });
   await waitFor(() => expect(engine.renderThumbnails).toHaveBeenCalled());
+});
+
+/**
+ * 캐시완료면 저장도 완전해야 한다 — 그런데 **준비된 파일에는 세션이 없다.**
+ *
+ * 저장 채우기(엔진 디스크 캐시에서 구운 그림을 집어오는 프리패스)가 키를
+ * previewPlanFor에서 얻으면 그 파일들이 통째로 빠진다: 그 콜백은 sessionId가
+ * 없으면 null을 준다(화면이 지금 그릴 수 있는가를 묻는 함수라 거기서는 그게 맞다).
+ * 아티스트가 본 "미리보기 171/215장" 중 못 담긴 39장이 정확히 이것이었다.
+ * buildProject가 같은 함정을 피하려고 previewRenderSpec을 직접 부르는 것과 같은
+ * 이유이고, 이 테스트가 그 이유를 저장 채우기에도 못 박는다.
+ */
+test("a save fills previews for worker-prepared files, which have no session", async () => {
+  const finish = captureWorkerLines(9, [0, 1]);
+  engine.previewCachedLookup.mockResolvedValue("/tmp/baked.png");
+  engine.loadPngDataUrl.mockResolvedValue("data:image/png;base64,BAKED");
+  vi.mocked(saveDialog).mockResolvedValue("/proj/새작업.bwproj");
+
+  await renderWithPreset();
+  setWorkers(2);
+  await addFilesForPrepare();
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
+  // 준비 결과 = 세션 없이 "열림". 그림은 안 딸려 온다(pngPath null) — 그래서 앱
+  // 캐시가 비어 있고, 채우기가 유일한 통로다.
+  finish(engine.warmWorkerSend.mock.calls[0] as [number, { path: string }], preparedResult([1]));
+  finish(engine.warmWorkerSend.mock.calls[1] as [number, { path: string }], preparedResult([1]));
+  await waitFor(() => expect(screen.queryAllByText("열림").length).toBeGreaterThanOrEqual(2));
+
+  pressSave({ shift: true });
+  await waitFor(() => expect(saveProjectTo).toHaveBeenCalled());
+
+  expect(engine.previewCachedLookup).toHaveBeenCalled();
+  const [, saved, previews] = vi.mocked(saveProjectTo).mock.calls[0];
+  expect(saved.files.filter((f) => f.previewFile).length).toBeGreaterThanOrEqual(2);
+  expect(previews.size).toBeGreaterThanOrEqual(2);
 });

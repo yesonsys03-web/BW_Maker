@@ -804,6 +804,38 @@ function AppShell() {
     matchedIdsByPathRef.current = state.matchedIdsByPath;
   }, [state.matchedIdsByPath]);
 
+  /**
+   * 저장이 쓰는 미리보기 계획 — **세션을 묻지 않는다.**
+   *
+   * 아래 previewPlanFor와 갈라 두는 이유가 이것 하나다. 그쪽은 "화면이 지금 그릴
+   * 수 있는가"를 묻는 함수라 세션이 없으면 null을 주는 것이 맞다. 그런데 저장이
+   * 담아야 하는 파일은 대부분 **세션이 없다**: 작업 프로세스가 준비한 파일도,
+   * 프로젝트에서 복원한 항목도 세션 없이 "열림"이다(세션은 화면이 그 파일을 실제로
+   * 쓸 때 붙는다). 저장 쪽에서 previewPlanFor를 쓰면 그 파일들이 통째로 빠진다 —
+   * 캐시완료 215장에서 39장이 그렇게 빠졌다(2026-08-20 아티스트 신고).
+   *
+   * tree/mtime을 복원 항목으로 메우는 것도 buildProject와 같은 이유다(엔진이
+   * 죽었다 살아나면 FileEntry에서 둘이 사라진다 — 그 주석 참고).
+   */
+  const savePreviewSpecFor = useCallback((file: FileEntry) => {
+    const ops = opsByPathRef.current[file.path];
+    const fallback = restoredEntriesRef.current[file.path];
+    const tree = file.tree ?? fallback?.tree;
+    const mtime = file.mtime ?? fallback?.mtime;
+    if (!tree || mtime === undefined || !ops) return null;
+    return previewRenderSpec(
+      { path: file.path, mtime },
+      tree,
+      ops.includedIds,
+      ops.previewHiddenIds,
+      ops.soloIds,
+      presetRef.current?.lineColor ?? null,
+      matchedIdsByPathRef.current[file.path],
+      presetRef.current?.edgeLines ?? null,
+      ops.edgeColourIds
+    );
+  }, []);
+
   /** 이 파일의 미리보기를 어떻게 그릴지 + 어느 키에 담을지. 아직 못 그리면 null. */
   const previewPlanFor = useCallback((file: FileEntry) => {
     const ops = opsByPathRef.current[file.path];
@@ -1017,8 +1049,6 @@ function AppShell() {
   } => {
     const previews = new Map<string, string>();
     const files: ProjectEntry[] = [];
-    const lineColor = presetRef.current?.lineColor ?? null;
-    const edgeLines = presetRef.current?.edgeLines ?? null;
     let blocked = 0;
     let omitted = 0;
     let nothingToDraw = 0;
@@ -1039,19 +1069,13 @@ function AppShell() {
         continue;
       }
       const matchedIds = matchedIdsByPathRef.current[file.path];
-      const plan = previewRenderSpec(
-        { path: file.path, mtime },
-        tree,
-        ops.includedIds,
-        ops.previewHiddenIds,
-        ops.soloIds,
-        lineColor,
-        matchedIds,
-        edgeLines,
-        ops.edgeColourIds
-      );
+      // 저장 채우기(writeProjectTo의 프리패스)와 **같은 함수**로 키를 만든다.
+      // 두 곳이 각자 계산하면 방금 채워 넣은 그림을 여기서 못 찾아, 채우기가
+      // 한 일이 통째로 없던 일이 된다. 위 가드를 지난 파일은 그 함수도 반드시
+      // 계획을 준다(tree·mtime·ops를 같은 순서로 메운다).
+      const plan = savePreviewSpecFor(file);
       let previewFile: string | null = null;
-      if (plan.key) {
+      if (plan?.key) {
         const dataUrl = previewCacheRef.current.get(plan.key);
         if (dataUrl) {
           // 이름은 반드시 키의 해시다. 경로로 지으면 납품 파일명이 디스크에 남는다
@@ -1071,7 +1095,7 @@ function AppShell() {
         }
       }
       // 그릴 것이 없어서 없는 것과, 아직 안 만들어서 없는 것을 가른다(nothingToDraw 주석).
-      if (!previewFile && plan.visibleIds.length === 0) nothingToDraw += 1;
+      if (!previewFile && (plan?.visibleIds.length ?? 0) === 0) nothingToDraw += 1;
       files.push({
         path: file.path,
         mtime,
@@ -1082,7 +1106,7 @@ function AppShell() {
         // "아무 데도 안"으로 뒤집힌다(ProjectEntry.matchedIds 주석 참고).
         matchedIds: matchedIds ?? null,
         ops,
-        previewKey: plan.key,
+        previewKey: plan?.key ?? null,
         previewFile,
       });
     }
@@ -1093,7 +1117,7 @@ function AppShell() {
       omitted,
       nothingToDraw,
     };
-  }, []);
+  }, [savePreviewSpecFor]);
 
   /**
    * 다른 프로젝트 작업이 도는 중이라 저장 요청을 받지 않을 때. 저장의 두 진입점
@@ -1139,16 +1163,25 @@ function AppShell() {
         // 미스(스윕 전 파일, 수동 색 지정 화면)는 예전처럼 부분 저장 카드가 말한다.
         prefetchingRef.current = true; // 준비 큐가 같은 일을 겹쳐 들지 않게
         try {
-          const targets = filesRef.current.filter((f) => f.status === "open" && f.mtime !== undefined);
+          const targets = filesRef.current.filter((f) => f.status === "open");
           let done = 0;
           for (const f of targets) {
             done += 1;
-            const plan = previewPlanFor(f);
+            // **세션을 묻지 않는 계산**을 쓴다 — 담아야 할 파일이 대부분 세션이
+            // 없다(savePreviewSpecFor 주석). 키를 만드는 재료가 buildProject와
+            // 같아야 방금 채운 그림을 그 함수가 찾는다.
+            const plan = savePreviewSpecFor(f);
             if (!plan?.key || plan.documentView || plan.visibleIds.length === 0) continue;
             if (plan.edgeColourIds.length > 0) continue;
             if (!needsPrefetch(plan.key, previewCacheRef.current, prefetchedKeysRef.current)) continue;
+            // 키를 만든 그 수정시각을 그대로 엔진에 넘긴다 — 엔진 캐시는 파일을
+            // 경로+수정시각으로 가리키므로(tilecache._file_dir), 여기서 다른 값을
+            // 쓰면 그 폴더를 아예 못 찾는다. 복원 항목은 FileEntry에 mtime이 없을
+            // 수 있어 savePreviewSpecFor와 같은 순서로 메운다.
+            const mtime = f.mtime ?? restoredEntriesRef.current[f.path]?.mtime;
+            if (mtime === undefined) continue;
             const pngPath = await previewCachedLookup(
-              f.path, f.mtime!, plan.visibleIds, PREVIEW_MAX_SIZE,
+              f.path, mtime, plan.visibleIds, PREVIEW_MAX_SIZE,
               presetRef.current?.lineColor ?? null, plan.lineColorIds,
               presetRef.current?.edgeLines ?? null, plan.includedIds);
             if (!pngPath) continue;
@@ -1235,7 +1268,7 @@ function AppShell() {
         setProjectBusy(null);
       }
     },
-    [buildProject, previewPlanFor, pushError, refuseSaveWhileBusy]
+    [buildProject, savePreviewSpecFor, pushError, refuseSaveWhileBusy]
   );
 
   const handleProjectSaveAs = useCallback(async () => {
