@@ -95,3 +95,15 @@ test("the prepared-preview include list is the picture the worker actually baked
   expect(preparedIncludedIds(tree, [2], CHAR_PRESET, features)).toEqual([1, 2]);
   // 스윕 안 한 폴더는 워커도 매칭만으로 굽는다 — 그때는 매칭만이 맞다.
   expect(preparedIncludedIds(tree, [2], CHAR_PRESET, null)).toEqual([2]);
+});
+
+test("fieldguide annotations are not drawn-line candidates, however they are spelled", () => {
+  // 신고된 경로 그대로: 빨간 주석 획은 굵기로는 영락없는 선이라 문턱으로는
+  // 못 막는다 — 어휘가 유일한 문이다(suggestLines의 SUGGEST_EXCLUDE_TOKENS).
+  const tree: TreeNode[] = [
+    group(10, "*FIELDGUIDES", [leaf(11, "FLGD"), leaf(12, "notes")]),
+    leaf(13, "FLGD"),
+    leaf(14, "Wall_Line detail"),
+  ];
+  expect(drawnLineCandidateIds(tree, [], CHAR_PRESET)).toEqual([14]);
+});

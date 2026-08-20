@@ -94,3 +94,19 @@ test("hasPixels가 없는 옛 트리는 pixel 잎을 그대로 통과시킨다",
   delete old.hasPixels;
   expect(suggestLineLayers([old], preset)).toEqual([old.id]);
 });
+
+// 2026-08-20 신고: `*FIELDGUIDES / … / FLGD`(빨간 주석 획)가 선 그림 검출의
+// 확실 구간을 통과해 라인으로 지정됐다. BG 26장 실측이 이미 경고한 주석 부류인데
+// (그때 결론이 "그룹 제외 규칙으로 걸러야 함") 어휘에 그 말이 없었다. 별표
+// 접두사와 약어가 둘 다 있어 표기 세 가지를 함께 잠근다 — 토크나이저는 별표를
+// 버리고 복수형을 접지만, `FLGD`와 띄어 쓴 `FIELD GUIDE`는 각자 토큰이 필요하다.
+test("필드가이드는 별표·약어·띄어쓰기 어느 표기든 후보가 아니다", () => {
+  const tree = [
+    group("*FIELDGUIDES", [leaf("FLGD"), leaf("notes")]),
+    group("FIELD GUIDE", [leaf("markup")]),
+    leaf("FLGD"),
+    leaf("wall"),
+  ];
+  const picked = suggestLineLayers(tree, preset);
+  expect(picked).toEqual([tree[3].id]);
+});

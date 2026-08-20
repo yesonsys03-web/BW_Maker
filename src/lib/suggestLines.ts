@@ -20,7 +20,17 @@ import type { Preset, TreeNode } from "./types";
 // 군중 판 하나가 참고 이미지를 그룹 없이 `REF`라는 잎으로 들고 있어(2026-08-13
 // 실측, 파일 38) 그룹 규칙만으로는 새는 것을 확인했다. 복수형(REFS)은
 // hasAnyToken이 알아서 접는다.
-export const SUGGEST_EXCLUDE_TOKENS = ["glow", "behind", "board", "box", "paper", "ref"];
+//
+// 필드가이드 세 표기(2026-08-20 신고). 빨간 주석 획이라 굵기로는 영락없는 선이고,
+// BG 26장 실측이 이미 "주석 부류는 이름으로 걸러야 한다"고 결론 낸 자리다.
+// 토크나이저를 실제로 돌려 본 결과가 셋을 다 필요하게 만든다:
+//   *FIELDGUIDES → ["FIELDGUIDES"]  별표는 버려지고 복수형은 접히므로 fieldguide
+//   FLGD         → ["FLGD"]         약어는 부분문자열 매칭이 없어 자기 토큰이 필요
+//   FIELD GUIDE  → ["FIELD","GUIDE"] 띄어 쓰면 두 토큰이라 guide가 받는다
+export const SUGGEST_EXCLUDE_TOKENS = [
+  "glow", "behind", "board", "box", "paper", "ref",
+  "fieldguide", "flgd", "guide",
+];
 
 /** 그림이 아닌 것을 담는 그룹. 이름 비교는 대소문자 무시, 정확히 일치. */
 export const SUGGEST_EXCLUDE_GROUPS = ["refs", "borders", "labels", "paper"];
