@@ -392,6 +392,9 @@ export function PreviewCanvas({
    *     브라우저 PNG 디코딩   17.8 ms
    */
   const pendingRef = useRef<RenderSpec | null>(null);
+  /** 본 렌더 효과가 마지막으로 만든 dispatch. 세션 도착 효과(아래)가 대기분을
+   * 내보낼 때 쓴다 — 효과 밖에서는 그 클로저를 다시 만들 수 없어 ref로 건넨다. */
+  const dispatchRef = useRef<((next: RenderSpec) => void) | null>(null);
 
   const visibleIds = useMemo(
     () => (tree ? visibleIdsForPreview(tree, includedIds, previewHiddenIds, soloIds) : []),
@@ -573,7 +576,16 @@ export function PreviewCanvas({
     function dispatch(next: RenderSpec) {
       // 세션 id는 효과가 설 때가 아니라 내는 이 시점에 읽는다(위 주석 참고).
       const sid = sessionIdRef.current;
-      if (!sid) return;
+      if (!sid) {
+        // 준비된 파일을 갓 클릭한 직후 — 세션이 아직 없다. 조용히 버리면
+        // 아무도 다시 내지 않는다: 이 효과는 일부러 세션에 의존하지 않으므로
+        // 세션이 도착해도 효과가 다시 돌지 않고, "합성 중..."이 영영 남는다
+        // (부류 2의 정체 — 2026-08-20 preview-trace로 확정: 캐시 미스 + 무세션
+        // 클릭에서 effect 뒤 발자국이 없었다). 적어두면 세션 도착 효과가 낸다.
+        traceGuard("no-session", { p: tracePath(next.path) });
+        pendingRef.current = next;
+        return;
+      }
       // 요청 번호도 같다. 밀렸다 나가는 렌더가 밀릴 때의 번호를 들고 있으면 그
       // 사이에 올라간 번호(캐시 적중, 빈 집합, 파일 전환)에 밀려 자기 결과를
       // 스스로 버린다 — 화면은 옛 그림에 멈춘 채로 남는다.
@@ -619,7 +631,10 @@ export function PreviewCanvas({
           // 않고, "안 바쁨"도 나가지 않는다 — 그 한 틈에 미리보기 준비 큐가
           // 비켜서기를 멈추고 파일을 열면(App.tsx) 세션 두 칸을 두고 다툰다.
           const pending = pendingRef.current;
-          if (pending) {
+          // 파일이 그 사이 바뀌었으면 낡은 스펙이다 — 세션 없음으로 주차된
+          // 옛 파일 몫이 남아 있을 수 있고, 그대로 내면 지금 세션에 남의
+          // 레이어 목록을 그린다. 새 파일은 자기 효과가 처음부터 다시 돈다.
+          if (pending && pending.path === latestPathRef.current) {
             pendingRef.current = null;
             dispatch(pending);
           }
@@ -631,7 +646,21 @@ export function PreviewCanvas({
     // visibleIds 대신 visibleKey에 의존한다 — 키가 같으면 내용이 같으므로 효과가
     // 들고 있는 배열이 한 세대 옛것이어도 렌더 결과는 동일하다. 위 visibleKey의
     // 주석에 왜 배열 정체로는 안 되는지 적어두었다.
+    dispatchRef.current = dispatch;
   }, [path, mtime, visibleKey, documentView, lineColor, matchedIds, edgeLines, edgeColourIds, includedIds, paused, cache, showImage, onRenderingChange, onSessionRefreshed, onError]);
+
+  // 세션이 도착하면, 세션이 없어 못 낸 렌더(pendingRef의 no-session 주차분)를
+  // 낸다. 본 효과는 일부러 세션에 의존하지 않으므로(재렌더 회피) 이 좁은
+  // 효과가 그 틈을 막는다. 파일이 바뀌었으면 낡은 스펙이라 버리고, 렌더가
+  // 이미 나가 있으면 그 finally가 집어 간다.
+  useEffect(() => {
+    if (!sessionId) return;
+    const pending = pendingRef.current;
+    if (!pending || pending.path !== path) return;
+    if (inFlightRef.current > 0) return;
+    pendingRef.current = null;
+    dispatchRef.current?.(pending);
+  }, [sessionId, path]);
 
   // Callback ref (not a plain ref + mount-only effect): the viewport div only
   // exists once sessionId/visibleIds make this component render past the
@@ -739,7 +768,15 @@ export function PreviewCanvas({
     }
 
     if (!sessionId) {
-      return <div className="preview-canvas preview-empty">왼쪽에서 파일을 선택하세요.</div>;
+      // 파일이 선택돼 있으면 세션이 붙는 중이다(준비된 파일을 클릭한 직후의
+      // NAS 파싱 몇 초). 그때 "파일을 선택하세요"는 거짓말이고 사용자가 실제로
+      // 두 번 헷갈렸다(2026-08-20) — 여는 중이 맞는 말이다. 진짜 미선택은
+      // path가 없는 경우뿐이다.
+      return (
+        <div className="preview-canvas preview-empty">
+          {path ? "여는 중..." : "왼쪽에서 파일을 선택하세요."}
+        </div>
+      );
     }
 
     if (paused) {
