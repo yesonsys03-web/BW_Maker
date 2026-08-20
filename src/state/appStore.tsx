@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { EngineRpcError, applyPreset, closeSession, measureLeafStrokes, openPsd, type SkippedLayer, type StrokeFeatures } from "../lib/engine";
+import { isEvictedSessionError } from "../lib/preview";
 import { STROKE_CHUNK, drawnLineCandidateIds, judgeDrawnLines } from "../lib/detectDrawnLines";
 import { buildEntries, opsReducer, type OpsState } from "../lib/opsReducer";
 import type { ProjectEntry } from "../lib/project";
@@ -883,8 +884,11 @@ export async function applyPresetEffect(
  *
  * 후보를 STROKE_CHUNK씩 끊어 재는 것은 엔진이 요청을 직렬로 처리해서다 —
  * 한 번에 다 재면 그동안 미리보기가 줄을 선다. 결과는 0장이어도 dispatch한다
- * (래치 — drawnLineIdsByPath 주석). 실패도 카드 한 장 + 빈 래치로 끝낸다:
- * 래치가 없으면 감시 효과가 같은 실패를 영영 반복한다.
+ * (래치 — drawnLineIdsByPath 주석). 실패는 둘로 가른다: **축출 소진은 카드도
+ * 래치도 없이 물러난다** — 고장이 아니라 클릭 경합이고(재시도 상한까지 세션이
+ * 계속 밀림), 래치를 안 세워야 감시 그물이 조용해진 뒤 다시 대기열에 세운다.
+ * 그 밖의 실패는 카드 한 장 + 빈 래치로 끝낸다: 래치가 없으면 감시 효과가
+ * 같은 실패를 영영 반복한다(진짜 고장은 반복해도 또 고장이다).
  */
 export async function detectDrawnLinesEffect(
   dispatch: Dispatch<AppAction>,
@@ -918,6 +922,9 @@ export async function detectDrawnLinesEffect(
     }
     dispatch({ type: "drawnLinesDetected", path, layerIds: judgeDrawnLines(features) });
   } catch (e) {
+    // 축출 소진은 조용히 물러난다 — 위 주석. 래치가 없으므로 감시 그물이
+    // 나중에(조용할 때) 다시 잰다.
+    if (isEvictedSessionError(e)) return;
     const error: EngineError =
       e instanceof EngineRpcError ? { message: e.message, traceback: e.traceback } : errorFrom(e);
     dispatch({ type: "pushError", title: `선 그림 검출 실패: ${path}`, error });

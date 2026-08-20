@@ -1362,3 +1362,20 @@ test("strokeFeaturesLoaded stores the sweep's features and removeFile drops them
   s1 = appReducer(s1, { type: "removeFile", path: "/a.psd" });
   expect(s1.strokeFeaturesByPath["/a.psd"]).toBeUndefined();
 });
+
+test("evicted-session exhaustion retreats quietly — no card, no empty latch", async () => {
+  // 축출 소진은 고장이 아니라 경합이다(파일을 빠르게 오가며 클릭 — 2026-08-20
+  // 실사고). 카드+빈 래치로 접으면 그 파일은 세션 내내 검출이 없던 일이 된다.
+  // 래치를 안 세우고 물러나면 감시 그물이 조용해진 뒤 다시 대기열에 세운다.
+  mockOpenPsd.mockResolvedValue({ sessionId: 9, tree: [], width: 1, height: 1, mtime: 1 });
+  mockMeasureLeafStrokes.mockRejectedValue(
+    new EngineRpcError({ message: "unknown or evicted session: 25", traceback: "" })
+  );
+  const tree = [{
+    id: 1, name: "detail", kind: "pixel", visible: true, blendMode: "normal",
+    opacity: 255, bbox: [0, 0, 10, 10], hasMask: false, hasPixels: true, path: ["detail"],
+  }] as unknown as TreeNode[];
+  const actions: AppAction[] = [];
+  await detectDrawnLinesEffect((a) => actions.push(a), "/ev.psd", 3, tree, [], preset);
+  expect(actions.filter((a) => a.type === "pushError" || a.type === "drawnLinesDetected")).toEqual([]);
+});
