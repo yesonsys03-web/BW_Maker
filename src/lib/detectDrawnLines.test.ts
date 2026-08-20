@@ -4,6 +4,7 @@ import {
   drawnLineCandidateIds,
   judgeDrawnLines,
   judgeStoredFeatures,
+  preparedIncludedIds,
   COVERAGE_MAX,
   MIN_NATIVE_PX,
   SURVIVE2_MAX,
@@ -82,3 +83,15 @@ test("judgeStoredFeatures picks only this preset's candidates from a whole-file 
   };
   expect(judgeStoredFeatures(tree, [2], CHAR_PRESET, features)).toEqual([1]);
 });
+
+test("the prepared-preview include list is the picture the worker actually baked", () => {
+  // 워커의 _preset_preview_args는 매칭 ∪ 검출로 굽는다. 앱이 그 그림에 붙이는
+  // 캐시 키를 매칭만으로 만들면, 키는 "검출 없는 화면"이라 말하는데 그림에는
+  // 검출된 잎이 들어 있다 — 해제한 잎이 화면에 남는 필드가이드 신고의 원인이다.
+  const tree: TreeNode[] = [leaf(1, "ROPE DETAILS"), leaf(2, "LINE")];
+  const features = {
+    "1": { survive2: 0.01, survive1: 0.05, coverage: 0.02, nNative: 120000 },
+  };
+  expect(preparedIncludedIds(tree, [2], CHAR_PRESET, features)).toEqual([1, 2]);
+  // 스윕 안 한 폴더는 워커도 매칭만으로 굽는다 — 그때는 매칭만이 맞다.
+  expect(preparedIncludedIds(tree, [2], CHAR_PRESET, null)).toEqual([2]);

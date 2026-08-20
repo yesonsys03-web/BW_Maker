@@ -122,7 +122,15 @@ export interface PreviewFileId {
  * tilecache.PREVIEW_FORMAT과 같은 역할의 프런트 판이고, 숫자를 맞출 필요는
  * 없지만 그쪽을 올릴 때 이쪽도 올려야 하는지 반드시 물을 것.
  */
-export const PREVIEW_PICTURE_VERSION = 11;
+/**
+ * 12 (2026-08-20): 준비 워커가 구운 "매칭 + 검출" 그림이 **매칭만** 키에 담겼다
+ * (App.tsx applyPreparedFile). 그 키의 그림에는 아티스트가 해제한 잎이 남아
+ * 있어서, 저장된 프로젝트의 previews/에도 그대로 굳었다 — 코드를 고쳐도 이미
+ * 저장된 PNG는 그 상태다. 판을 올려 통째로 버린다. 다시 그리는 값은 싸다:
+ * 엔진 디스크 캐시는 이 번호와 무관한 자기 키를 쓰므로 스윕한 폴더는 그대로
+ * 적중한다(실측 재합성 0.03~0.3초).
+ */
+export const PREVIEW_PICTURE_VERSION = 12;
 
 export function previewCacheKey(
   file: PreviewFileId,

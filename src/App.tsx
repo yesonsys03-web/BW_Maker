@@ -30,7 +30,7 @@ import {
   parseTreePanelWidth,
 } from "./lib/layout";
 import { countNeonMatches, splitLineLeafIds } from "./lib/layerFilter";
-import { DRAWN_LINES_POLICY, judgeStoredFeatures } from "./lib/detectDrawnLines";
+import { DRAWN_LINES_POLICY, judgeStoredFeatures, preparedIncludedIds } from "./lib/detectDrawnLines";
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError, visibleIdsForPreview } from "./lib/preview";
@@ -846,9 +846,13 @@ function AppShell() {
       // 세션 없이 "열림"으로 세운다. 세션은 화면이 그 파일을 실제로 쓸 때 채워진다.
       dispatch({ type: "preparedFile", path, result: r });
       if (r.pngPath === null) return;
-      // 리듀서가 opsByPath에 세우는 값 그대로. 두 계산이 갈리면 워커가 구운 그림을
-      // 화면이 영영 못 찾는다 — 오류 한 줄 없이 기능이 통째로 사라지는 고장이다.
-      const includedIds = [...r.matchedLayerIds].sort((a, b) => a - b);
+      // 워커가 **그 그림을 구울 때 켠** 포함 목록 그대로 — 매칭에 검출 지정을
+      // 더한 것이다(warmworker._preset_preview_args의 미러). 매칭만으로 만들면
+      // 키는 "검출 없는 화면"이라고 말하는데 그림에는 검출된 잎이 그려져 있어,
+      // 해제한 잎이 남아 있는 그림이 그 키에 눌러앉는다 — 아무 잎이나 토글할
+      // 때마다 그 잎이 나타났다 사라졌다 한다(2026-08-20 필드가이드 신고).
+      // 무세션 검출 그물이 곧 같은 목록을 ops에 세우므로 화면이 만들 키와도 같다.
+      const includedIds = preparedIncludedIds(r.tree, r.matchedLayerIds, preset, r.strokeFeatures);
       const { previewHiddenIds } = buildInitialOpsState(r.tree);
       const spec = previewRenderSpec(
         { path, mtime: r.mtime },
@@ -863,10 +867,10 @@ function AppShell() {
       );
       if (!spec.key) return;
       // 워커가 **실제로 그린** 그림. engine/psd_engine/warmworker.py의
-      // _preset_preview_args는 매칭된 픽셀 잎을 문서 순서로 전부 그린다 —
-      // 눈 플래그를 안 본다(_pixel_leaf_ids는 included만 거른다). 화면은 그 위에
-      // 눈을 한 번 더 거르므로, 매칭된 잎 중 포토샵에서 꺼진 것이 하나라도 있으면
-      // 두 그림이 다르다.
+      // _preset_preview_args는 포함된 픽셀 잎(매칭 + 검출 지정)을 문서 순서로
+      // 전부 그린다 — 눈 플래그를 안 본다(_pixel_leaf_ids는 included만 거른다).
+      // 화면은 그 위에 눈을 한 번 더 거르므로, 포함된 잎 중 포토샵에서 꺼진 것이
+      // 하나라도 있으면 두 그림이 다르다.
       //
       // 그때는 **담지 않는다.** 키는 화면이 만들 키인데 그림은 워커 것이라, 담으면
       // 아티스트가 "안 그려질 레이어까지 그려진 그림"으로 설정을 확인하게 된다 —

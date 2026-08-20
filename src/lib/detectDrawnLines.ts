@@ -121,3 +121,27 @@ export function judgeStoredFeatures(
   }
   return judgeDrawnLines(subset);
 }
+
+/**
+ * 작업 프로세스가 "갓 적용한 화면"을 구울 때 실제로 켠 포함 목록 —
+ * `warmworker._preset_preview_args`의 included_set 미러다. 특징이 없으면
+ * (스윕 안 한 폴더) 워커도 매칭만으로 굽는다.
+ *
+ * 이것을 따로 두는 이유는 **키 때문**이다. 워커가 구운 그림에 앱이 붙이는
+ * 미리보기 캐시 키는 이 목록으로 만들어야 한다. 매칭만으로 만들면 키는
+ * "검출 없는 화면"이라고 말하는데 그림에는 검출된 잎이 그려져 있어, 아티스트가
+ * 해제한 잎이 화면에 남아 있는 그림을 보게 된다(2026-08-20 필드가이드 신고).
+ * 저쪽 함수를 바꾸면 여기도 같이 볼 것.
+ */
+export function preparedIncludedIds(
+  tree: TreeNode[],
+  matchedIds: readonly number[],
+  preset: Preset,
+  features: Record<string, StrokeFeatures | null> | null | undefined,
+): number[] {
+  const ids = new Set<number>(matchedIds);
+  if (features) {
+    for (const id of judgeStoredFeatures(tree, matchedIds, preset, features)) ids.add(id);
+  }
+  return [...ids].sort((a, b) => a - b);
+}
