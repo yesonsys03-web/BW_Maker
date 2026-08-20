@@ -155,7 +155,13 @@ def _preset_preview_args(tree, preset, feats=None, drawn_lines=None):
             drawn_lines.get("excludeGroups") or [],
             drawn_lines.get("excludeTokens") or [])
         included_set |= set(judge_drawn_lines(feats, cands, drawn_lines))
-    visible = _pixel_leaf_ids(tree, included_set)
+    # initial=True인 것이 중요하다: 앱은 파일을 여는 순간 previewHiddenIds를
+    # **트리의 visible 플래그로** 세운다(appStore.buildInitialOpsState). 즉 갓
+    # 적용 상태에도 눈은 이미 있고, 화면은 눈 꺼진 잎을 안 그린다. 여기서 그려
+    # 넣으면 화면이 절대 요구하지 않는 키를 단 그림이 되어 그 판은 캐시완료를
+    # 하고도 미리보기가 영영 안 담긴다 — 215장 폴더의 26장이 예외 없이 이
+    # 부류였다(2026-08-20 실측).
+    visible = _pixel_leaf_ids(tree, included_set, initial=True)
     if not visible:
         return None
     initial = _pixel_leaf_ids(tree, initial=True)

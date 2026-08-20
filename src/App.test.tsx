@@ -2451,13 +2451,17 @@ test("a prepared preview lands under the key the app looks up later", async () =
  * 고쳐지지 않는다: 나중에 세션이 붙어도(sessionRefreshed) 그 액션은 opsByPath를
  * 일부러 안 건드린다.
  *
- * 같은 자리에서 캐시 키의 반대편도 잠근다. 워커의 _preset_preview_args는 매칭된
- * 픽셀 잎을 **눈과 무관하게 전부** 그리므로(engine/psd_engine/warmworker.py),
- * 매칭된 잎 중 꺼진 것이 있으면 워커의 그림과 화면이 그릴 그림이 다르다 — 그때
- * 그 PNG를 화면의 키에 담으면 아티스트는 안 그려질 레이어까지 그려진 그림으로
- * 설정을 확인하게 된다. 담지 않는 것이 옳다.
+ * 같은 자리에서 캐시 키의 반대편도 잠근다. 워커의 _preset_preview_args는 이제
+ * **눈까지 화면과 같은 규칙으로** 그리므로(_pixel_leaf_ids의 initial=True =
+ * buildInitialOpsState의 previewHiddenIds), 꺼진 잎이 있는 판도 워커 그림이 곧
+ * 화면 그림이다 — 그러니 담아야 한다.
+ *
+ * 예전에는 반대였다. 워커가 눈을 무시하고 굽던 시절에는 두 그림이 달라 담지
+ * 않는 것이 옳았는데, 그 결과 **꺼진 잎이 하나라도 있는 판은 캐시완료를 하고도
+ * 미리보기가 영영 안 담겼다** — 215장 폴더에서 26장이 예외 없이 그랬다
+ * (2026-08-20 실측). 그래서 워커 쪽을 화면에 맞췄다.
  */
-test("a prepared file hides what Photoshop had hidden, and its preview is not cached under a different picture", async () => {
+test("a prepared file hides what Photoshop had hidden, and its preview is cached under that picture", async () => {
   const finish = captureWorkerLines(9, [0, 1]);
   vi.mocked(saveDialog).mockResolvedValue("/proj/새작업.bwproj" as never);
 
@@ -2480,7 +2484,7 @@ test("a prepared file hides what Photoshop had hidden, and its preview is not ca
   const [, saved, previews] = vi.mocked(saveProjectTo).mock.calls[0];
   const entry = saved.files.find((f) => f.path === prepared);
   expect(entry?.ops.previewHiddenIds).toEqual([2]);
-  // 키는 화면이 그릴 그림(잎 1뿐)을 가리키고, 워커가 구운 그림은 담기지 않았다.
+  // 키는 화면이 그릴 그림(잎 1뿐)을 가리키고, 워커가 구운 것이 바로 그 그림이다.
   const expected = previewRenderSpec(
     { path: prepared, mtime: 1 },
     tree as never,
@@ -2491,8 +2495,8 @@ test("a prepared file hides what Photoshop had hidden, and its preview is not ca
     []
   );
   expect(entry?.previewKey).toBe(expected.key);
-  expect(entry?.previewFile).toBeFalsy();
-  expect(previews.size).toBe(0);
+  expect(entry?.previewFile).toBeTruthy();
+  expect(previews.get(entry!.previewFile!)).toBe("data:image/png;base64,AAA");
 });
 
 test("the warmup chain shows leaf-level progress while it runs", async () => {

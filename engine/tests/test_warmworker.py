@@ -127,7 +127,12 @@ def _front_render_args(opened, matched):
     """프런트가 프리셋을 갓 적용한 화면으로 render_preview에 보내는 인자를
     그대로 재현한다 — appStore.applyPresetResult(정렬)와
     preview.visibleIdsForPreview(문서 순서 픽셀 잎), previewCache.lineColorIdsFor,
-    engine.renderPreview(payload의 manualColourIds: [])의 합이다."""
+    engine.renderPreview(payload의 manualColourIds: [])의 합이다.
+
+    **눈까지 재현해야 한다.** appStore.buildInitialOpsState가 파일을 여는 순간
+    previewHiddenIds를 트리의 visible 플래그로 세우므로, 갓 적용 화면은 눈 꺼진
+    잎을 안 그린다. 이 헬퍼가 그것을 빼먹은 채로 통과하던 동안 워커도 같은
+    착각으로 구워서, 눈 꺼진 잎이 있는 판은 화면과 그림이 계속 갈렸다."""
     included = sorted(matched)
     included_set = set(included)
     visible = []
@@ -136,7 +141,8 @@ def _front_render_args(opened, matched):
         for n in nodes:
             if n["kind"] == "group":
                 walk(n.get("children") or [])
-            elif n["kind"] == "pixel" and n["id"] in included_set:
+            elif (n["kind"] == "pixel" and n["id"] in included_set
+                    and n["visible"]):
                 visible.append(n["id"])
 
     walk(opened["tree"])
@@ -497,3 +503,40 @@ def test_prepare_returns_sidecar_features(fixture_psd):
     done = [e for e in events if e["event"] == "file"]
     assert done[0]["ok"] is True
     assert done[0]["result"]["strokeFeatures"] == feats
+
+
+def test_preview_args_skip_leaves_the_artist_had_hidden_in_photoshop(tmp_path):
+    """워커가 굽는 "갓 적용" 그림은 **포토샵에서 눈이 꺼진 잎을 안 그린다.**
+
+    앱은 파일을 여는 순간 previewHiddenIds를 트리의 visible 플래그로 세운다
+    (appStore.buildInitialOpsState) — 즉 "갓 적용 상태에는 눈이 없다"는 가정이
+    틀렸다. 눈 꺼진 잎을 그려 넣으면 그 그림은 화면이 절대 요구하지 않는 키를
+    달게 되어, 캐시완료를 하고도 그 판은 미리보기가 영영 안 담긴다 —
+    215장 폴더에서 26장이 예외 없이 이 부류였다(2026-08-20 실측).
+    """
+    from conftest import make_image, write_psd
+
+    from psd_tools import PSDImage
+
+    from psd_engine.tree import build_tree
+    from psd_engine.warmworker import _preset_preview_args
+
+    src = tmp_path / "hidden.psd"
+    write_psd(src, [make_image("line art", 200, 4, 4, 40, 32),
+                    make_image("line rough", 60, 0, 0, 30, 20, visible=False),
+                    make_image("backdrop", 128, 0, 0, 60, 40)])
+    built = build_tree(PSDImage.open(str(src)))
+    ids = {l.name: lid for lid, l in built["layers_by_id"].items() if not l.is_group()}
+    preset = {"include": {"type": "contains", "value": "line", "caseSensitive": False},
+              "excludeGroupPrefixes": [], "matchGroups": True, "includeHidden": True,
+              "merge": "none", "naming": "pathPrefix", "outputSuffix": "_L",
+              "embedPreview": True, "lineColor": "#000000"}
+
+    args = _preset_preview_args(built["tree"], preset)
+    # 체크(내보내기)에는 남는다 — 아티스트가 켜면 나가야 하고, 앱의 includedIds도 그렇다.
+    assert ids["line rough"] in args["included"]
+    # 그림에는 없다 — 화면이 그리는 것과 같아야 한다.
+    assert ids["line rough"] not in args["visible"]
+    assert ids["line art"] in args["visible"]
+    # 색 통일 대상도 그림을 따라간다(lineColorIdsFor는 visibleIds에서 고른다).
+    assert ids["line rough"] not in args["lineColorIds"]

@@ -33,7 +33,7 @@ import { countNeonMatches, splitLineLeafIds } from "./lib/layerFilter";
 import { DRAWN_LINES_POLICY, judgeStoredFeatures, preparedIncludedIds } from "./lib/detectDrawnLines";
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY } from "./lib/presets";
-import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError, visibleIdsForPreview } from "./lib/preview";
+import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError } from "./lib/preview";
 import { PreviewCache, needsPrefetch, previewRenderSpec } from "./lib/previewCache";
 import { openFailureReport, type FailedOpen } from "./lib/openReport";
 import {
@@ -898,21 +898,14 @@ function AppShell() {
         []                    // 색 경계선 수동 지정
       );
       if (!spec.key) return;
-      // 워커가 **실제로 그린** 그림. engine/psd_engine/warmworker.py의
-      // _preset_preview_args는 포함된 픽셀 잎(매칭 + 검출 지정)을 문서 순서로
-      // 전부 그린다 — 눈 플래그를 안 본다(_pixel_leaf_ids는 included만 거른다).
-      // 화면은 그 위에 눈을 한 번 더 거르므로, 포함된 잎 중 포토샵에서 꺼진 것이
-      // 하나라도 있으면 두 그림이 다르다.
-      //
-      // 그때는 **담지 않는다.** 키는 화면이 만들 키인데 그림은 워커 것이라, 담으면
-      // 아티스트가 "안 그려질 레이어까지 그려진 그림"으로 설정을 확인하게 된다 —
-      // 이 캐시의 최악 고장이다(previewCache.ts의 PREVIEW_PICTURE_VERSION 주석).
-      // 안 담으면 그 파일만 누를 때 합성한다: 지금까지와 같고, 옳다.
-      const painted = visibleIdsForPreview(r.tree, includedIds, [], []);
-      const samePicture =
-        spec.visibleIds.length === painted.length &&
-        spec.visibleIds.every((id, i) => id === painted[i]);
-      if (!samePicture) return;
+      // 예전에는 여기서 "워커가 그린 그림이 화면과 같은가"를 한 번 더 봤다.
+      // 워커가 눈 플래그를 안 봤기 때문인데, 그 탓에 **눈 꺼진 잎이 하나라도
+      // 있는 판은 담기지 못했다** — 215장 폴더에서 26장이 그랬다(2026-08-20 실측).
+      // 지금은 워커가 화면과 같은 규칙으로 굽는다(_pixel_leaf_ids의 initial=True가
+      // buildInitialOpsState의 previewHiddenIds와 같은 규칙이다). 두 목록이 구조적으로
+      // 같아졌으므로 그 비교는 언제나 참이고, 남겨두면 시험할 수 없는 가드가 된다.
+      // 엔진 쪽 계약은 test_warmworker의 통합 테스트가 잠근다(프런트 계산을
+      // 재현한 _front_render_args가 눈까지 반영한다).
       try {
         previewCacheRef.current.set(spec.key, await loadPngDataUrl(r.pngPath));
         prefetchedKeysRef.current.add(spec.key);
