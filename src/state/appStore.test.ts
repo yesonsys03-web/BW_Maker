@@ -1098,6 +1098,40 @@ describe("restoreProject", () => {
     expect(s.matchedIdsByPath).not.toHaveProperty("/cuts/a.psd");
   });
 
+  // 복원본은 status가 "idle"이라 **파일 준비 큐의 대상이기도 하다**(App.tsx의
+  // prepareWillTake는 복원 여부를 안 본다, 작업 프로세스 2 이상이 기본값).
+  // openSuccess와 같은 보장이 여기에도 있어야 한다 — 없으면 프로젝트를 여는 것만으로
+  // 지정·병합·눈이 "갓 적용" 상태로 조용히 갈아치워진다.
+  test("preparing a restored file in the background keeps the restored work", () => {
+    const s = appReducer(restored(), {
+      type: "preparedFile",
+      path: "/cuts/a.psd",
+      result: {
+        tree: RESTORED_TREE, mtime: 1700, width: 4, height: 4,
+        matchedLayerIds: [1], pngPath: null,
+      },
+    } as never);
+
+    expect(s.opsByPath["/cuts/a.psd"].manualLineIds).toEqual([2]);
+    expect(s.opsByPath["/cuts/a.psd"].includedIds).toEqual([1, 2]);
+    expect(s.matchedIdsByPath["/cuts/a.psd"]).toEqual([1]);
+  });
+
+  // 반대쪽 — 파일이 바뀌었으면 복원본을 붙들면 안 된다(openSuccess와 같은 게이트).
+  test("preparing a restored file whose mtime moved starts from the fresh match", () => {
+    const s = appReducer(restored(), {
+      type: "preparedFile",
+      path: "/cuts/a.psd",
+      result: {
+        tree: RESTORED_TREE, mtime: 1899, width: 4, height: 4,
+        matchedLayerIds: [1], pngPath: null,
+      },
+    } as never);
+
+    expect(s.opsByPath["/cuts/a.psd"].manualLineIds).toEqual([]);
+    expect(s.opsByPath["/cuts/a.psd"].includedIds).toEqual([1]);
+  });
+
   // presetApplied가 정직해야 로드 큐가 자동 적용을 다시 걸지 않는다(App.tsx의
   // 로드 큐 주석 참고) — 복원한 ops는 이전 세션에서 이미 프리셋을 거친 결과이므로,
   // false로 남으면 큐가 그 위에 새 매칭을 덮어써 체크박스·병합 편집이 사라진다.

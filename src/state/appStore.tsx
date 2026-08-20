@@ -342,15 +342,23 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
     // 작업 프로세스가 준비한 파일 하나(App.tsx의 파일 준비 큐).
     //
-    // openSuccess를 재사용하지 않는 이유가 둘 있다. openSuccess는
-    // result.sessionId를 세우는데 준비 결과에는 그것이 없고, 복원 판정
-    // (restoredMtimeByPath)도 함께 얹혀 있다 — 별도 액션이 그 둘을 섞지 않는다.
+    // openSuccess를 재사용하지 않는 이유는 하나다: openSuccess는 result.sessionId를
+    // 세우는데 준비 결과에는 그것이 없다. **복원 판정은 여기에도 있어야 한다** —
+    // 프로젝트 복원본은 status가 "idle"이고 준비 큐의 대상 판정(App.tsx의
+    // prepareWillTake)은 복원 여부를 안 보므로, 작업 프로세스가 2 이상이면(기본값)
+    // 프로젝트를 여는 것만으로 복원한 파일이 이 액션을 지나간다.
     case "preparedFile": {
       const { path, result } = action;
       // 목록에서 빠진 파일의 결과는 버린다. 워커가 파일을 쥐고 있는 동안 X로 뺄
       // 수 있는데, 그때 되살리면 removeFile이 지운 ops/매칭이 목록에 없는 경로로
       // 되살아난다.
       if (!state.files.some((f) => f.path === path)) return state;
+      // openSuccess와 **같은 게이트**다(그 주석에 `path in`이 필요한 이유가 있다).
+      // 여기가 없으면 복원한 지정·병합·눈·솔로가 "갓 적용" 상태로 조용히
+      // 갈아치워지고, sessionRefreshed는 opsByPath를 일부러 안 건드리므로
+      // 되돌아오지도 않는다.
+      const isRestoredMatch =
+        path in state.restoredMtimeByPath && state.restoredMtimeByPath[path] === result.mtime;
       // 갓 적용 상태의 포함 목록 = 매칭 결과, 숫자 오름차순. applyPresetResult와
       // 같은 값이어야 한다 — 미리보기 캐시 키가 이 목록으로 만들어지므로, 두
       // 경로가 갈리면 워커가 구운 그림을 화면이 영영 못 찾는다.
@@ -391,7 +399,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           // (App.tsx)이 그 위에 같은 프리셋을 한 번 더 건다.
           presetApplied: true,
         }),
-        matchedIdsByPath: { ...state.matchedIdsByPath, [path]: result.matchedLayerIds },
+        // 복원본의 매칭 결과도 openSuccess와 같은 이유로 지킨다 — 갈아치우면
+        // 미리보기 캐시 키가 달라져 복원해둔 그림을 전부 다시 그린다.
+        matchedIdsByPath: isRestoredMatch && state.matchedIdsByPath[path] !== undefined
+          ? state.matchedIdsByPath
+          : { ...state.matchedIdsByPath, [path]: result.matchedLayerIds },
         drawnLineIdsByPath: dropKey(state.drawnLineIdsByPath, path),
         // 워커가 사이드카에서 읽어 온 특징 — 있으면 무세션 판단 그물이 지정을
         // 복원해, 준비가 구운 미리보기(검출 포함 화면)와 키가 맞는다.
@@ -400,7 +412,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           : dropKey(state.strokeFeaturesByPath, path),
         opsByPath: {
           ...state.opsByPath,
-          [path]: { ...initial, includedIds, entries: buildEntries(includedIds, initial.ops) },
+          [path]: isRestoredMatch && state.opsByPath[path]
+            ? state.opsByPath[path]
+            : { ...initial, includedIds, entries: buildEntries(includedIds, initial.ops) },
         },
       };
     }
