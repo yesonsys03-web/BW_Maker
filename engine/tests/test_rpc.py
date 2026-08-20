@@ -962,3 +962,23 @@ def test_measure_leaf_strokes_reads_the_sweep_sidecar_first(fixture_psd, tmp_pat
     monkeypatch.setattr(rpc, "measure_strokes", boom)
     res = engine.measure_leaf_strokes(sid, layerIds=[leaf_ids[0]])
     assert res["features"][str(leaf_ids[0])] == canned[str(leaf_ids[0])]
+
+
+def test_preview_cached_lookup_finds_baked_previews_without_a_session(fixture_psd, tmp_path, monkeypatch):
+    """캐시완료면 저장도 완전해야 한다(2026-08-20 사용자) — 프로젝트 저장이
+    세션·파싱 없이 구운 미리보기를 집어오는 통로. 키는 render_preview와 같은
+    함수로 계산하므로 같은 스펙이면 반드시 같은 그림을 찾는다."""
+    monkeypatch.setenv("PSD_ENGINE_TILE_CACHE_DIR", str(tmp_path / "tc"))
+    engine = rpc.Engine(out=io.StringIO())
+    sid, leaf_ids = _open_leaves(engine, fixture_psd)
+    s = engine.store.get(sid)
+    spec = dict(visibleLayerIds=[leaf_ids[0]], maxSize=256,
+                includedIds=[leaf_ids[0]])
+    engine.render_preview(sid, **spec)  # 미스 → 합성 + 디스크에 떨굼
+
+    hit = engine.preview_cached_lookup(s["path"], s["mtime"], **spec)
+    assert hit["pngPath"] and os.path.exists(hit["pngPath"])
+    miss = engine.preview_cached_lookup(s["path"], s["mtime"],
+                                        visibleLayerIds=list(leaf_ids), maxSize=256,
+                                        includedIds=list(leaf_ids))
+    assert miss["pngPath"] is None

@@ -177,6 +177,27 @@ export async function autoMergePreview(
  * 뺀다(rpc.py의 render_preview 주석 참고). 생략하면(null) 엔진은 이전
  * 동작(세션 전체 레이어로 근사)으로 물러난다.
  */
+/**
+ * 구운 미리보기의 디스크 캐시 조회 — 세션 없이(엔진 preview_cached_lookup).
+ * 프로젝트 저장이 쓴다: 캐시완료로 미리보기는 전부 디스크에 있으니, 앱 캐시에
+ * 없는 파일은 파싱 없이 여기서 집는다. 미스면 null — 부분 저장 카드가 말한다.
+ */
+export async function previewCachedLookup(
+  path: string,
+  mtime: number,
+  visibleLayerIds: number[],
+  maxSize: number,
+  lineColor: string | null,
+  lineColorIds: number[] | null,
+  edgeLines: EdgeLines | null,
+  includedIds: number[] | null
+): Promise<string | null> {
+  const r = (await callEngine("preview_cached_lookup", {
+    path, mtime, visibleLayerIds, maxSize, lineColor, lineColorIds, edgeLines, includedIds,
+  })) as { pngPath: string | null };
+  return r.pngPath;
+}
+
 export async function renderPreview(
   sessionId: number,
   visibleLayerIds: number[],

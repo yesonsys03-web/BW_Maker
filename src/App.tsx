@@ -12,7 +12,7 @@ import { OpsHistory } from "./components/OpsHistory";
 import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { loadPngDataUrl, onWarmWorkerExit, onWarmWorkerLine, pinFile, psdMtimes, renderDocumentPreview, renderPreview, renderThumbnails, warmPreviewTiles, warmTilesPooled, warmWorkerSend, warmWorkersStart, warmWorkersStop } from "./lib/engine";
+import { loadPngDataUrl, onWarmWorkerExit, onWarmWorkerLine, pinFile, previewCachedLookup, psdMtimes, renderDocumentPreview, renderPreview, renderThumbnails, warmPreviewTiles, warmTilesPooled, warmWorkerSend, warmWorkersStart, warmWorkersStop } from "./lib/engine";
 import { runPrepareQueue, runWorkerSweep } from "./lib/warmWorkers";
 import { ProjectBar, type ProjectBusy } from "./components/ProjectBar";
 import {
@@ -1128,6 +1128,34 @@ function AppShell() {
       // 대조하려고 표를 떠 둔다(clearSeqRef 주석 참고).
       const clearSeq = clearSeqRef.current;
       try {
+        // 캐시완료로 미리보기는 전부 엔진 디스크에 있다 — 앱 캐시에 없는 파일은
+        // 저장 전에 **세션·파싱 없이** 거기서 집어온다(preview_cached_lookup).
+        // "미리보기 준비" 큐가 언제 돌았는지에 저장이 좌우되면 안 된다:
+        // 캐시완료면 저장도 완전해야 한다(상식이자 2026-08-20 사용자 원칙).
+        // 미스(스윕 전 파일, 수동 색 지정 화면)는 예전처럼 부분 저장 카드가 말한다.
+        prefetchingRef.current = true; // 준비 큐가 같은 일을 겹쳐 들지 않게
+        try {
+          const targets = filesRef.current.filter((f) => f.status === "open" && f.mtime !== undefined);
+          let done = 0;
+          for (const f of targets) {
+            done += 1;
+            const plan = previewPlanFor(f);
+            if (!plan?.key || plan.documentView || plan.visibleIds.length === 0) continue;
+            if (plan.edgeColourIds.length > 0) continue;
+            if (!needsPrefetch(plan.key, previewCacheRef.current, prefetchedKeysRef.current)) continue;
+            const pngPath = await previewCachedLookup(
+              f.path, f.mtime!, plan.visibleIds, PREVIEW_MAX_SIZE,
+              presetRef.current?.lineColor ?? null, plan.lineColorIds,
+              presetRef.current?.edgeLines ?? null, plan.includedIds);
+            if (!pngPath) continue;
+            previewCacheRef.current.set(plan.key, await loadPngDataUrl(pngPath));
+            prefetchedKeysRef.current.add(plan.key);
+            setPrefetchProgress({ done, total: targets.length });
+          }
+        } finally {
+          prefetchingRef.current = false;
+          setPrefetchProgress(null);
+        }
         const { project, previews, blocked, omitted, nothingToDraw } = buildProject();
         // 잃을 것이 있으면 쓰지 않는다. 덮어쓰기는 되돌릴 수 없고, 이 폴더에는
         // 지난 저장이 들어 있다 — 반쯤 만들어진 프로젝트로 덮느니 아무것도 안 하는
@@ -1203,7 +1231,7 @@ function AppShell() {
         setProjectBusy(null);
       }
     },
-    [buildProject, pushError, refuseSaveWhileBusy]
+    [buildProject, previewPlanFor, pushError, refuseSaveWhileBusy]
   );
 
   const handleProjectSaveAs = useCallback(async () => {

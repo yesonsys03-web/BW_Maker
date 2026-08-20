@@ -301,7 +301,8 @@ class Engine:
     _ALLOWED_METHODS = {
         "open_psd", "psd_mtimes", "close_session", "pin_file", "render_thumbnails",
         "render_preview", "render_document_preview", "warm_preview_tiles", "warm_tiles_pooled",
-        "apply_preset", "measure_leaf_strokes", "auto_merge_operations",
+        "apply_preset", "measure_leaf_strokes", "preview_cached_lookup",
+        "auto_merge_operations",
         "auto_merge_preview", "export_psd", "batch_run",
     }
 
@@ -416,6 +417,25 @@ class Engine:
         """
         s = self.store.get(sessionId)
         return {"workers": viewpool.start_tile_pool(s, layerIds, maxSize)}
+
+    def preview_cached_lookup(self, path, mtime, visibleLayerIds, maxSize=1500,
+                             lineColor=None, lineColorIds=None, edgeLines=None,
+                             includedIds=None):
+        """
+        구운 미리보기의 디스크 캐시 조회 — **세션 없이**. 히트면 pngPath, 미스면
+        None. 프로젝트 저장이 쓴다: 캐시완료로 미리보기는 전부 디스크에 있는데
+        저장은 앱 메모리의 것만 담았다("미리보기 준비" 큐가 언제 돌았는지에
+        좌우됐다). 상식은 "캐시완료면 저장도 완전"이다(2026-08-20 사용자) —
+        세션을 요구하면 세션 없는 파일마다 NAS 파싱을 다시 내므로 안 된다.
+        키 계산은 render_preview_cached와 같은 함수를 그대로 쓴다.
+        """
+        key = tilecache.preview_key(_preview_key_material(
+            visibleLayerIds, maxSize, lineColor, lineColorIds,
+            edgeLines, includedIds))
+        out_dir = self._fresh_render_dir("preview")
+        hit = tilecache.load_preview({"path": path, "mtime": mtime}, key,
+                                     str(Path(out_dir) / "preview.png"))
+        return {"pngPath": hit}
 
     def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None,
                        lineColorIds=None, edgeLines=None, includedIds=None):
