@@ -53,7 +53,7 @@ const preset: Preset = {
 } as unknown as Preset;
 
 const initial: AppState = {
-  files: [], activePath: null, opsByPath: {}, matchedIdsByPath: {}, drawnLineIdsByPath: {},
+  files: [], activePath: null, opsByPath: {}, matchedIdsByPath: {}, drawnLineIdsByPath: {}, strokeFeaturesByPath: {},
   errors: [], restoredMtimeByPath: {},
 };
 
@@ -1353,4 +1353,12 @@ describe("detectDrawnLinesEffect (선 그림 검출의 실제 동작)", () => {
     await p; // 앞당기면 조용함을 더 기다리지 않는다
     expect(mockMeasureLeafStrokes).toHaveBeenCalledTimes(2);
   });
+});
+
+test("strokeFeaturesLoaded stores the sweep's features and removeFile drops them", () => {
+  let s1 = appReducer(initial, { type: "addFiles", paths: ["/a.psd"] });
+  s1 = appReducer(s1, { type: "strokeFeaturesLoaded", path: "/a.psd", features: { "3": null } });
+  expect(s1.strokeFeaturesByPath["/a.psd"]).toEqual({ "3": null });
+  s1 = appReducer(s1, { type: "removeFile", path: "/a.psd" });
+  expect(s1.strokeFeaturesByPath["/a.psd"]).toBeUndefined();
 });

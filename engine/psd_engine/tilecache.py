@@ -172,6 +172,69 @@ def store(session, layer_id, scale, entry):
         pass
 
 
+#: 잎 굵기 특징 사이드카의 형식 판. 측정 수식(linedetect)을 바꿔 문턱을 다시
+#: 재면 반드시 올린다 — SCALED_OVERLAY_FORMAT과 같은 역할이다.
+STROKES_FORMAT = 1
+
+
+def _strokes_path(path, mtime):
+    return _file_dir(path, mtime) / f"strokes_v{STROKES_FORMAT}.json"
+
+
+def load_strokes(path, mtime):
+    """
+    파일 하나의 잎 굵기 특징({layerId 문자열: features|None}). 스윕이 쓴 것을
+    재스윕(재측정 생략)·클릭 검출(디코드 0)·배치(판단 입력)가 읽는다.
+    미스·손상·꺼짐이면 None — 호출자는 측정으로 간다.
+    """
+    if not ENABLED:
+        return None
+    f = _strokes_path(path, mtime)
+    try:
+        with open(f, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        os.utime(f.parent)
+    except OSError:
+        pass
+    return data
+
+
+def store_strokes(path, mtime, features):
+    """파일 하나의 잎 특징을 원자적으로 놓는다(타일 store와 같은 tmp+replace)."""
+    if not ENABLED or features is None:
+        return
+    d = _file_dir(path, mtime)
+    try:
+        fresh = not d.is_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(features, fh, separators=(",", ":"))
+            os.replace(tmp, _strokes_path(path, mtime))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        if fresh:
+            _prune(keep=d)
+    except OSError:
+        pass
+
+
 #: 줄인 오버레이의 형식 판. **축소 보정을 바꾸면 반드시 올린다.**
 #:
 #: view_key는 오버레이 *원본*이 무엇인가만 말한다 — 그것을 어떻게 줄였는지는

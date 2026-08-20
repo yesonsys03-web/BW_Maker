@@ -4,7 +4,9 @@ from pathlib import Path
 
 from .character import find_views, manual_views
 from .edges import EDGE_DEFAULTS, attach_overlays, plan_overlays
+from . import tilecache
 from .export import export_psd, export_psd_split, output_extension
+from .linedetect import judge_drawn_lines, select_drawn_line_candidates
 from .matching import match_preset, preset_operations
 from .ops import build_export_plan, finalize_names
 from .paths import ensure_writable_path
@@ -49,7 +51,7 @@ def _add_manual_lines(session, matched, manual_line_ids):
 
 
 def _process_one(store, path, preset, output_dir, overwrite, progress,
-                 manual_line_ids=()):
+                 manual_line_ids=(), drawn_lines=None):
     # warmworker.export_file이 이 함수를 그대로 부른다 — 워커로 나눠 돌린 배치가
     # 순차 배치와 같은 산출물을 내는 근거가 "같은 함수"라는 사실 하나이므로,
     # 시그니처나 결과 모양을 바꾸면 그쪽도 같이 볼 것.
@@ -61,6 +63,20 @@ def _process_one(store, path, preset, output_dir, overwrite, progress,
         # 병합 연산도, 색 통일 대상도, 색 경계선의 "이미 있는 라인" 판정도
         # 같은 목록이어야 대화형 경로와 결과가 갈리지 않는다.
         included = _add_manual_lines(s, matched, manual_line_ids)
+        if drawn_lines:
+            # 스윕이 재둔 굵기 특징이 있으면 "선으로 그려진" 잎의 판단까지
+            # 얹는다 — 배치가 자기 드롭다운의 프리셋으로 판단하는 자리다
+            # (측정은 프리셋 무관, 판단은 이 프리셋). 특징이 없으면(스윕 안 한
+            # 폴더) 지금까지처럼 이름 매칭 + 수동 지정만으로 돈다.
+            feats = tilecache.load_strokes(str(path), s["mtime"])
+            if feats:
+                cands = select_drawn_line_candidates(
+                    s["tree"], matched, preset,
+                    drawn_lines.get("excludeGroups") or [],
+                    drawn_lines.get("excludeTokens") or [])
+                detected = judge_drawn_lines(feats, cands, drawn_lines)
+                if detected:
+                    included = sorted(set(included) | set(detected))
         if not included:
             raise ValueError(f"no layers matched in {path}")
         operations = preset_operations(s["tree"], included, preset,
@@ -161,7 +177,7 @@ def _process_one(store, path, preset, output_dir, overwrite, progress,
 
 
 def run_batch(paths, preset, output_dir=None, overwrite=False, progress=None,
-              manual_line_ids=None):
+              manual_line_ids=None, drawn_lines=None):
     """
     manual_line_ids는 {경로: [레이어 id]}. 화면에서 손으로 지정한 라인이고,
     열어둔 파일에만 있다 — 그 외의 파일은 지금까지처럼 프리셋 규칙만으로 돈다.
@@ -173,7 +189,8 @@ def run_batch(paths, preset, output_dir=None, overwrite=False, progress=None,
         try:
             results.append(
                 _process_one(store, path, preset, output_dir, overwrite, progress,
-                             manual_line_ids=manual.get(str(path)) or ()))
+                             manual_line_ids=manual.get(str(path)) or (),
+                             drawn_lines=drawn_lines))
         except Exception as e:  # noqa: BLE001 — 항목별로 기록하고 계속(정책)
             results.append({
                 "path": str(path), "ok": False,

@@ -478,6 +478,18 @@ class Engine:
         """
         s = self.store.get(sessionId)
         cache = s.setdefault("stroke_features", {})
+        if not s.get("stroke_features_seeded"):
+            # 스윕(warmworker)이 재둔 특징을 세션 캐시의 밑판으로 깐다 —
+            # 스윕한 파일의 클릭 검출은 디코드 0이 된다. None도 그대로 깐다
+            # (못 재는 잎을 다시 재지 않는 것까지 같은 계약).
+            s["stroke_features_seeded"] = True
+            disk = tilecache.load_strokes(s["path"], s["mtime"])
+            if disk:
+                for k, v in disk.items():
+                    try:
+                        cache.setdefault(int(k), v)
+                    except (TypeError, ValueError):
+                        continue
         out = {}
         for lid in layerIds:
             if lid not in cache:
@@ -495,7 +507,7 @@ class Engine:
         return {"features": out}
 
     def batch_run(self, paths, preset, outputDir=None, overwrite=False,
-                  manualLineIds=None):
+                  manualLineIds=None, drawnLines=None):
         from .batch import run_batch
 
         def progress(path, stage, current, total):
@@ -504,7 +516,7 @@ class Engine:
 
         return run_batch(paths, preset, output_dir=outputDir,
                          overwrite=overwrite, progress=progress,
-                         manual_line_ids=manualLineIds)
+                         manual_line_ids=manualLineIds, drawn_lines=drawnLines)
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
                    embedPreview=True, overwrite=False, verify=True, lineColor=None,

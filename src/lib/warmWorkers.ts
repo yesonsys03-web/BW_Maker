@@ -19,8 +19,10 @@
  * 가짜 워커로 검증하기 위해서다(warmupQueue와 같은 구조).
  */
 
+import type { StrokeFeatures } from "./engine";
+
 export interface WorkerEvent {
-  event: "ready" | "progress" | "file";
+  event: "ready" | "progress" | "file" | "strokes";
   path?: string;
   done?: number;
   total?: number;
@@ -30,6 +32,8 @@ export interface WorkerEvent {
    * 파일도 워커에 맡기므로, "이 판을 쓸었다"(path+mtime) 기록의 mtime은 워커가
    * 재서 준다. */
   mtime?: number;
+  /** strokes 이벤트에 실려 오는 파일의 잎 굵기 특징(잎 id 문자열 → 특징|null). */
+  features?: Record<string, StrokeFeatures | null>;
   /** 배치 내보내기 완료에 실려 오는 run_batch 모양의 결과 항목. */
   result?: BatchWorkerResultEntry;
   /** 배치 내보내기 진행의 단계 이름(엔진 batch.py의 progress cb). */
@@ -64,6 +68,8 @@ export interface WorkerSweepDeps {
   /** warm-worker-exit 구독. */
   onExit: (cb: (e: { generation: number; id: number }) => void) => Promise<() => void>;
   onProgress?: (p: WorkerSweepProgress) => void;
+  /** 워커가 잎을 구운 김에 재둔 굵기 특징 — 무세션 검출(App)의 입력. */
+  onStrokes?: (path: string, features: Record<string, StrokeFeatures | null>) => void;
 }
 
 export interface WorkerSweepHandle {
@@ -307,6 +313,9 @@ export function runWorkerSweep(deps: WorkerSweepDeps): WorkerSweepHandle {
         partial.set(ev.path, ev.done ?? 0);
         if (ev.total !== undefined) totals.set(ev.path, ev.total);
         report();
+      }
+      if (ev.event === "strokes" && ev.path !== undefined && ev.features !== undefined) {
+        deps.onStrokes?.(ev.path, ev.features);
       }
     },
     onFile: (ev) => {

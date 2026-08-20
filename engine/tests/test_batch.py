@@ -1,3 +1,4 @@
+import os
 import shutil
 
 from psd_tools import PSDImage
@@ -194,3 +195,41 @@ def test_batch_refuses_a_manual_line_id_that_is_not_a_pixel_layer(fixture_psd, t
                   manual_line_ids={str(fixture_psd): [group_id]})
     assert r["results"][0]["ok"] is False
     assert "pixel 레이어가 아닙니다" in r["results"][0]["error"]["message"]
+
+
+def test_batch_designates_drawn_lines_from_the_sweep_sidecar(tmp_path, monkeypatch):
+    """스윕이 재둔 특징이 있으면 배치는 자기 프리셋으로 검출 판단까지 하고
+    내보낸다 — 클릭 없이 ROPE DETAILS류가 배치 산출물에 들어가는 자리다.
+    정책 값(문턱·어휘)은 프런트가 보낸다. 특징이 없으면 지금까지처럼 돈다."""
+    monkeypatch.setenv("PSD_ENGINE_TILE_CACHE_DIR", str(tmp_path / "tc"))
+    from conftest import make_image, write_psd
+    from test_linedetect import make_hatch
+
+    from psd_engine import tilecache
+    from psd_engine.linedetect import measure_strokes
+    from psd_engine.tree import build_tree
+
+    src = tmp_path / "plate.psd"
+    write_psd(src, [make_hatch("rope details"),
+                    make_image("line art", 200, 4, 4, 40, 32)])
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    policy = {"survive2Max": 0.25, "coverageMax": 0.15, "minNativePx": 1,
+              "excludeGroups": ["refs"], "excludeTokens": ["glow"]}
+
+    # 사이드카가 없으면(미스윕 폴더) 기존과 같다 — line 한 장만.
+    r = run_batch([str(src)], PRESET, output_dir=str(out_dir),
+                  drawn_lines=policy)
+    assert r["results"][0]["ok"] is True
+    assert r["results"][0]["layerCount"] == 1
+
+    built = build_tree(PSDImage.open(str(src)))
+    feats = {str(lid): measure_strokes(layer)
+             for lid, layer in built["layers_by_id"].items()
+             if not layer.is_group()}
+    tilecache.store_strokes(str(src), os.path.getmtime(src), feats)
+
+    r = run_batch([str(src)], PRESET, output_dir=str(out_dir),
+                  drawn_lines=policy, overwrite=True)
+    assert r["results"][0]["ok"] is True
+    assert r["results"][0]["layerCount"] == 2

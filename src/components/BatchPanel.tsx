@@ -1,3 +1,4 @@
+import { DRAWN_LINES_POLICY } from "../lib/detectDrawnLines";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { findConflicts, planBatchOutputs } from "../lib/batch";
@@ -251,6 +252,10 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, work
                 preset,
                 outputDir: dir,
                 overwrite,
+                // 스윕이 재둔 특징을 배치 프리셋으로 판단하는 정책 — 값의
+                // 단일 출처는 detectDrawnLines.ts다. 특징 없는 파일(미스윕)은
+                // 엔진이 지금까지처럼 이름 매칭 + 수동 지정만으로 돈다.
+                drawnLines: DRAWN_LINES_POLICY,
                 ...(manual && manual.length > 0 ? { manualLineIds: manual } : {}),
               },
             });
@@ -295,7 +300,8 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, work
         const manual = manualLineIdsByPath[paths[i]];
         const { results: one } = await batchRun(
           [paths[i]], preset, dir, overwrite,
-          manual && manual.length > 0 ? { [paths[i]]: manual } : {}
+          manual && manual.length > 0 ? { [paths[i]]: manual } : {},
+          DRAWN_LINES_POLICY
         );
         collected.push(...one);
         // 파일마다 표를 갱신한다 — 끝까지 기다려야 아무것도 안 보이면, 무엇이

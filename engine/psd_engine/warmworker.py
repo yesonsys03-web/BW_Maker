@@ -14,6 +14,7 @@
   stdout : {"event": "ready"}                                  기동 직후 한 번
            {"event": "progress", "path", "done", "total"}      단위 작업 하나마다
            {"event": "file", "path", "ok": true, "total"}      파일 완료
+           {"event": "strokes", "path", "features"}            잎 굵기 특징(파일당 한 번)
            {"event": "file", "path", "ok": false, "message"}   파일 실패(다음 줄 계속)
 
 `presets`는 앱의 프리셋 목록(BG·CHAR가 기본)이다. 있으면 타일·오버레이에 더해
@@ -61,6 +62,8 @@ from pathlib import Path
 from psd_tools import PSDImage
 from psd_tools.constants import ColorMode
 
+from .linedetect import (judge_drawn_lines, measure_strokes,
+                         measure_strokes_rgba, select_drawn_line_candidates)
 from .matching import match_preset, preset_operations
 from .render import _preview_tile, preview_scale
 from .tree import build_tree
@@ -114,10 +117,18 @@ def _pixel_leaf_ids(nodes, included=None, initial=False):
     return out
 
 
-def _preset_preview_args(tree, preset):
+def _preset_preview_args(tree, preset, feats=None, drawn_lines=None):
     """
     "이 프리셋을 갓 적용한 화면"이 render_preview에 보낼 인자와 **정확히 같은**
     값. 미리 구울 것이 없으면 None.
+
+    feats(잎 굵기 특징)와 drawn_lines(판단 정책)가 오면 검출 지정을 included에
+    합류시킨다 — 스윕이 지나간 뒤 앱의 "갓 적용" 화면은 검출 지정이 이미 실린
+    화면이라(무세션 판단 그물이 캐시완료와 함께 지정한다), 그 그림으로 구워야
+    클릭이 캐시를 탄다. 매칭만으로 구우면 키가 어긋나 매 클릭이 실시간 합성으로
+    가고, 응답 유실 결함(PreviewCanvas의 "부류 2")에 자주 부딪힌다.
+    색 통일(lineColorIds)은 여전히 매칭만이다 — 프런트 lineColorIdsFor 미러
+    (지정 잎은 원본 색).
 
     프런트의 세 계산을 그대로 옮긴 것이라 그쪽이 바뀌면 여기도 같이 봐야 한다.
       - includedIds: applyPresetResult(src/state/appStore.tsx)가 매칭 결과를
@@ -137,7 +148,14 @@ def _preset_preview_args(tree, preset):
     """
     matched, _skipped = match_preset(tree, preset)
     matched_set = set(matched)
-    visible = _pixel_leaf_ids(tree, matched_set)
+    included_set = set(matched)
+    if drawn_lines and feats:
+        cands = select_drawn_line_candidates(
+            tree, matched, preset,
+            drawn_lines.get("excludeGroups") or [],
+            drawn_lines.get("excludeTokens") or [])
+        included_set |= set(judge_drawn_lines(feats, cands, drawn_lines))
+    visible = _pixel_leaf_ids(tree, included_set)
     if not visible:
         return None
     initial = _pixel_leaf_ids(tree, initial=True)
@@ -147,7 +165,7 @@ def _preset_preview_args(tree, preset):
     line_color = preset.get("lineColor")
     return {
         "visible": visible,
-        "included": sorted(matched),
+        "included": sorted(included_set),
         "lineColor": line_color,
         "lineColorIds": None if line_color is None
             else [i for i in visible if i in matched_set],
@@ -160,7 +178,8 @@ def _emit(obj, out):
     out.flush()
 
 
-def warm_file(path, max_size, out, edge_lines=None, presets=None):
+def warm_file(path, max_size, out, edge_lines=None, presets=None,
+              drawn_lines=None):
     """
     파일 하나의 모든 드로잉 레이어 타일을, 경계선이 켜진 설정이 있으면 각 뷰의
     오버레이까지, 그리고 presets가 오면 **프리셋마다 갓 적용한 화면의 미리보기
@@ -218,19 +237,59 @@ def warm_file(path, max_size, out, edge_lines=None, presets=None):
         for p in presets:
             matched_union.update(match_preset(built["tree"], p)[0])
         views = [v for v in views if set(v["lineIds"]) & matched_union]
-    previews = [args for p in (presets or [])
-                for args in [_preset_preview_args(built["tree"], p)]
-                if args is not None]
-    total = len(leaves) + len(views) * len(variants) + len(previews)
+    total = len(leaves) + len(views) * len(variants)
     done = 0
+    # 잎 굵기 특징(선 그림 검출의 측정)은 타일을 굽는 김에 함께 잰다 — 디코드가
+    # 손에 있는 순간이 공짜다. 특징은 프리셋과 무관한 그림의 성질이라 한 번만
+    # 재고, 판단(후보·문턱)은 쓰는 쪽이 그때 선택된 프리셋 하나로 한다
+    # (프리셋마다 다시 굽던 오버레이 실수와 구조가 다른 이유). 사이드카에 이미
+    # 있으면 재측정 없음. 끝나면 strokes 이벤트로 앱에 보낸다 — "캐시완료 =
+    # 검출완료"가 성립해야 배치가 클릭 없이 검출 지정을 받는다.
+    loaded = tilecache.load_strokes(path, mtime)
+    feats = dict(loaded) if loaded else {}
     for lid in leaves:
-        # _preview_tile이 디스크 우선 → 디코드 → 디스크 저장까지 다 한다.
-        # 세션 RAM 캐시는 예산(192MB) LRU가 걸려 있고, 파일이 끝나면 session
-        # 딕셔너리와 함께 통째로 버려진다.
-        _preview_tile(session, lid, scale)
+        key = str(lid)
+        if key in feats:
+            # _preview_tile이 디스크 우선 → 디코드 → 디스크 저장까지 다 한다.
+            # 세션 RAM 캐시는 예산(192MB) LRU가 걸려 있고, 파일이 끝나면
+            # session 딕셔너리와 함께 통째로 버려진다.
+            _preview_tile(session, lid, scale)
+        else:
+            grabbed = []
+            _preview_tile(session, lid, scale, on_rgba=grabbed.append)
+            try:
+                if grabbed:
+                    feats[key] = measure_strokes_rgba(grabbed[0])
+                else:
+                    # 디코드가 없었다 — 타일은 있는데 특징만 없는(구버전 캐시)
+                    # 잎이거나 그릴 픽셀이 없는 잎. 전자는 여기서 한 번 재고,
+                    # 후자는 None으로 적어 다음에 또 안 본다.
+                    layer = session["layers_by_id"][lid]
+                    if (layer.width <= 0 or layer.height <= 0
+                            or not layer.has_pixels()):
+                        feats[key] = None
+                    else:
+                        feats[key] = measure_strokes(layer)
+            except Exception:
+                # 잎 하나가 못 재어져도 파일은 계속 — rpc measure_leaf_strokes와
+                # 같은 계약(그 잎만 None).
+                feats[key] = None
         done += 1
         _emit({"event": "progress", "path": path, "done": done, "total": total},
               out)
+    if feats and feats != (loaded or {}):
+        tilecache.store_strokes(path, mtime, feats)
+    if feats:
+        _emit({"event": "strokes", "path": path, "features": feats}, out)
+    # 미리보기는 잎 특징을 다 잰 뒤에 굽는다 — "갓 적용" 화면이 이제 검출
+    # 지정까지 실린 화면이라, 특징이 손에 있어야 앱이 실제로 보여줄 그림과
+    # 키가 맞는다(_preset_preview_args). total이 여기서 늘어나는 것은
+    # 프런트가 max로 합치므로 문제없다.
+    previews = [args for p in (presets or [])
+                for args in [_preset_preview_args(built["tree"], p, feats=feats,
+                                                  drawn_lines=drawn_lines)]
+                if args is not None]
+    total += len(previews)
     for opts in variants:
         skey = _edge_settings_key(opts)
         for view in views:
@@ -283,7 +342,8 @@ def export_file(path, job, out, store):
     try:
         result = _process_one(store, path, job["preset"], job.get("outputDir"),
                               job.get("overwrite", False), progress,
-                              manual_line_ids=job.get("manualLineIds") or ())
+                              manual_line_ids=job.get("manualLineIds") or (),
+                              drawn_lines=job.get("drawnLines"))
         _emit({"event": "file", "path": path, "ok": result["ok"],
                "result": result}, out)
     except Exception as e:  # noqa: BLE001 — run_batch와 같은 항목별 기록 정책
@@ -354,7 +414,15 @@ def prepare_file(path, job, max_size, out):
         # 쓰는 바로 그 함수다. 여기서 따로 계산하면 키를 만드는 곳이 네 번째로
         # 늘고, rpc.py의 _preview_key_material이 경고하는 "세 곳" 문제가
         # 여섯 쌍이 된다.
-        args = _preset_preview_args(tree, preset)
+        #
+        # 스윕이 재둔 특징이 디스크에 있으면(같은 폴더 재로드) 결과에 실어
+        # 보내고 미리보기도 검출 지정 포함으로 굽는다 — 앱이 지정을 복원해
+        # 배지·배치·미리보기 키가 스윕 직후와 같은 상태로 돌아온다.
+        from . import tilecache
+        feats = tilecache.load_strokes(str(path), mtime)
+        result["strokeFeatures"] = feats
+        args = _preset_preview_args(tree, preset, feats=feats,
+                                    drawn_lines=job.get("drawnLines"))
         # documentView는 args가 None인 두 이유(매칭 0장 / 매칭이 초기 화면과
         # 같음) 중 어느 쪽인지를 프런트에 알린다. 같은 원시 함수를 쓰므로 새
         # 판단이 아니다.
@@ -428,7 +496,7 @@ def main(stdin=None, stdout=None, max_size=1500):
         try:
             mtime = os.path.getmtime(path)
             total = warm_file(path, max_size, stdout, msg.get("edgeLines"),
-                              msg.get("presets"))
+                              msg.get("presets"), msg.get("drawnLines"))
             # mtime을 실어 보낸다 — 프런트는 앱에서 아직 안 연 파일도 워커에
             # 맡기므로, "이 판을 쓸었다"는 기록(path+mtime)의 mtime을 워커가
             # 재서 알려 줘야 한다.

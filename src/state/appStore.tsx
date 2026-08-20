@@ -98,6 +98,12 @@ export interface AppState {
    * 소리 없이 되살아난다.
    */
   drawnLineIdsByPath: Record<string, number[] | undefined>;
+  /**
+   * 스윕이 재둔 파일별 잎 굵기 특징(잎 id 문자열 → 특징|null). 프리셋과 무관한
+   * 그림의 성질이라 프리셋을 바꿔도 그대로 두고 판단만 다시 한다. 파일을 새로
+   * 열면(mtime이 달라졌을 수 있음) 버린다 — 스윕·클릭 경로가 다시 채운다.
+   */
+  strokeFeaturesByPath: Record<string, Record<string, StrokeFeatures | null> | undefined>;
   errors: ErrorEntry[];
   /**
    * 프로젝트에서 복원한 파일의 수정시각. openSuccess가 이걸 보고 복원한 작업을
@@ -112,6 +118,9 @@ export interface AppState {
  * — 세션은 메인 엔진 SessionStore의 것이라 워커가 만들 수 없다.
  */
 export interface PreparedFileResult {
+  /** 워커가 디스크 사이드카에서 읽어 온 잎 굵기 특징(스윕한 폴더의 재로드).
+   * null이면 사이드카 없음 — 검출은 스윕이나 클릭 경로가 다시 채운다. */
+  strokeFeatures?: Record<string, StrokeFeatures | null> | null;
   tree: TreeNode[];
   mtime: number;
   width: number;
@@ -146,6 +155,7 @@ export type AppAction =
   | { type: "setEdgeColour"; path: string; layerIds: number[]; on: boolean }
   | { type: "setManualLine"; path: string; layerIds: number[]; on: boolean }
   | { type: "drawnLinesDetected"; path: string; layerIds: number[] }
+  | { type: "strokeFeaturesLoaded"; path: string; features: Record<string, StrokeFeatures | null> }
   | { type: "pushOp"; path: string; op: Operation }
   | { type: "setIncluded"; path: string; includedIds: number[] }
   | { type: "applyPresetResult"; path: string; matchedLayerIds: number[]; operations: Operation[] }
@@ -175,6 +185,7 @@ export const initialAppState: AppState = {
   opsByPath: {},
   matchedIdsByPath: {},
   drawnLineIdsByPath: {},
+  strokeFeaturesByPath: {},
   errors: [],
   restoredMtimeByPath: {},
 };
@@ -282,6 +293,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         matchedIdsByPath,
         drawnLineIdsByPath,
+        // 특징도 함께 버린다 — 새로 연 파일은 mtime이 달라졌을 수 있다(포토샵
+        // 재저장). 스윕·클릭 경로가 다시 채운다.
+        strokeFeaturesByPath: dropKey(state.strokeFeaturesByPath, path),
         files: updateFile(state.files, path, {
           status: "open",
           sessionId: result.sessionId,
@@ -378,6 +392,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         }),
         matchedIdsByPath: { ...state.matchedIdsByPath, [path]: result.matchedLayerIds },
         drawnLineIdsByPath: dropKey(state.drawnLineIdsByPath, path),
+        // 워커가 사이드카에서 읽어 온 특징 — 있으면 무세션 판단 그물이 지정을
+        // 복원해, 준비가 구운 미리보기(검출 포함 화면)와 키가 맞는다.
+        strokeFeaturesByPath: result.strokeFeatures
+          ? { ...state.strokeFeaturesByPath, [path]: result.strokeFeatures }
+          : dropKey(state.strokeFeaturesByPath, path),
         opsByPath: {
           ...state.opsByPath,
           [path]: { ...initial, includedIds, entries: buildEntries(includedIds, initial.ops) },
@@ -461,6 +480,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     // 수동 지정(setManualLine)과 같은 경로라 내보내기·저장·해제가 전부 검증된
     // 길을 탄다. 빈 배열도 기록한다 — "검출했는데 없었다"와 "아직 안 했다"가
     // 같아지면 감시 효과가 같은 파일을 영영 다시 잰다.
+    case "strokeFeaturesLoaded":
+      return {
+        ...state,
+        strokeFeaturesByPath: { ...state.strokeFeaturesByPath, [action.path]: action.features },
+      };
+
     case "drawnLinesDetected": {
       const current = state.opsByPath[action.path];
       if (!current) return state;
@@ -634,6 +659,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         opsByPath,
         matchedIdsByPath,
         drawnLineIdsByPath: dropKey(state.drawnLineIdsByPath, action.path),
+        strokeFeaturesByPath: dropKey(state.strokeFeaturesByPath, action.path),
         restoredMtimeByPath,
         activePath: wasActive ? null : state.activePath,
       };

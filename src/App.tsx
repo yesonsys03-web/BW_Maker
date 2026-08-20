@@ -30,6 +30,7 @@ import {
   parseTreePanelWidth,
 } from "./lib/layout";
 import { countNeonMatches, splitLineLeafIds } from "./lib/layerFilter";
+import { DRAWN_LINES_POLICY, judgeStoredFeatures } from "./lib/detectDrawnLines";
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError, visibleIdsForPreview } from "./lib/preview";
@@ -1858,7 +1859,7 @@ function AppShell() {
       paths: targets,
       workerCount: cacheWorkers,
       start: (count) => warmWorkersStart(count, PREVIEW_MAX_SIZE),
-      send: (id, path) => warmWorkerSend(id, { path, prepare: { preset, maxSize: PREVIEW_MAX_SIZE } }),
+      send: (id, path) => warmWorkerSend(id, { path, prepare: { preset, maxSize: PREVIEW_MAX_SIZE, drawnLines: DRAWN_LINES_POLICY } }),
       stop: warmWorkersStop,
       onLine: onWarmWorkerLine,
       onExit: onWarmWorkerExit,
@@ -1968,7 +1969,7 @@ function AppShell() {
       paths: targets.map((f) => f.path),
       workerCount: cacheWorkers,
       start: (count) => warmWorkersStart(count, PREVIEW_MAX_SIZE),
-      send: async (id, path) => warmWorkerSend(id, { path, presets: await presetsPromise }),
+      send: async (id, path) => warmWorkerSend(id, { path, presets: await presetsPromise, drawnLines: DRAWN_LINES_POLICY }),
       stop: warmWorkersStop,
       onLine: onWarmWorkerLine,
       onExit: onWarmWorkerExit,
@@ -1978,6 +1979,9 @@ function AppShell() {
           total: Math.max(estimated, p.totalLeavesKnown, p.doneLeaves),
           phase: "all",
         }),
+      // 워커가 잎을 구운 김에 재둔 굵기 특징 — 무세션 검출 그물의 입력이다.
+      // "캐시완료 = 검출완료"가 여기서 성립한다.
+      onStrokes: (path, features) => dispatch({ type: "strokeFeaturesLoaded", path, features }),
     });
     void handle.finished.then((result) => {
       setWarmProgress(null);
@@ -2070,6 +2074,34 @@ function AppShell() {
    * 해제한 잎이 소리 없이 되살아난다.
    */
   /**
+   * 스윕이 재둔 특징으로 하는 무세션 검출 그물. 전체 캐시가 잎을 구운 김에
+   * 재둔 굵기 특징(strokeFeaturesByPath)이 있으면, 세션·엔진 호출 없이 그
+   * 자리에서 후보를 판단해 지정한다 — "캐시완료 = 검출완료"의 프런트 절반.
+   * 후보·문턱은 클릭 경로와 같은 모듈이라 두 그물의 답이 같고, 프리셋을 다시
+   * 적용하면 래치가 풀려 여기서 새 프리셋으로 판단만 다시 한다(재측정 없음).
+   * 복원 파일은 클릭 경로와 같은 이유로 건너뛴다(해제한 잎 부활 방지).
+   */
+  useEffect(() => {
+    const preset = selectedPreset;
+    if (!preset) return;
+    for (const file of state.files) {
+      if (file.status !== "open" || !file.tree) continue;
+      if (!file.presetApplied) continue;
+      const matched = state.matchedIdsByPath[file.path];
+      if (matched === undefined) continue;
+      if (state.drawnLineIdsByPath[file.path] !== undefined) continue;
+      if (file.path in state.restoredMtimeByPath && state.restoredMtimeByPath[file.path] === file.mtime) continue;
+      const features = state.strokeFeaturesByPath[file.path];
+      if (features === undefined) continue;
+      dispatch({
+        type: "drawnLinesDetected",
+        path: file.path,
+        layerIds: judgeStoredFeatures(file.tree, matched, preset, features),
+      });
+    }
+  }, [state.files, state.matchedIdsByPath, state.drawnLineIdsByPath, state.strokeFeaturesByPath, state.restoredMtimeByPath, selectedPreset, dispatch]);
+
+  /**
    * 검출이 "엔진이 조용한가"를 묻는 창구. 조용함 = 로드 큐·워밍업·썸네일
    * 받기·배치가 전부 쉬는 상태다. 전체 캐시 스윕 중에도 미룬다 — 스윕은
    * 파일마다 세션을 붙이며 도는데 검출까지 끼면 세 세션이 두 칸을 놓고
@@ -2094,13 +2126,15 @@ function AppShell() {
       if (matched === undefined) continue;
       if (state.drawnLineIdsByPath[file.path] !== undefined) continue;
       if (file.path in state.restoredMtimeByPath && state.restoredMtimeByPath[file.path] === file.mtime) continue;
+      // 스윕 특징이 있으면 무세션 그물(위)이 맡는다 — 디코드 큐에 세울 이유가 없다.
+      if (state.strokeFeaturesByPath[file.path] !== undefined) continue;
       if (detectInFlightRef.current.has(file.path)) continue;
       detectInFlightRef.current.add(file.path);
       void queueDetectDrawnLines(dispatch, file.path, file.sessionId, file.tree, matched, preset, waitForEngineQuiet).finally(
         () => detectInFlightRef.current.delete(file.path)
       );
     }
-  }, [state.files, state.matchedIdsByPath, state.drawnLineIdsByPath, state.restoredMtimeByPath, selectedPreset, waitForEngineQuiet, dispatch]);
+  }, [state.files, state.matchedIdsByPath, state.drawnLineIdsByPath, state.strokeFeaturesByPath, state.restoredMtimeByPath, selectedPreset, waitForEngineQuiet, dispatch]);
 
   /**
    * "라인필요" 파일 전부에 라인 후보를 일괄 지정한다. 규칙과 측정 근거는

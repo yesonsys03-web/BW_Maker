@@ -3,6 +3,7 @@ import { BG_PRESET, CHAR_PRESET } from "./presets";
 import {
   drawnLineCandidateIds,
   judgeDrawnLines,
+  judgeStoredFeatures,
   COVERAGE_MAX,
   MIN_NATIVE_PX,
   SURVIVE2_MAX,
@@ -67,4 +68,17 @@ test("the band edges are exclusive where the borderline cases live", () => {
 test("BG presets exclude their own group prefixes from candidates", () => {
   const tree: TreeNode[] = [group(1, "-LayOut", [leaf(2, "sketchy")]), leaf(3, "wires")];
   expect(drawnLineCandidateIds(tree, [], BG_PRESET)).toEqual([3]);
+});
+
+
+test("judgeStoredFeatures picks only this preset's candidates from a whole-file map", () => {
+  // 스윕 사이드카는 "모든 잎"의 특징을 담는다 — 매칭된 라인(id 2)이나 제외
+  // 어휘 잎(id 3)의 특징이 아무리 선다워도 판단 대상이 아니어야 한다.
+  const tree: TreeNode[] = [leaf(1, "ROPE DETAILS"), leaf(2, "LINE"), leaf(3, "halo glow")];
+  const features = {
+    "1": { survive2: 0.01, survive1: 0.05, coverage: 0.02, nNative: 120000 },
+    "2": { survive2: 0.0, survive1: 0.0, coverage: 0.01, nNative: 999999 },
+    "3": { survive2: 0.0, survive1: 0.0, coverage: 0.01, nNative: 999999 },
+  };
+  expect(judgeStoredFeatures(tree, [2], CHAR_PRESET, features)).toEqual([1]);
 });

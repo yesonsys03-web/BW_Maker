@@ -263,3 +263,14 @@ def test_warm_disk_only_sweeps_what_is_already_on_disk(fixture_psd, monkeypatch)
     res = warm_preview_tiles(fresh, [2, 4, 5], max_size=256, budget_s=10.0,
                              disk_only=True)
     assert sorted(res["warmed"]) == [2, 4, 5] and res["remaining"] == []
+
+
+def test_strokes_sidecar_roundtrip():
+    """잎 굵기 특징은 파일 단위 JSON 사이드카로 — 스윕이 쓰고, 재스윕·클릭
+    검출·배치가 읽는다. mtime이 갈리면 다른 판이라 미스다."""
+    feats = {"3": {"coverage": 0.01, "survive1": 0.0, "survive2": 0.0, "nNative": 30000},
+             "5": None}
+    assert tilecache.load_strokes("/x.psd", 1.5) is None
+    tilecache.store_strokes("/x.psd", 1.5, feats)
+    assert tilecache.load_strokes("/x.psd", 1.5) == feats
+    assert tilecache.load_strokes("/x.psd", 2.5) is None

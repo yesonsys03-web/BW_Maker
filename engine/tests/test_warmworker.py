@@ -413,3 +413,87 @@ def test_prepare_flags_the_document_view_instead_of_baking(fixture_psd):
     assert r["documentView"] is is_doc
     if is_doc:
         assert r["pngPath"] is None
+
+
+def test_worker_measures_stroke_features_and_emits_them(fixture_psd):
+    """스윕이 잎 특징을 재서 사이드카에 쓰고 strokes 이벤트로 알린다 —
+    "캐시완료 = 검출완료"(클릭 없이 배치에 검출 반영)의 엔진 쪽 절반이다."""
+    events = _run([json.dumps({"path": str(fixture_psd)}) + "\n"])
+    strokes = [e for e in events if e["event"] == "strokes"]
+    assert len(strokes) == 1 and strokes[0]["path"] == str(fixture_psd)
+    feats = strokes[0]["features"]
+    assert feats
+    mtime = os.path.getmtime(fixture_psd)
+    assert tilecache.load_strokes(str(fixture_psd), mtime) == feats
+
+
+def test_worker_reuses_cached_features_without_remeasuring(fixture_psd, monkeypatch):
+    """재스윕은 사이드카를 읽지 다시 재지 않는다 — 측정이 공짜인 것은 디코드와
+    겹칠 때뿐이고, 타일이 이미 있으면 디코드도 측정도 없어야 한다."""
+    _run([json.dumps({"path": str(fixture_psd)}) + "\n"])
+
+    import psd_engine.warmworker as worker_mod
+
+    def boom(*a, **k):
+        raise AssertionError("재스윕이 특징을 다시 쟀다")
+
+    monkeypatch.setattr(worker_mod, "measure_strokes_rgba", boom)
+    monkeypatch.setattr(worker_mod, "measure_strokes", boom)
+    events = _run([json.dumps({"path": str(fixture_psd)}) + "\n"])
+    strokes = [e for e in events if e["event"] == "strokes"]
+    assert len(strokes) == 1 and strokes[0]["features"]
+
+
+def test_preset_preview_includes_detected_drawn_lines(tmp_path):
+    """스윕 후 앱의 "갓 적용" 화면은 검출 지정이 실린 화면이다 — 그 그림으로
+    구워야 클릭이 미리보기 캐시를 탄다. 매칭만으로 구우면 키가 어긋나 매 클릭이
+    실시간 합성(직렬 엔진, 파일당 9~41초)으로 가고, 앱의 준비 큐가 전 파일을
+    다시 굽느라 엔진이 몇 시간 갈린다(2026-08-20 실증). 색 통일은 여전히
+    매칭만이다(프런트 lineColorIdsFor 미러 — 지정 잎은 원본 색)."""
+    from conftest import make_image, write_psd
+    from test_linedetect import make_hatch
+
+    from psd_tools import PSDImage
+
+    from psd_engine.linedetect import measure_strokes
+    from psd_engine.tree import build_tree
+    from psd_engine.warmworker import _preset_preview_args
+
+    src = tmp_path / "plate.psd"
+    write_psd(src, [make_hatch("rope details"),
+                    make_image("line art", 200, 4, 4, 40, 32),
+                    make_image("backdrop", 128, 0, 0, 60, 40)])
+    built = build_tree(PSDImage.open(str(src)))
+    ids = {l.name: lid for lid, l in built["layers_by_id"].items() if not l.is_group()}
+    feats = {str(lid): measure_strokes(layer)
+             for lid, layer in built["layers_by_id"].items() if not layer.is_group()}
+    policy = {"survive2Max": 0.25, "coverageMax": 0.15, "minNativePx": 1,
+              "excludeGroups": [], "excludeTokens": []}
+    preset = {"include": {"type": "contains", "value": "line", "caseSensitive": False},
+              "excludeGroupPrefixes": [], "matchGroups": True, "includeHidden": True,
+              "merge": "none", "naming": "pathPrefix", "outputSuffix": "_L",
+              "embedPreview": True, "lineColor": "#000000"}
+
+    plain = _preset_preview_args(built["tree"], preset)
+    assert ids["rope details"] not in plain["included"]  # 특징 없으면 기존 그대로
+
+    args = _preset_preview_args(built["tree"], preset, feats=feats, drawn_lines=policy)
+    assert ids["rope details"] in args["included"] and ids["line art"] in args["included"]
+    assert ids["rope details"] in args["visible"]
+    assert ids["line art"] in args["lineColorIds"]
+    assert ids["rope details"] not in args["lineColorIds"]
+
+
+def test_prepare_returns_sidecar_features(fixture_psd):
+    """같은 폴더 재로드: 준비가 사이드카 특징을 결과에 실어 보내 앱이 지정·배지를
+    복원하고, 준비가 구운 미리보기와 키가 맞는다."""
+    mtime = os.path.getmtime(fixture_psd)
+    feats = {"5": {"coverage": 0.02, "survive1": 0.0, "survive2": 0.0,
+                   "nNative": 30000}}
+    tilecache.store_strokes(str(fixture_psd), mtime, feats)
+    events = _run([json.dumps({"path": str(fixture_psd),
+                               "prepare": {"preset": _PREPARE_PRESET,
+                                           "maxSize": 256}}) + "\n"])
+    done = [e for e in events if e["event"] == "file"]
+    assert done[0]["ok"] is True
+    assert done[0]["result"]["strokeFeatures"] == feats

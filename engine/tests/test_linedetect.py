@@ -78,3 +78,19 @@ def test_unknown_and_unmeasurable_ids_come_back_null(psd_path):
     engine, sid, ids = open_session(psd_path)
     result = engine.measure_leaf_strokes(sid, [9999])
     assert result["features"]["9999"] is None
+
+
+def test_measure_strokes_rgba_core_matches_layer_wrapper(psd_path):
+    """스윕은 타일 디코드에서 얻은 rgba로 코어를 직접 부른다 — 레이어 래퍼와
+    수치가 비트까지 같아야 문턱(detectDrawnLines.ts)이 두 경로에 하나로 선다."""
+    from psd_tools import PSDImage
+
+    from psd_engine.linedetect import measure_strokes, measure_strokes_rgba
+    from psd_engine.render import extract_rgba
+    from psd_engine.tree import build_tree
+
+    built = build_tree(PSDImage.open(psd_path))
+    for layer in built["layers_by_id"].values():
+        if layer.is_group():
+            continue
+        assert measure_strokes(layer) == measure_strokes_rgba(extract_rgba(layer))

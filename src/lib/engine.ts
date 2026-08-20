@@ -311,6 +311,19 @@ export async function exportPsd(
 /**
  * Runs batch operations on multiple PSD files.
  */
+/**
+ * 배치의 "선으로 그려진 잎" 판단 정책. 값은 detectDrawnLines.ts의
+ * DRAWN_LINES_POLICY가 만든다(문턱·어휘의 단일 출처) — 엔진(batch.py)은 이
+ * 값으로, 스윕이 재둔 굵기 특징을 배치 프리셋 기준으로 판단만 한다.
+ */
+export interface DrawnLinesPolicy {
+  survive2Max: number;
+  coverageMax: number;
+  minNativePx: number;
+  excludeGroups: string[];
+  excludeTokens: string[];
+}
+
 export async function batchRun(
   paths: string[],
   preset: Preset,
@@ -326,10 +339,11 @@ export async function batchRun(
    * 실어 나른다 — 엔진이 규칙 결과에 합집합으로 보탠다(batch.py의
    * `_add_manual_lines`).
    */
-  manualLineIds: Record<string, number[]> = {}
+  manualLineIds: Record<string, number[]> = {},
+  drawnLines?: DrawnLinesPolicy
 ): Promise<{ results: BatchItemResult[] }> {
   return callEngine("batch_run", {
-    paths, preset, outputDir, overwrite, manualLineIds,
+    paths, preset, outputDir, overwrite, manualLineIds, drawnLines,
   }) as Promise<{
     results: BatchItemResult[];
   }>;
@@ -448,11 +462,18 @@ export async function warmWorkersStart(count: number, maxSize: number): Promise<
 export interface WarmWorkerJob {
   path: string;
   presets?: Preset[];
+  /** 검출 판단 정책(스윕·준비의 미리보기 굽기에 필요) — 값의 단일 출처는
+   * detectDrawnLines.ts. 워커는 이 값으로 "갓 적용 + 검출 지정" 화면을 굽는다
+   * — 매칭만으로 구우면 키가 어긋나 클릭마다 실시간 합성으로 간다. */
+  drawnLines?: DrawnLinesPolicy;
   export?: {
     preset: Preset;
     outputDir: string | null;
     overwrite: boolean;
     manualLineIds?: number[];
+    /** 검출 판단 정책 — batch_run의 drawnLines와 같은 값(단일 출처는
+     * detectDrawnLines.ts). 스윕이 재둔 특징이 있는 파일에만 실효가 있다. */
+    drawnLines?: DrawnLinesPolicy;
   };
   /**
    * 파일 준비 — 폴더 로드 직후의 "여는 중"과 "미리보기 준비 중"을 작업
@@ -463,6 +484,8 @@ export interface WarmWorkerJob {
   prepare?: {
     preset: Preset;
     maxSize: number;
+    /** 위 drawnLines와 같은 값 — 준비가 굽는 미리보기에도 검출이 실려야 한다. */
+    drawnLines?: DrawnLinesPolicy;
   };
 }
 

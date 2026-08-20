@@ -1,6 +1,6 @@
 import { hasAnyToken } from "./layerNames";
 import { SUGGEST_EXCLUDE_GROUPS, SUGGEST_EXCLUDE_TOKENS } from "./suggestLines";
-import type { StrokeFeatures } from "./engine";
+import type { DrawnLinesPolicy, StrokeFeatures } from "./engine";
 import type { Preset, TreeNode } from "./types";
 
 /**
@@ -89,4 +89,35 @@ export function judgeDrawnLines(features: Record<string, StrokeFeatures | null>)
     }
   }
   return out.sort((a, b) => a - b);
+}
+
+/**
+ * 배치에 실어 보내는 판단 정책 — 문턱·어휘의 단일 출처. 엔진(batch.py)은 이
+ * 값으로 스윕이 재둔 특징을 배치 드롭다운의 프리셋 기준으로 판단만 한다.
+ * 위 문턱을 바꾸면 이 객체를 타고 배치까지 함께 바뀐다.
+ */
+export const DRAWN_LINES_POLICY: DrawnLinesPolicy = {
+  survive2Max: SURVIVE2_MAX,
+  coverageMax: COVERAGE_MAX,
+  minNativePx: MIN_NATIVE_PX,
+  excludeGroups: [...SUGGEST_EXCLUDE_GROUPS],
+  excludeTokens: [...SUGGEST_EXCLUDE_TOKENS],
+};
+
+/**
+ * 스윕이 재둔 파일 단위 특징(모든 잎)에서 이 프리셋의 후보만 골라 판단한다.
+ * 세션도 엔진 호출도 없다 — "캐시완료 = 검출완료"의 프런트 절반. 후보·문턱이
+ * 클릭 경로(detectDrawnLinesEffect)와 같은 함수라 두 경로의 답이 같다.
+ */
+export function judgeStoredFeatures(
+  tree: TreeNode[],
+  matchedIds: readonly number[],
+  preset: Preset,
+  features: Record<string, StrokeFeatures | null>,
+): number[] {
+  const subset: Record<string, StrokeFeatures | null> = {};
+  for (const id of drawnLineCandidateIds(tree, matchedIds, preset)) {
+    subset[String(id)] = features[String(id)] ?? null;
+  }
+  return judgeDrawnLines(subset);
 }

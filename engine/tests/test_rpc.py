@@ -941,3 +941,24 @@ def test_edge_settings_key_folds_int_and_float_to_the_same_key():
     assert k_js == k_py
     assert tilecache.overlay_key([1, 2], [3], k_js) == \
         tilecache.overlay_key([1, 2], [3], k_py)
+
+
+def test_measure_leaf_strokes_reads_the_sweep_sidecar_first(fixture_psd, tmp_path, monkeypatch):
+    """스윕이 재둔 특징은 클릭 검출이 디코드 없이 그대로 쓴다 — 스윕한 폴더의
+    클릭 검출이 공짜가 되는 자리다."""
+    monkeypatch.setenv("PSD_ENGINE_TILE_CACHE_DIR", str(tmp_path / "tc"))
+    from psd_engine import tilecache
+
+    engine = rpc.Engine(out=io.StringIO())
+    sid, leaf_ids = _open_leaves(engine, fixture_psd)
+    s = engine.store.get(sid)
+    canned = {str(leaf_ids[0]): {"coverage": 0.02, "survive1": 0.1,
+                                 "survive2": 0.05, "nNative": 42000}}
+    tilecache.store_strokes(s["path"], s["mtime"], canned)
+
+    def boom(*a, **k):
+        raise AssertionError("사이드카가 있는 잎을 다시 쟀다")
+
+    monkeypatch.setattr(rpc, "measure_strokes", boom)
+    res = engine.measure_leaf_strokes(sid, layerIds=[leaf_ids[0]])
+    assert res["features"][str(leaf_ids[0])] == canned[str(leaf_ids[0])]

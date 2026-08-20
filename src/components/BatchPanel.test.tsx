@@ -8,6 +8,7 @@
  * 했다. 그 조율은 순수 함수로 뽑을 수 없어(무엇을 언제 부르는가가 곧 동작이다)
  * 실제로 패널을 띄우고 엔진만 가짜로 바꾼다.
  */
+import { DRAWN_LINES_POLICY } from "../lib/detectDrawnLines";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -273,6 +274,9 @@ test("a file's manual line designation rides along to the batch", async () => {
   // 파일을 하나씩 돌므로 첫 호출은 a.psd다. 지정이 없는 파일에는 빈 것이 간다.
   expect(engine.batchRun.mock.calls[0][0]).toEqual(["/cuts/a.psd"]);
   expect(engine.batchRun.mock.calls[0][4]).toEqual({});
+  // 검출 정책이 여섯째 인자로 실려 간다 — 엔진이 스윕 특징을 배치 프리셋으로
+  // 판단하는 입력(단일 출처 detectDrawnLines.ts).
+  expect(engine.batchRun.mock.calls[0][5]).toEqual(DRAWN_LINES_POLICY);
 
   finish(0);
   await waitFor(() => expect(runs.length).toBe(2));

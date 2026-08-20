@@ -397,3 +397,16 @@ test("a failed file advances filesDone by exactly one, not two", async () => {
   }
   expect(h.progress[h.progress.length - 1]).toEqual({ filesDone: 2, filesTotal: 2 });
 });
+
+test("strokes events reach onStrokes with the file's features", async () => {
+  // 워커가 잎을 구운 김에 재둔 굵기 특징 — 무세션 검출(App)의 입력이다.
+  const h = harness(["a"], 1);
+  const got: Array<[string, number]> = [];
+  h.deps.onStrokes = (path, features) => void got.push([path, Object.keys(features).length]);
+  const run = runWorkerSweep(h.deps);
+  await tick();
+  h.emit(0, { event: "strokes", path: "a", features: { "3": null, "4": { survive1: 0, survive2: 0, coverage: 0.01, nNative: 30000 } } });
+  h.emit(0, { event: "file", path: "a", ok: true, total: 1 });
+  await run.finished;
+  expect(got).toEqual([["a", 2]]);
+});

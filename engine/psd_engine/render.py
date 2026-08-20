@@ -1511,7 +1511,7 @@ def _evict_tiles(cache):
         total -= _tile_bytes(dropped)
 
 
-def _preview_tile(session, layer_id, scale):
+def _preview_tile(session, layer_id, scale, on_rgba=None):
     """
     레이어를 미리보기 배율로 축소한 RGBA 타일 + 배치 좌표. 세션에 LRU 캐싱한다.
 
@@ -1552,6 +1552,10 @@ def _preview_tile(session, layer_id, scale):
                   s=round(time.perf_counter() - t0, 4))
             return entry
         rgba = extract_rgba(layer)
+        # 디코드가 실제로 일어난 순간에만 부른다 — 스윕이 이 rgba로 굵기
+        # 측정까지 겸한다(같은 잎을 두 번 디코드하지 않는 유일한 자리).
+        if on_rgba is not None:
+            on_rgba(rgba)
         h, w = rgba.shape[:2]
         left, top = layer.left, layer.top
         x0, y0 = round(left * scale), round(top * scale)
