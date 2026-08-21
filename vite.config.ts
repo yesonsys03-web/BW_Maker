@@ -27,6 +27,14 @@ export default defineConfig(async () => ({
   plugins: [react()],
   resolve: { alias: demoAlias },
 
+  // 테스트는 src/만 본다. `.superpowers/`는 gitignored 계측 자리이고 그 안의
+  // `*.test.ts`는 /tmp 픽스처를 읽는 스크래치라 여기서 늘 빨간불이었다 —
+  // **항상 실패하는 테스트가 하나 있으면 빨간불을 읽는 감각이 무뎌진다**
+  // (2026-08-21에 App.test가 흔들릴 때 진짜 실패를 가리려고 stash까지 했다).
+  test: {
+    exclude: ["**/node_modules/**", "**/dist/**", ".superpowers/**", "src-tauri/**"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
