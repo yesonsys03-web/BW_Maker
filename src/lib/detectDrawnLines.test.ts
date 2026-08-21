@@ -5,7 +5,8 @@ import {
   judgeDrawnLines,
   judgeStoredFeatures,
   preparedIncludedIds,
-  rejectedDrawnLineIds,
+  rejectedLineIds,
+  rejectedLineIdsByPath,
   COVERAGE_MAX,
   MIN_NATIVE_PX,
   SURVIVE2_MAX,
@@ -127,16 +128,43 @@ test("annotation notes are not drawn-line candidates, group name or leaf name", 
   expect(drawnLineCandidateIds(tree, [], CHAR_PRESET)).toEqual([19]);
 });
 
-test("a detected leaf the artist unchecked becomes a rejection the batch must honour", () => {
-  // 검출은 프리셋과 무관하게 늘 돌고, 배치는 사이드카 특징으로 파일마다 다시
-  // 판단한다. 그래서 아티스트가 화면에서 뺀 것을 따로 실어 보내지 않으면 배치가
-  // 그대로 되살린다 — 화면 내보내기는 거절을 지키는데 배치만 안 지키는 갈라짐이다.
+test("unchecking a preset-matched line is a rejection the batch must honour too", () => {
+  // 2026-08-21 신고(PROP 판): `PROP/cigar lit/Color/red line`을 라인만 화면에서
+  // 껐는데 배치 산출물에 그대로 나왔다. 첫 구현이 **검출된 잎만** 뺐기 때문이다 —
+  // 이름으로 매칭된 잎(red line)과 손으로 지정한 잎은 실을 칸이 아예 없었다.
   //
-  // 거절은 저장된 상태가 아니라 뺄셈으로 나온다: "검출이 지정했는데 지금 체크가
-  // 없는 것". 그래야 아티스트가 체크를 다시 켜면 거절도 저절로 풀린다.
-  expect(rejectedDrawnLineIds([1, 5], [5, 9])).toEqual([1]);
-  // 검출한 것이 전부 켜져 있으면 거절은 없다.
-  expect(rejectedDrawnLineIds([1, 5], [1, 5, 9])).toEqual([]);
-  // 검출이 안 돈 파일(기록 없음)은 뺄 근거가 없다 — 빈 배열이지 "전부 거절"이 아니다.
-  expect(rejectedDrawnLineIds(undefined, [5, 9])).toEqual([]);
+  // 배치는 파일마다 프리셋을 다시 돌리고 수동 지정을 다시 더하므로, 되살아나는
+  // 문이 셋이다: 매칭 · 검출 · 수동 지정. 뺄셈의 왼쪽은 그 셋의 합집합이어야 한다.
+  // 화면 내보내기는 includedIds를 그대로 보내 처음부터 옳았다(ExportDialog) —
+  // 갈라진 쪽은 배치뿐이다.
+  expect(rejectedLineIds([1, 2], undefined, undefined, [2])).toEqual([1]);
+  expect(rejectedLineIds(undefined, undefined, [7], [])).toEqual([7]);
+  // 셋이 섞여도 지금 체크된 것만 남는다.
+  expect(rejectedLineIds([1, 2], [3], [4], [2, 3])).toEqual([1, 4]);
+  // 전부 켜져 있으면 거절은 없다.
+  expect(rejectedLineIds([1, 2], [3], [4], [1, 2, 3, 4])).toEqual([]);
+  // 기록이 하나도 없는 파일은 뺄 근거가 없다 — "전부 거절"이 아니다.
+  expect(rejectedLineIds(undefined, undefined, undefined, [5])).toEqual([]);
+});
+
+test("the batch rejection map is built from all three revival sources, per file", () => {
+  // 인자가 넷 다 number[]라 순서를 바꿔 넣어도 타입이 통과한다 — 그 실수를 여기서
+  // 잠근다. 조립을 App의 useMemo 안에 두면 이 잠금이 App.test로만 가능한데,
+  // 그 스위트는 시간에 민감해서 판정이 흔들린다(2026-08-21 실측).
+  const map = rejectedLineIdsByPath(
+    {
+      // 매칭 2장 중 하나를 껐다 — 신고된 `red line`의 모양이다.
+      "/a.psd": { includedIds: [2], manualLineIds: [] },
+      // 손으로 지정했다가 체크를 껐다. 지정 해제와 체크 해제는 서로를 안 건드리므로
+      // 이 상태가 실제로 생긴다(opsReducer).
+      "/b.psd": { includedIds: [], manualLineIds: [7] },
+      // 전부 켜져 있다 — 거절 없음, 맵에 담기지 않는다.
+      "/c.psd": { includedIds: [1, 3], manualLineIds: [] },
+      // 프리셋을 아직 안 건 파일: 세 근거가 다 없으니 뺄 근거도 없다.
+      "/d.psd": { includedIds: [9], manualLineIds: [] },
+    },
+    { "/a.psd": [1, 2], "/c.psd": [1] },
+    { "/c.psd": [3] },
+  );
+  expect(map).toEqual({ "/a.psd": [1], "/b.psd": [7] });
 });

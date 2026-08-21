@@ -30,7 +30,7 @@ import {
   parseTreePanelWidth,
 } from "./lib/layout";
 import { countNeonMatches, splitLineLeafIds } from "./lib/layerFilter";
-import { DRAWN_LINES_POLICY, judgeStoredFeatures, preparedIncludedIds, rejectedDrawnLineIds } from "./lib/detectDrawnLines";
+import { DRAWN_LINES_POLICY, judgeStoredFeatures, preparedIncludedIds, rejectedLineIdsByPath } from "./lib/detectDrawnLines";
 import { drainLoadQueue } from "./lib/loadQueue";
 import { DEFAULT_ROLE_TOKENS, SELECTED_PRESET_STORAGE_KEY } from "./lib/presets";
 import { PREVIEW_MAX_SIZE, pixelLeafIds, toEngineError } from "./lib/preview";
@@ -2088,16 +2088,12 @@ function AppShell() {
    *
    * 빈 것은 담지 않는다(manualLineIdsByPath와 같은 이유).
    */
-  const rejectedLineIdsByPath = useMemo(() => {
-    const out: Record<string, number[]> = {};
-    for (const [path, ops] of Object.entries(state.opsByPath)) {
-      const rejected = rejectedDrawnLineIds(
-        state.drawnLineIdsByPath[path], ops.includedIds,
-      );
-      if (rejected.length > 0) out[path] = rejected;
-    }
-    return out;
-  }, [state.opsByPath, state.drawnLineIdsByPath]);
+  const rejectedIdsByPath = useMemo(
+    () => rejectedLineIdsByPath(
+      state.opsByPath, state.matchedIdsByPath, state.drawnLineIdsByPath,
+    ),
+    [state.opsByPath, state.drawnLineIdsByPath, state.matchedIdsByPath],
+  );
 
   /**
    * 파일별 내보내기 장수. opsByPath에 이미 있는 값을 세는 것뿐이라 따로 저장하거나
@@ -2612,7 +2608,7 @@ function AppShell() {
               files={state.files}
               defaultPresetName={selectedPreset?.name ?? null}
               manualLineIdsByPath={manualLineIdsByPath}
-              rejectedLineIdsByPath={rejectedLineIdsByPath}
+              rejectedLineIdsByPath={rejectedIdsByPath}
               workers={cacheWorkers}
               onError={pushError}
               onRunningChange={handleBatchRunningChange}

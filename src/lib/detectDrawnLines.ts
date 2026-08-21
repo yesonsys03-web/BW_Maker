@@ -123,28 +123,64 @@ export function judgeStoredFeatures(
 }
 
 /**
- * 아티스트가 "이건 라인 아니다"라고 물린 검출 결과 — 배치에 실어 보내야 하는 목록.
+ * 아티스트가 화면에서 뺀 잎 전부 — 배치에 실어 보낼 거절 목록.
  *
- * 검출은 프리셋과 무관하게 늘 돌고, 배치는 스윕이 재둔 특징으로 파일마다 다시
- * 판단한다(batch.py의 judge_drawn_lines). 그래서 화면에서 뺀 것을 함께 보내지
- * 않으면 배치가 그대로 되살린다 — 같은 파일인데 화면 내보내기는 거절을 지키고
- * 배치만 안 지키는 갈라짐이 거기서 났다.
+ * **되살아나는 문이 셋이다.** 배치는 파일마다 프리셋을 다시 돌리고(matched),
+ * 사이드카 특징으로 검출을 다시 판단하고(detected), 수동 지정을 다시 더한다
+ * (manual). 그래서 뺄셈의 왼쪽은 그 셋의 합집합이어야 한다.
  *
- * **저장하는 상태가 아니라 뺄셈이다**: "검출이 지정했는데 지금 체크가 없는 것".
- * 승인·거절을 따로 눌러야 하는 설계는 클릭을 요구하므로 쓰지 않았다("언제 다
- * 클릭을 해" — 전체 캐시와 함께 끝나야 한다는 원칙). 이 정의라면 아티스트는
- * 지금까지처럼 체크만 만지면 되고, 체크를 다시 켜면 거절도 저절로 풀린다.
+ * 2026-08-21 신고가 이 함수를 넓히게 했다: PROP 판에서 `…/Color/red line`을
+ * 라인만 화면에서 껐는데 배치 산출물에 그대로 나왔다. 첫 구현
+ * (rejectedDrawnLineIds)이 **검출된 잎만** 뺐기 때문에, 이름으로 매칭된 잎은
+ * 실을 칸이 아예 없었다. 검출 신고로 시작한 기능이라 검출만 보고 만든 것이
+ * 원인이고, 프리셋과 무관하게 세 프리셋 전부에서 나던 결함이다.
  *
- * 검출 기록이 없는 파일(미스윕·복원)은 뺄 근거가 없으므로 빈 배열이다 —
- * "전부 거절"이 아니다. 그쪽은 지금까지처럼 이름 매칭 + 수동 지정으로 돈다.
+ * 화면 내보내기는 처음부터 옳았다 — `ExportDialog`가 `includedIds`를 그대로
+ * 보낸다. 갈라진 쪽은 배치뿐이다.
+ *
+ * 세 근거가 다 비면 빈 배열이다 — "전부 거절"이 아니라 "뺄 근거가 없다"다.
+ * 프리셋을 아직 안 건 파일·미스윕·복원이 그 경우이고, 그쪽은 지금까지처럼
+ * 이름 매칭과 수동 지정으로 돈다.
  */
-export function rejectedDrawnLineIds(
+export function rejectedLineIds(
+  matchedIds: readonly number[] | undefined,
   detectedIds: readonly number[] | undefined,
+  manualIds: readonly number[] | undefined,
   includedIds: readonly number[],
 ): number[] {
-  if (!detectedIds || detectedIds.length === 0) return [];
+  const revivable = new Set<number>();
+  for (const src of [matchedIds, detectedIds, manualIds]) {
+    for (const id of src ?? []) revivable.add(id);
+  }
+  if (revivable.size === 0) return [];
   const included = new Set(includedIds);
-  return detectedIds.filter((id) => !included.has(id)).sort((a, b) => a - b);
+  return [...revivable].filter((id) => !included.has(id)).sort((a, b) => a - b);
+}
+
+/**
+ * 배치에 실어 보낼 파일별 거절 목록. 위 뺄셈을 열린 파일 전부에 돌린 것이다.
+ *
+ * 조립을 App의 useMemo가 아니라 여기 두는 이유는 **인자 순서 때문**이다 —
+ * rejectedLineIds의 인자 넷이 전부 number[]라 자리를 바꿔 넣어도 타입이 통과하고,
+ * 그러면 엉뚱한 잎이 조용히 빠진다. 순수 함수라 그 실수를 단위 테스트로 잠글 수
+ * 있다(App.test는 시간에 민감해 판정이 흔들린다).
+ *
+ * 빈 목록은 담지 않는다 — payload에 실리는 것은 실제로 뺄 것이 있는 파일뿐이다.
+ */
+export function rejectedLineIdsByPath(
+  opsByPath: Record<string, { includedIds: number[]; manualLineIds: number[] }>,
+  matchedIdsByPath: Record<string, number[] | undefined>,
+  drawnLineIdsByPath: Record<string, number[] | undefined>,
+): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const [path, ops] of Object.entries(opsByPath)) {
+    const rejected = rejectedLineIds(
+      matchedIdsByPath[path], drawnLineIdsByPath[path],
+      ops.manualLineIds, ops.includedIds,
+    );
+    if (rejected.length > 0) out[path] = rejected;
+  }
+  return out;
 }
 
 /**
