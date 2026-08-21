@@ -75,7 +75,7 @@ test("BG_PRESET matches the brief contract", () => {
     mergeRule: "group",
     splitLayers: false,
     // line col 류는 색 지정이고, HEIGHT LINE 류는 키 기준선이라 둘 다 선화가 아니다
-    excludeTokens: ["col", "colour", "color", "height"],
+    excludeTokens: ["col", "colour", "color", "height", "divide"],
     outputFormat: "psd",
     // BG에서는 경계선 생성을 끈다 — 캐릭터 모델 전용 기능이다
     edgeLines: {
@@ -486,7 +486,39 @@ test("presets saved before excludeTokens existed load with the default vocabular
   expect(loaded.excludeTokens).toContain("height");
 });
 
+test("a stored preset gets vocabulary added to the default after it was saved", async () => {
+  // 네온 때 드러난 함정: 저장된 presets.json은 값이 박혀 있어 기본값 갱신을 안
+  // 받는다. 실제로 이 프로젝트의 기계들은 excludeTokens를 값으로 들고 있어서,
+  // 2026-08-21에 `divide`를 더해도 배포만으로는 어느 기계에도 안 닿았다.
+  // 그래서 불러올 때 **빠진 기본 토큰을 더해 준다** — 더하기만 한다.
+  // 손대지 않은 옛 기본 목록 — 실제 아티스트 기계가 들고 있는 값 그대로다.
+  const stored = { ...BG_PRESET, excludeTokens: ["col", "colour", "color", "height"] };
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([stored]));
+
+  const loaded = await loadStored();
+
+  expect(loaded.excludeTokens).toContain("divide");
+  for (const t of DEFAULT_EXCLUDE_TOKENS) expect(loaded.excludeTokens).toContain(t);
+  // 더하기만 하므로 중복이 생기면 안 된다.
+  expect(new Set(loaded.excludeTokens).size).toBe(loaded.excludeTokens.length);
+});
+
+test("a hand-made vocabulary is left alone, not topped up with the default", async () => {
+  // 자기 낱말이 하나라도 있으면 손댄 목록이다 — 기본값을 밀어 넣으면 아티스트가
+  // 좁게 정한 어휘가 넓어져서, 내보내던 레이어가 조용히 빠진다.
+  const stored = { ...BG_PRESET, excludeTokens: ["fx", "temp"] };
+  existsMock.mockResolvedValue(true);
+  readTextFileMock.mockResolvedValue(JSON.stringify([stored]));
+
+  const loaded = await loadStored();
+
+  expect(loaded.excludeTokens).toEqual(["fx", "temp"]);
+});
+
 test("an empty excludeTokens list is kept, not replaced by the default", async () => {
+  // 위 마이그레이션의 **예외**다. 빈 목록은 "아무것도 거르지 마라"는 분명한 뜻이라
+  // 채워 주면 아티스트의 결정을 덮는다. 목록이 비어 있지 않을 때만 빠진 기본을 더한다.
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([{ ...BG_PRESET, excludeTokens: [] }]));
 

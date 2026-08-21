@@ -656,6 +656,35 @@ def test_height_reference_lines_are_excluded_but_real_lines_are_kept():
     assert {s["id"] for s in skipped} == {1, 2}, "키 기준선이 안 걸러졌다"
 
 
+def test_note_box_divide_lines_are_excluded_but_the_diagram_lines_stay():
+    """
+    주석 상자의 칸막이 선(`divide lines`)은 이름에 lines가 들어 있어 매칭되지만
+    캐릭터 라인이 아니다(2026-08-21 아티스트 판단). CH 74판 전수 실측에서
+    **33장이 전부 매칭되어 라인판에 나가고 있었다** — 실측 823x8 픽셀 가로 띠라
+    침식 생존율 0.99, 굵기로는 선이 아니라 면이다.
+
+    키 기준선(height)과 같은 모양이지만, 여기서는 **같은 그룹 안에** 진짜 도해
+    선화가 함께 있다는 것이 핵심이다: 같은 `NOTES BOX` 아래 `LINE`·`PAW LINE`
+    48장은 납품 대상이라 데려가면 안 된다. 그래서 그룹이 아니라 잎 이름 토큰으로
+    가른다.
+    """
+    tree = [
+        _group(0, "NOTES BOX", [], [
+            _node(1, "divide lines", "pixel", True,
+                  path=["NOTES BOX", "divide lines"]),
+            _node(2, "divide lines copy", "pixel", True,
+                  path=["NOTES BOX", "divide lines copy"]),
+            _node(3, "LINE", "pixel", True, path=["NOTES BOX", "LINE"]),
+            _node(4, "PAW LINE", "pixel", True, path=["NOTES BOX", "PAW LINE"]),
+        ]),
+    ]
+
+    matched, skipped = match_preset(tree, _preset(excludeGroupPrefixes=[]))
+
+    assert matched == [3, 4], "같은 상자의 진짜 도해 선화가 함께 걸러졌다"
+    assert {s["id"] for s in skipped} == {1, 2}, "칸막이 선이 안 걸러졌다"
+
+
 def test_include_takes_a_comma_list_so_lineart_can_be_caught():
     """
     `lineart`는 토크나이저가 소문자 덩어리를 토큰 하나로 보기 때문에 `line`으로는

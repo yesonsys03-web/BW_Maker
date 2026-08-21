@@ -97,7 +97,7 @@ SKIP_BLEND_MODE = "blendMode"
 #:
 #: 지금 실제로 내보내지던 것은 36장 72잎이다. 오버레이는 영향 없다 — 키 기준선이
 #: 뷰 바깥에 있어 `character._line_leaves`가 애초에 보지 않는다(전수 0건).
-DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color", "height"]
+DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color", "height", "divide"]
 
 
 def _leaf_skip_reason(node, exclude_tokens):

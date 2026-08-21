@@ -9,8 +9,14 @@ const PRESETS_FILENAME = "presets.json";
  *
  * `height`는 키 기준선(`CHARACTER HEIGHT LINE` 등)을 뺀다 — 이름에 line이 들어
  * 있어 include 규칙에 걸리지만 선화가 아니다. 근거 수치는 엔진 쪽 주석에 있다.
+ *
+ * `divide`는 주석 상자의 칸막이 선(`divide lines`)을 뺀다(2026-08-21 아티스트
+ * 판단: "캐릭터 라인이 아니다"). CH 74판 전수 실측에서 33장이 전부 매칭되어
+ * 라인판에 나가고 있었고, 실측 823x8 픽셀 가로 띠다. 그 낱말이 걸리는 것은
+ * `divide lines`·`divide lines copy` 둘뿐이고 BG 26판에는 0장이라 파급이 좁다 —
+ * 같은 `NOTES BOX` 안의 진짜 도해 선화 48장은 그대로 남는다.
  */
-export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color", "height"];
+export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color", "height", "divide"];
 
 /**
  * 색 경계선 생성 기본값. 엔진 EDGE_DEFAULTS(engine/psd_engine/edges.py)와
@@ -371,6 +377,39 @@ export function parsePresets(raw: string): Preset[] {
  * 그래서 일부러 지운 기본 프리셋도 다음 실행에 다시 보인다 — "기본은 항상
  * 보인다"를 지키는 대가이고, 지우기가 아니라 이름을 바꿔 쓰는 것이 답이다.
  */
+/**
+ * 저장된 프리셋의 `excludeTokens`에 **빠진 기본 낱말을 더해 준다.**
+ *
+ * 저장된 presets.json은 값이 박혀 있어 기본값 갱신을 안 받는다(parsePresets는
+ * 필드가 있으면 그 값을 쓴다). 네온 때 이 함정으로 아티스트 기계가 배포만으로는
+ * 안 바뀌어 손으로 고쳐야 했고, 2026-08-21에 `divide`를 더할 때 같은 자리에
+ * 다시 걸렸다 — 이 기계의 두 프리셋 다 옛 다섯 낱말을 값으로 들고 있었다.
+ *
+ * **손대지 않은 기본 목록만 채운다.** 저장된 낱말이 전부 기본 어휘에 있는
+ * 것이면(= 아티스트가 자기 낱말을 넣은 적이 없으면) 빠진 기본을 더하고, 자기
+ * 낱말이 하나라도 있으면 그대로 둔다. 실제 기계들은 옛 기본 그대로를 들고 있어
+ * 이 규칙으로 전부 고쳐지고, `["fx","temp"]` 같은 손수 만든 어휘에는 기본값이
+ * 밀려 들어가지 않는다(그 보호는 "preserves every field exactly" 테스트가 잠근다).
+ *
+ * 빈 목록도 그대로 둔다 — "아무것도 거르지 마라"는 분명한 뜻이라 채우면 그 결정을
+ * 덮는다.
+ *
+ * 남는 성질 하나: 아티스트가 기본 낱말 중 하나를 **일부러 지웠다면** 되살아난다.
+ * 지운 것과 옛 버전에서 저장된 것을 구별할 방법이 파일에 없다(판 번호가 없다).
+ *
+ * 파일을 다시 쓰지는 않는다. 불러온 목록만 고치므로, 아티스트가 프리셋을 저장할
+ * 때 비로소 파일에 반영된다 — 앱을 열기만 해도 설정 파일이 바뀌는 일은 없다.
+ */
+export function withDefaultExcludeTokens(list: Preset[]): Preset[] {
+  return list.map((p) => {
+    const tokens = p.excludeTokens ?? [];
+    if (tokens.length === 0) return p;
+    if (!tokens.every((t) => DEFAULT_EXCLUDE_TOKENS.includes(t))) return p;
+    const missing = DEFAULT_EXCLUDE_TOKENS.filter((t) => !tokens.includes(t));
+    return missing.length === 0 ? p : { ...p, excludeTokens: [...tokens, ...missing] };
+  });
+}
+
 export function withDefaultPresets(list: Preset[]): Preset[] {
   const names = new Set(list.map((p) => p.name));
   const missing = DEFAULT_PRESETS.filter((p) => !names.has(p.name)).map((p) => ({ ...p }));
@@ -394,7 +433,7 @@ export async function loadPresets(): Promise<Preset[]> {
   const filePath = await presetsFilePath();
   if (!(await exists(filePath))) return DEFAULT_PRESETS.map((p) => ({ ...p }));
   const raw = await readTextFile(filePath);
-  return withDefaultPresets(parsePresets(raw));
+  return withDefaultExcludeTokens(withDefaultPresets(parsePresets(raw)));
 }
 
 /**
