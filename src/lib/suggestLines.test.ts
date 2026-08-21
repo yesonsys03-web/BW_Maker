@@ -110,3 +110,17 @@ test("필드가이드는 별표·약어·띄어쓰기 어느 표기든 후보가
   const picked = suggestLineLayers(tree, preset);
   expect(picked).toEqual([tree[3].id]);
 });
+
+// CH 74판 실측(2026-08-21): 주석 상자(`POSES/NOTES`, `EXTRA NOTES`) 아래 지시
+// 화살표가 검출의 확실 구간을 통과하고 있었다. 필드가이드와 같은 주석 부류라
+// 같은 문으로 막는다. `EXTRA NOTES`는 토큰 둘이라 `notes`가 받는다.
+test("주석 상자 아래 잎은 후보가 아니다 — 그룹 이름이든 잎 이름이든", () => {
+  const tree = [
+    group("NOTES", [leaf("ARROWS")]),
+    group("EXTRA NOTES", [leaf("arrows")]),
+    leaf("notes"),
+    leaf("boa"),
+  ];
+  const picked = suggestLineLayers(tree, preset);
+  expect(picked).toEqual([tree[3].id]);
+});

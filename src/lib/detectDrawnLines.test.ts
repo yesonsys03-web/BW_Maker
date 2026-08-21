@@ -109,6 +109,24 @@ test("fieldguide annotations are not drawn-line candidates, however they are spe
   expect(drawnLineCandidateIds(tree, [], CHAR_PRESET)).toEqual([14]);
 });
 
+test("annotation notes are not drawn-line candidates, group name or leaf name", () => {
+  // CH 74판 전수 실측(2026-08-21): 확실 구간을 통과한 잎이 5장뿐인데 그중 셋이
+  // 주석 지시 화살표였다 — `POSES/NOTES/ARROWS`(9316x1083), `EXTRA NOTES/BODY/
+  // arrows`(13633x1723), `Extra notes/BODY/arrows`. 판을 가로지르는 화살표라
+  // 굵기로는 완벽한 선(s2 0.00~0.09)이고, 필드가이드와 같은 부류다.
+  //
+  // 그룹 이름이 문이다: `EXTRA NOTES`는 토큰 둘로 쪼개져 `notes`가 받는다.
+  // 같은 그룹 아래 이름에 line이 있는 진짜 도해(CH 81장, `Extra notes/BODY/
+  // GLASSES/line` 등)는 **매칭**이 내보내므로 여기서 빠져도 출고에 영향이 없다.
+  const tree: TreeNode[] = [
+    group(10, "POSES", [group(11, "NOTES", [leaf(12, "ARROWS")])]),
+    group(13, "EXTRA NOTES", [group(14, "BODY", [leaf(15, "arrows")])]),
+    leaf(16, "notes"),
+    group(17, "TURN", [group(18, "LINES", [leaf(19, "boa")])]), // 진짜 그림 — 남는다
+  ];
+  expect(drawnLineCandidateIds(tree, [], CHAR_PRESET)).toEqual([19]);
+});
+
 test("a detected leaf the artist unchecked becomes a rejection the batch must honour", () => {
   // 검출은 프리셋과 무관하게 늘 돌고, 배치는 사이드카 특징으로 파일마다 다시
   // 판단한다. 그래서 아티스트가 화면에서 뺀 것을 따로 실어 보내지 않으면 배치가
