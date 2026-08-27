@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "source": {"input": "../../../cloor_to_line.psd", "qualityReference": "../../../BW_line_sample.jpg", "width": 5100, "height": 3351, "referenceLuminanceThreshold": 235},
+  "qualityGates": {"widthMedian": [1, 4], "widthP90": [3, 8], "minPixelRecall": 0.55, "minComponentRecall": 0.75, "minContinuity": 0.75, "maxFalseFillRate": 0.015, "minReferenceOverlap": 0.85},
+  "crops": [
+    {
+      "id": "sample_windows_railings_01", "x": 820, "y": 980, "width": 1850, "height": 1250,
+      "purpose": "small-detail-recall",
+      "measured": {"widthMedian": 2.0, "widthP90": 5.0, "pixelRecall": 0.68143, "componentRecall": 0.97, "continuity": 0.97, "falseFillRate": 0.00696, "referenceOverlap": 0.95542}
+    },
+    {
+      "id": "sample_brick_ticks_01", "x": 1540, "y": 1050, "width": 760, "height": 1040,
+      "purpose": "short-stroke-recall",
+      "measured": {"widthMedian": 2.0, "widthP90": 5.0, "pixelRecall": 0.70862, "componentRecall": 0.9902, "continuity": 0.9902, "falseFillRate": 0.00792, "referenceOverlap": 0.94293}
+    },
+    {
+      "id": "sample_foliage_contour_01", "x": 3740, "y": 470, "width": 1120, "height": 1760,
+      "purpose": "curved-line-continuity",
+      "measured": {"widthMedian": 2.0, "widthP90": 6.0, "pixelRecall": 0.58209, "componentRecall": 0.76613, "continuity": 0.76613, "falseFillRate": 0.00807, "referenceOverlap": 0.90887}
+    },
+    {
+      "id": "sample_long_roof_road_01", "x": 520, "y": 790, "width": 4100, "height": 1800,
+      "purpose": "long-line-continuity",
+      "measured": {"widthMedian": 2.0, "widthP90": 6.0, "pixelRecall": 0.65755, "componentRecall": 0.93206, "continuity": 0.93206, "falseFillRate": 0.00525, "referenceOverlap": 0.9548}
+    },
+    {
+      "id": "sample_blank_sky_01", "x": 1700, "y": 160, "width": 1650, "height": 520,
+      "purpose": "false-filled-alpha",
+      "measured": {"widthMedian": 0, "widthP90": 0, "pixelRecall": 0, "componentRecall": 0, "continuity": 0, "falseFillRate": 0, "referenceOverlap": 0}
+    },
+    {
+      "id": "sample_existing_dark_boundary_01", "x": 690, "y": 1180, "width": 950, "height": 900,
+      "purpose": "double-outline-guard",
+      "measured": {"widthMedian": 2.0, "widthP90": 4.0, "pixelRecall": 0.67993, "componentRecall": 0.94118, "continuity": 0.94118, "falseFillRate": 0.01302, "referenceOverlap": 0.92703}
+    },
+    {
+      "id": "sample_title_card_01", "x": 0, "y": 2860, "width": 5100, "height": 491,
+      "purpose": "fine-text-and-box-recall",
+      "measured": {"widthMedian": 3.0, "widthP90": 7.0, "pixelRecall": 0.58671, "componentRecall": 1.0, "continuity": 1.0, "falseFillRate": 0.00451, "referenceOverlap": 0.86951}
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { DEFAULT_EXCLUDE_TOKENS, DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS, OUTPUT_FORMAT_OPTIONS } from "../lib/presets";
+import { DEFAULT_EXCLUDE_TOKENS, DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS, outputFormatsForPreset } from "../lib/presets";
 import type { EdgeLines, OutputFormat, Preset } from "../lib/types";
 
 export type PresetDialogMode = "edit" | "saveAs";
@@ -136,6 +136,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       splitLayers,
       outputFormat,
       edgeLines: { ...preset.edgeLines, enabled: edgeEnabled, colourMode, edgeMode },
+      imageLine: preset.imageLine,
     };
   }
 
@@ -267,7 +268,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
         <label className="preset-field">
           <span>출력 포맷</span>
           <select value={outputFormat} onChange={(e) => setOutputFormat(e.target.value as OutputFormat)}>
-            {OUTPUT_FORMAT_OPTIONS.map((o) => (
+            {outputFormatsForPreset(preset).map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>

@@ -12,7 +12,7 @@ import { OpsHistory } from "./components/OpsHistory";
 import { ExportDialog } from "./components/ExportDialog";
 import { BatchPanel } from "./components/BatchPanel";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { loadPngDataUrl, onWarmWorkerExit, onWarmWorkerLine, pinFile, previewCachedLookup, psdMtimes, renderDocumentPreview, renderPreview, renderThumbnails, warmPreviewTiles, warmTilesPooled, warmWorkerSend, warmWorkersStart, warmWorkersStop } from "./lib/engine";
+import { loadPngDataUrl, onWarmWorkerExit, onWarmWorkerLine, pinFile, previewCachedLookup, psdMtimes, renderDocumentPreview, renderImageLinePreview, renderPreview, renderThumbnails, warmPreviewTiles, warmTilesPooled, warmWorkerSend, warmWorkersStart, warmWorkersStop } from "./lib/engine";
 import { runPrepareQueue, runWorkerSweep } from "./lib/warmWorkers";
 import { ProjectBar, type ProjectBusy } from "./components/ProjectBar";
 import {
@@ -826,13 +826,14 @@ function AppShell() {
     return previewRenderSpec(
       { path: file.path, mtime },
       tree,
-      ops.includedIds,
-      ops.previewHiddenIds,
-      ops.soloIds,
+      presetRef.current?.imageLine?.enabled ? pixelLeafIds(tree) : ops.includedIds,
+      presetRef.current?.imageLine?.enabled ? [] : ops.previewHiddenIds,
+      presetRef.current?.imageLine?.enabled ? [] : ops.soloIds,
       presetRef.current?.lineColor ?? null,
       matchedIdsByPathRef.current[file.path],
       presetRef.current?.edgeLines ?? null,
-      ops.edgeColourIds
+      ops.edgeColourIds,
+      presetRef.current?.imageLine?.enabled ? presetRef.current.imageLine : null
     );
   }, []);
 
@@ -843,13 +844,14 @@ function AppShell() {
     return previewRenderSpec(
       { path: file.path, mtime: file.mtime },
       file.tree,
-      ops.includedIds,
-      ops.previewHiddenIds,
-      ops.soloIds,
+      presetRef.current?.imageLine?.enabled ? pixelLeafIds(file.tree) : ops.includedIds,
+      presetRef.current?.imageLine?.enabled ? [] : ops.previewHiddenIds,
+      presetRef.current?.imageLine?.enabled ? [] : ops.soloIds,
       presetRef.current?.lineColor ?? null,
       matchedIdsByPathRef.current[file.path],
       presetRef.current?.edgeLines ?? null,
-      ops.edgeColourIds
+      ops.edgeColourIds,
+      presetRef.current?.imageLine?.enabled ? presetRef.current.imageLine : null
     );
   }, []);
 
@@ -1164,7 +1166,9 @@ function AppShell() {
             // 없다(savePreviewSpecFor 주석). 키를 만드는 재료가 buildProject와
             // 같아야 방금 채운 그림을 그 함수가 찾는다.
             const plan = savePreviewSpecFor(f);
-            if (!plan?.key || plan.documentView || plan.visibleIds.length === 0) continue;
+            if (!plan?.key || plan.visibleIds.length === 0) continue;
+            if (presetRef.current?.imageLine?.enabled) continue;
+            if (plan.documentView) continue;
             if (plan.edgeColourIds.length > 0) continue;
             if (!needsPrefetch(plan.key, previewCacheRef.current, prefetchedKeysRef.current)) continue;
             // 키를 만든 그 수정시각을 그대로 엔진에 넘긴다 — 엔진 캐시는 파일을
@@ -1446,7 +1450,14 @@ function AppShell() {
             path,
             sid,
             (s) =>
-              plan.documentView
+              presetRef.current?.imageLine?.enabled
+                ? renderImageLinePreview(
+                    s,
+                    PREVIEW_MAX_SIZE,
+                    presetRef.current.imageLine,
+                    presetRef.current.lineColor
+                  )
+              : plan.documentView
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
                 : renderPreview(s, plan.visibleIds, PREVIEW_MAX_SIZE,
                                 presetRef.current?.lineColor ?? null, plan.lineColorIds,
@@ -2516,10 +2527,11 @@ function AppShell() {
           mtime={activeFile?.mtime}
           status={activeFile?.status}
           tree={activeFile?.tree}
-          includedIds={ops.includedIds}
-          previewHiddenIds={ops.previewHiddenIds}
-          soloIds={ops.soloIds}
+          includedIds={selectedPreset?.imageLine?.enabled && activeFile?.tree ? pixelLeafIds(activeFile.tree) : ops.includedIds}
+          previewHiddenIds={selectedPreset?.imageLine?.enabled ? [] : ops.previewHiddenIds}
+          soloIds={selectedPreset?.imageLine?.enabled ? [] : ops.soloIds}
           lineColor={selectedPreset?.lineColor ?? null}
+          imageLine={selectedPreset?.imageLine?.enabled ? selectedPreset.imageLine : null}
           matchedIds={state.activePath ? state.matchedIdsByPath[state.activePath] : undefined}
           edgeLines={selectedPreset?.edgeLines ?? null}
           edgeColourIds={ops.edgeColourIds}

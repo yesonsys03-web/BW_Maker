@@ -15,10 +15,11 @@ import { beforeEach, expect, test, vi } from "vitest";
 vi.mock("../lib/engine", () => ({
   loadPngDataUrl: vi.fn(async () => "data:image/png;base64,unused"),
   renderDocumentPreview: vi.fn(async () => ({ pngPath: "/tmp/doc.png" })),
+  renderImageLinePreview: vi.fn(async () => ({ pngPath: "/tmp/image-line.png", maskHash: "mask" })),
   renderPreview: vi.fn(async () => ({ pngPath: "/tmp/preview.png" })),
 }));
 
-import { renderPreview } from "../lib/engine";
+import { renderImageLinePreview, renderPreview } from "../lib/engine";
 import { PreviewCanvas } from "./PreviewCanvas";
 import { PreviewCache, previewCacheKey } from "../lib/previewCache";
 import type { TreeNode } from "../lib/types";
@@ -114,6 +115,23 @@ test("a session arriving after a cache-miss click sends the parked render", asyn
   expect(renderPreview).not.toHaveBeenCalled(); // 세션이 없어 못 낸다 — 여기까진 같다
   view.rerender(<PreviewCanvas {...p} sessionId={7} />); // 세션 도착
   await waitFor(() => expect(renderPreview).toHaveBeenCalledTimes(1));
+});
+
+test("imageLine mode uses the dedicated full-document renderer", async () => {
+  vi.mocked(renderImageLinePreview).mockClear();
+  vi.mocked(renderPreview).mockClear();
+  const cache = new PreviewCache();
+  render(
+    <PreviewCanvas
+      {...props([0, 1], cache)}
+      imageLine={{
+        enabled: true, version: 1, darkThreshold: 128,
+        boundaryThreshold: 32, minLength: 8, width: 1,
+      }}
+    />
+  );
+  await waitFor(() => expect(renderImageLinePreview).toHaveBeenCalledTimes(1));
+  expect(renderPreview).not.toHaveBeenCalled();
 });
 
 test("a selected file waiting for its session says opening, not select-a-file", () => {

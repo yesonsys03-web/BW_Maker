@@ -42,6 +42,20 @@ const PRESET = {
   },
 };
 
+const IMAGE_LINE = {
+  ...PRESET,
+  name: "color to line",
+  outputFormat: "png" as const,
+  imageLine: {
+    enabled: true,
+    version: 1,
+    darkThreshold: 96,
+    boundaryThreshold: 32,
+    minLength: 8,
+    width: 3,
+  },
+};
+
 vi.mock("../lib/presets", async (orig) => ({
   ...(await orig<typeof import("../lib/presets")>()),
   loadPresets: vi.fn(async () => [PRESET]),
@@ -151,6 +165,64 @@ test("the pre-check inspects paths in the preset's output format, not always .ps
   const checked = engine.pathsExist.mock.calls[0][0] as string[];
   expect(checked.length).toBeGreaterThan(0);
   expect(checked.every((p) => p.endsWith(".png"))).toBe(true);
+});
+
+test("imageLine batch sends the complete preset unchanged", async () => {
+  vi.mocked(loadPresets).mockResolvedValueOnce([IMAGE_LINE]);
+
+  await startRun();
+
+  expect(engine.batchRun.mock.calls[0][1]).toEqual(IMAGE_LINE);
+  expect(engine.batchRun.mock.calls[0][1].imageLine).toEqual(IMAGE_LINE.imageLine);
+});
+
+test("imageLine batch permits png and psd but rejects jpg", async () => {
+  const onError = vi.fn();
+  const imageLinePsd = { ...IMAGE_LINE, name: "color to line psd", outputFormat: "psd" as const };
+  const imageLineJpg = { ...IMAGE_LINE, name: "color to line jpg", outputFormat: "jpg" as const };
+  vi.mocked(loadPresets).mockResolvedValueOnce([IMAGE_LINE, imageLinePsd, imageLineJpg]);
+
+  render(
+    <BatchPanel
+      files={[FILES[0]]}
+      defaultPresetName={null}
+      manualLineIdsByPath={{}}
+      rejectedLineIdsByPath={{}}
+      workers={1}
+      onError={onError}
+      onRunningChange={() => {}}
+    />
+  );
+  await waitFor(() => expect(presetSelect().value).toBe(IMAGE_LINE.name));
+  click("배치 실행");
+  await waitFor(() => expect(engine.batchRun).toHaveBeenCalledTimes(1));
+  expect(engine.batchRun.mock.calls[0][1]).toEqual(IMAGE_LINE);
+
+  runs[0].d.resolve({ results: [{ path: "/cuts/a.psd", ok: true, outputPath: "/out", layerCount: 1 }] });
+  await waitFor(() => expect((screen.getByRole("button", { name: "배치 실행" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.change(presetSelect(), { target: { value: imageLinePsd.name } });
+  click("배치 실행");
+  await waitFor(() => expect(engine.batchRun).toHaveBeenCalledTimes(2));
+  expect(engine.batchRun.mock.calls[1][1]).toEqual(imageLinePsd);
+
+  runs[1].d.resolve({ results: [{ path: "/cuts/a.psd", ok: true, outputPath: "/out", layerCount: 1 }] });
+  await waitFor(() => expect((screen.getByRole("button", { name: "배치 실행" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.change(presetSelect(), { target: { value: imageLineJpg.name } });
+  click("배치 실행");
+  await waitFor(() => expect(onError).toHaveBeenCalledWith(
+    "배치 실행 실패",
+    expect.objectContaining({ message: expect.stringContaining("PNG 또는 PSD") })
+  ));
+  expect(engine.batchRun).toHaveBeenCalledTimes(2);
+});
+
+test("legacy jpg batch presets still run", async () => {
+  const jpgPreset = { ...PRESET, outputFormat: "jpg" as const };
+  vi.mocked(loadPresets).mockResolvedValueOnce([jpgPreset]);
+
+  await startRun();
+
+  expect(engine.batchRun.mock.calls[0][1]).toEqual(jpgPreset);
 });
 
 test("stop takes effect at the next file, not in the middle of one", async () => {

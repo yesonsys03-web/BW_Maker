@@ -13,8 +13,11 @@ from pathlib import Path
 
 from .character import find_views, manual_views
 from .edges import EDGE_DEFAULTS, attach_overlays, plan_overlays
+from .export import export_image_line as _export_image_line
 from .export import export_psd as _export
 from .export import export_psd_split as _export_split
+from .imageline import (image_line_profile,
+                        render_image_line_preview as _render_image_line_preview)
 from .linedetect import measure_strokes
 from .matching import (auto_merge_operations, auto_merge_preview,
                        match_preset, preset_operations)
@@ -301,6 +304,7 @@ class Engine:
     _ALLOWED_METHODS = {
         "open_psd", "psd_mtimes", "close_session", "pin_file", "render_thumbnails",
         "render_preview", "render_document_preview", "warm_preview_tiles", "warm_tiles_pooled",
+        "render_image_line_preview", "export_image_line",
         "apply_preset", "measure_leaf_strokes", "preview_cached_lookup",
         "auto_merge_operations",
         "auto_merge_preview", "export_psd", "batch_run",
@@ -469,6 +473,25 @@ class Engine:
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
         return {"pngPath": render_document_preview(s, maxSize, out_dir)}
+
+    def render_image_line_preview(self, sessionId, maxSize=1500, imageLine=None,
+                                  lineColor=None):
+        s = self.store.get(sessionId)
+        out_dir = self._fresh_render_dir("preview")
+        png_path, mask_hash = _render_image_line_preview(
+            s, out_dir, maxSize, imageLine, lineColor)
+        return {
+            "pngPath": png_path,
+            "maskHash": mask_hash,
+            "profile": image_line_profile(s, imageLine),
+        }
+
+    def export_image_line(self, sessionId, outputPath, outputFormat="png",
+                          imageLine=None, lineColor=None, overwrite=False):
+        s = self.store.get(sessionId)
+        return _export_image_line(
+            s, outputPath, outputFormat, imageLine, lineColor,
+            overwrite=overwrite)
 
     def apply_preset(self, sessionId, preset):
         s = self.store.get(sessionId)

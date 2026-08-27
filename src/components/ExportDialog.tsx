@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { defaultExportPath, outputExtension, reorderArgs, resolveEntryName } from "../lib/exportFlow";
-import { exportPsd, onEngineEvent } from "../lib/engine";
-import { DEFAULT_LINE_COLOR, OUTPUT_FORMAT_OPTIONS } from "../lib/presets";
+import { exportImageLine, exportPsd, onEngineEvent } from "../lib/engine";
+import { DEFAULT_LINE_COLOR, outputFormatsForPreset } from "../lib/presets";
 import { toEngineError } from "../lib/preview";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { OpsState } from "../lib/opsReducer";
@@ -90,6 +90,9 @@ export function ExportDialog({
   useEffect(() => () => { closedRef.current = true; }, []);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [result, setResult] = useState<ExportResult | null>(null);
+  const imageLine = preset?.imageLine?.enabled ? preset.imageLine : null;
+  const outputFormatOptions = outputFormatsForPreset(preset);
+
 
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
@@ -186,6 +189,10 @@ export function ExportDialog({
 
   async function handleExport() {
     try {
+      if (imageLine && outputFormat === "jpg") {
+        onError("내보내기 실패", { message: "color_to_line 프리셋은 PNG 또는 PSD로만 내보낼 수 있습니다.", traceback: "" });
+        return;
+      }
       const defaultPath = defaultExportPath(srcPath, outputSuffix, outputFormat);
       const ext = outputExtension(srcPath, outputFormat);
       const outputPath = await save({
@@ -199,7 +206,7 @@ export function ExportDialog({
 
       // 이 파일의 선 그림 검출이 아직이면 끝내고 담는다. 검출을 "한가할 때"로
       // 미루면서, 지정이 실리기 전에 내보내는 창이 넓어졌다 — 여기서 닫는다.
-      const wait = onWaitDetection?.();
+      const wait = imageLine ? null : onWaitDetection?.();
       if (wait) {
         setWaitingDetection(true);
         try {
@@ -221,9 +228,11 @@ export function ExportDialog({
           // ops.edgeColourIds(수동 지정)를 넘긴다 — PreviewCanvas가 미리보기에
           // 쓰는 것과 같은 값이어야 한다. 하나라도 다르면 아티스트가 미리보기로
           // 승인한 그림과 실제 내보낸 파일이 갈린다.
-          exportPsd(sid, opsRef.current.includedIds, opsRef.current.ops, naming, outputPath, embedPreview, true, true,
-                    normalizeColor ? lineColor : null, splitLayers, outputFormat,
-                    matchedIds ?? null, preset?.edgeLines ?? null, opsRef.current.edgeColourIds),
+          imageLine
+            ? exportImageLine(sid, outputPath, outputFormat as "psd" | "png", imageLine, normalizeColor ? lineColor : null, true)
+            : exportPsd(sid, opsRef.current.includedIds, opsRef.current.ops, naming, outputPath, embedPreview, true, true,
+                        normalizeColor ? lineColor : null, splitLayers, outputFormat,
+                        matchedIds ?? null, preset?.edgeLines ?? null, opsRef.current.edgeColourIds),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);
@@ -292,7 +301,7 @@ export function ExportDialog({
         <label className="preset-field">
           <span>출력 포맷</span>
           <select value={outputFormat} onChange={(e) => setOutputFormat(e.target.value as OutputFormat)}>
-            {OUTPUT_FORMAT_OPTIONS.map((o) => (
+            {outputFormatOptions.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
@@ -301,23 +310,25 @@ export function ExportDialog({
         </label>
 
         <div className="export-field-row">
-          <label className="preset-field">
-            <span>파일명 규칙</span>
-            <div className="export-radio-group">
-              <label>
-                <input
-                  type="radio"
-                  checked={naming === "pathPrefix"}
-                  onChange={() => setNaming("pathPrefix")}
-                />
-                경로 접두사
-              </label>
-              <label>
-                <input type="radio" checked={naming === "original"} onChange={() => setNaming("original")} />
-                원본 이름
-              </label>
-            </div>
-          </label>
+          {!imageLine && (
+            <label className="preset-field">
+              <span>파일명 규칙</span>
+              <div className="export-radio-group">
+                <label>
+                  <input
+                    type="radio"
+                    checked={naming === "pathPrefix"}
+                    onChange={() => setNaming("pathPrefix")}
+                  />
+                  경로 접두사
+                </label>
+                <label>
+                  <input type="radio" checked={naming === "original"} onChange={() => setNaming("original")} />
+                  원본 이름
+                </label>
+              </div>
+            </label>
+          )}
 
           <label className="preset-field preset-field-grow">
             <span>출력 파일명 접미사</span>
@@ -330,21 +341,23 @@ export function ExportDialog({
           </label>
         </div>
 
-        {outputFormat === "psd" && (
+        {!imageLine && outputFormat === "psd" && (
           <label className="preset-checkbox">
             <input type="checkbox" checked={embedPreview} onChange={(e) => setEmbedPreview(e.currentTarget.checked)} />
             <span>미리보기 이미지 포함하여 내보내기</span>
           </label>
         )}
 
-        <label className="preset-checkbox">
-          <input
-            type="checkbox"
-            checked={splitLayers}
-            onChange={(e) => setSplitLayers(e.currentTarget.checked)}
-          />
-          <span>레이어마다 파일 따로 내보내기</span>
-        </label>
+        {!imageLine && (
+          <label className="preset-checkbox">
+            <input
+              type="checkbox"
+              checked={splitLayers}
+              onChange={(e) => setSplitLayers(e.currentTarget.checked)}
+            />
+            <span>레이어마다 파일 따로 내보내기</span>
+          </label>
+        )}
 
         <label className="preset-checkbox">
           <input
@@ -436,7 +449,7 @@ export function ExportDialog({
           <button type="button" onClick={onClose} disabled={exporting}>
             닫기
           </button>
-          <button type="button" onClick={() => void handleExport()} disabled={exporting || waitingDetection || ops.entries.length === 0}>
+          <button type="button" onClick={() => void handleExport()} disabled={exporting || waitingDetection || (!imageLine && ops.entries.length === 0)}>
             {exporting ? "내보내는 중..." : waitingDetection ? "선 그림 검출 확인 중..." : "내보내기"}
           </button>
         </div>

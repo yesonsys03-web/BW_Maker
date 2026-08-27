@@ -6,7 +6,7 @@ import {
   previewCacheKey,
   previewRenderSpec,
 } from "./previewCache";
-import type { EdgeLines, TreeNode } from "./types";
+import type { EdgeLines, ImageLineExtraction, TreeNode } from "./types";
 
 const F1 = { path: "/a.psd", mtime: 100 };
 const F2 = { path: "/b.psd", mtime: 100 };
@@ -15,6 +15,10 @@ const F7 = { path: "/a.psd", mtime: 700 };
 
 /** 색 경계선 생성이 켜진 설정. 꺼짐(null)과의 키 차이를 확인하는 데만 쓴다. */
 const EDGE_ON: EdgeLines = { enabled: true, threshold: 24, gap: 4, width: 5, minLength: 8, lineAlpha: 64, colourMode: "composite", edgeMode: "region", widthScale: 1 };
+const IMAGE_LINE_ON: ImageLineExtraction = {
+  enabled: true, version: 1, darkThreshold: 128,
+  boundaryThreshold: 32, minLength: 8, width: 1,
+};
 
 const pixel = (id: number, visible = true): TreeNode => ({
   id,
@@ -94,6 +98,10 @@ test("every other input that changes the rendered image changes the key", () => 
   expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, EDGE_ON, [], [])).not.toBe(base); // 색 경계선 켜짐
   expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [1], [])).not.toBe(base); // 색 원본 수동 지정
   expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [], [9])).not.toBe(base); // 내보내기 포함 목록이 다름
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [], [], IMAGE_LINE_ON)).not.toBe(base);
+  expect(previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [], [], IMAGE_LINE_ON)).not.toBe(
+    previewCacheKey(F1, false, [1, 2], "#000000", undefined, null, [], [], { ...IMAGE_LINE_ON, darkThreshold: 96 })
+  );
 });
 
 // 켜져 있는 동안에는 다섯 수치 전부가 그림을 바꾸므로 키에 그대로 반영돼야

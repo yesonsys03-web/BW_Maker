@@ -1,6 +1,6 @@
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { exists, mkdir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
-import type { EdgeLines, OutputFormat, Preset } from "./types";
+import type { EdgeLines, ImageLineExtraction, OutputFormat, Preset } from "./types";
 
 const PRESETS_FILENAME = "presets.json";
 
@@ -34,6 +34,15 @@ export const DEFAULT_EDGE_LINES: EdgeLines = {
   colourMode: "composite", edgeMode: "region", widthScale: 1,
 };
 
+export const DISABLED_IMAGE_LINE: ImageLineExtraction = {
+  enabled: false, version: 1, darkThreshold: 254, boundaryThreshold: 32, minLength: 8, width: 1,
+};
+
+export const COLOR_TO_LINE_IMAGE_LINE: ImageLineExtraction = {
+  enabled: true, version: 1, darkThreshold: 254, boundaryThreshold: 32, minLength: 8, width: 1,
+};
+export const COLOR_TO_LINE_COLOR = "#3d3d3d";
+
 /**
  * 두 기본 프리셋이 공유하는 부분. 값은 납품 데이터에서 검증된 것이지 임의의
  * 초기값이 아니다 — merge/mergeRule/naming/lineColor는 픽셀 기준선(납품 BG 26장,
@@ -41,7 +50,7 @@ export const DEFAULT_EDGE_LINES: EdgeLines = {
  * (그전 기본값은 merge "none" / naming "pathPrefix" / lineColor null이었는데,
  * 아무도 그대로 쓰지 않아서 프리셋을 골라도 바로 작업이 안 됐다.)
  */
-const SHARED: Omit<Preset, "name" | "excludeGroupPrefixes" | "edgeLines"> = {
+const SHARED: Omit<Preset, "name" | "excludeGroupPrefixes" | "edgeLines" | "imageLine"> = {
   include: { type: "contains", value: "line, lineart", caseSensitive: false },
   matchGroups: true,
   includeHidden: true,
@@ -72,6 +81,7 @@ export const BG_PRESET: Preset = {
   include: { type: "contains", value: "line, lineart, neon", caseSensitive: false },
   excludeGroupPrefixes: ["-"],
   edgeLines: { ...DEFAULT_EDGE_LINES },
+  imageLine: { ...DISABLED_IMAGE_LINE },
 };
 
 /**
@@ -93,6 +103,7 @@ export const CHAR_PRESET: Preset = {
   name: "CHAR",
   excludeGroupPrefixes: ["-", "HEIGHTS", "TEMPLATE", "COLOR PALETTE"],
   edgeLines: { ...DEFAULT_EDGE_LINES, enabled: true },
+  imageLine: { ...DISABLED_IMAGE_LINE },
 };
 
 /**
@@ -128,10 +139,25 @@ export const PROP_PRESET: Preset = {
   edgeLines: {
     ...DEFAULT_EDGE_LINES, enabled: true, edgeMode: "change", threshold: 12,
   },
+  imageLine: { ...DISABLED_IMAGE_LINE },
+};
+
+export const COLOR_TO_LINE_PRESET: Preset = {
+  ...SHARED,
+  name: "color_to_line",
+  excludeGroupPrefixes: [],
+  merge: "none",
+  outputSuffix: "_LINE",
+  embedPreview: false,
+  lineColor: COLOR_TO_LINE_COLOR,
+  splitLayers: false,
+  outputFormat: "png",
+  edgeLines: { ...DEFAULT_EDGE_LINES },
+  imageLine: { ...COLOR_TO_LINE_IMAGE_LINE },
 };
 
 /** 처음 실행할 때 깔리는 프리셋. 고르면 바로 작업할 수 있어야 한다. */
-export const DEFAULT_PRESETS: Preset[] = [BG_PRESET, CHAR_PRESET, PROP_PRESET];
+export const DEFAULT_PRESETS: Preset[] = [BG_PRESET, CHAR_PRESET, PROP_PRESET, COLOR_TO_LINE_PRESET];
 
 /** 색 통일을 켤 때 처음 제안하는 색. 라인 아트의 기본값. */
 export const DEFAULT_LINE_COLOR = "#000000";
@@ -168,6 +194,12 @@ export const OUTPUT_FORMAT_OPTIONS: OutputFormatOption[] = [
   { value: "png", label: "PNG — 투명 배경" },
   { value: "jpg", label: "JPG — 흰 배경" },
 ];
+
+export const IMAGE_LINE_OUTPUT_FORMAT_OPTIONS: OutputFormatOption[] = OUTPUT_FORMAT_OPTIONS.filter((o) => o.value !== "jpg");
+
+export function outputFormatsForPreset(preset: Preset | undefined): OutputFormatOption[] {
+  return preset?.imageLine?.enabled ? IMAGE_LINE_OUTPUT_FORMAT_OPTIONS : OUTPUT_FORMAT_OPTIONS;
+}
 
 const OUTPUT_FORMATS = new Set<string>(OUTPUT_FORMAT_OPTIONS.map((o) => o.value));
 
@@ -315,6 +347,35 @@ export function validatePreset(value: unknown, index: number, prefix?: string): 
   if (edge.edgeMode !== "region" && edge.edgeMode !== "change") {
     throw new Error(`${msgPrefix}.edgeLines.edgeMode: region 또는 change가 아닙니다.`);
   }
+  if (
+    v.imageLine !== undefined &&
+    (typeof v.imageLine !== "object" || v.imageLine === null || Array.isArray(v.imageLine))
+  ) {
+    throw new Error(`${msgPrefix}.imageLine: 객체가 아닙니다.`);
+  }
+  const parsedImageLine = { ...DISABLED_IMAGE_LINE, ...((v.imageLine as object | undefined) ?? {}) };
+  if (typeof parsedImageLine.enabled !== "boolean") {
+    throw new Error(`${msgPrefix}.imageLine.enabled: boolean이 아닙니다.`);
+  }
+  if (parsedImageLine.version !== 1) {
+    throw new Error(`${msgPrefix}.imageLine.version: 1이 아닙니다.`);
+  }
+  for (const key of ["darkThreshold", "boundaryThreshold", "minLength", "width"] as const) {
+    if (
+      typeof parsedImageLine[key] !== "number" ||
+      !Number.isFinite(parsedImageLine[key]) ||
+      !Number.isInteger(parsedImageLine[key]) ||
+      parsedImageLine[key] < 0
+    ) {
+      throw new Error(`${msgPrefix}.imageLine.${key}: 0 이상의 정수가 아닙니다.`);
+    }
+  }
+  if (parsedImageLine.enabled && v.outputFormat === "jpg") {
+    throw new Error(`${msgPrefix}.outputFormat: imageLine은 png 또는 psd만 지원합니다.`);
+  }
+  const imageLine = parsedImageLine.enabled
+    ? { ...COLOR_TO_LINE_IMAGE_LINE }
+    : parsedImageLine;
 
   return {
     name: v.name,
@@ -332,11 +393,14 @@ export function validatePreset(value: unknown, index: number, prefix?: string): 
     naming: v.naming as Preset["naming"],
     outputSuffix: v.outputSuffix,
     embedPreview: v.embedPreview,
-    lineColor: (v.lineColor as string | null | undefined) ?? null,
+    lineColor: imageLine.enabled
+      ? COLOR_TO_LINE_COLOR
+      : (v.lineColor as string | null | undefined) ?? null,
     splitLayers: (v.splitLayers as boolean | undefined) ?? false,
     outputFormat: (v.outputFormat as OutputFormat | undefined) ?? "psd",
     excludeTokens: (v.excludeTokens as string[] | undefined) ?? [...DEFAULT_EXCLUDE_TOKENS],
     edgeLines: edge,
+    imageLine,
   };
 }
 

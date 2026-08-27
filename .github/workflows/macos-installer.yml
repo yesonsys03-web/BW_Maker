@@ -24,10 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -43,7 +45,7 @@ jobs:
         with:
           enable-cache: true
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       # 동결이 실패하면 여기서 빌드가 끝난다. 스크립트 안의 임포트 게이트와
       # 스모크(engine/packaging/smoke.py)가 그 판단을 대신한다.
@@ -51,7 +53,7 @@ jobs:
         run: bash scripts/build-engine.sh
 
       - name: Build installers
-        run: npm run tauri build -- --bundles app dmg
+        run: pnpm run tauri build -- --bundles app dmg
 
       - name: Read version
         id: version

@@ -4,6 +4,7 @@ import type {
   MergeRule,
   EdgeLines,
   EngineError,
+  ImageLineExtraction,
   OpenResult,
   Operation,
   OutputFormat,
@@ -219,6 +220,17 @@ export async function renderPreview(
   }) as Promise<{ pngPath: string }>;
 }
 
+export async function renderImageLinePreview(
+  sessionId: number,
+  maxSize: number,
+  imageLine: ImageLineExtraction,
+  lineColor: string | null = null
+): Promise<{ pngPath: string; maskHash: string }> {
+  return callEngine("render_image_line_preview", {
+    sessionId, maxSize, imageLine, lineColor,
+  }) as Promise<{ pngPath: string; maskHash: string }>;
+}
+
 /**
  * Renders the document as saved — the PSD's own stored flattened preview.
  * Independent of layer count (a 165-layer plate costs ~0.2s here versus
@@ -327,6 +339,19 @@ export async function exportPsd(
     lineColorIds,
     edgeLines: edgeLines ? { ...edgeLines, manualColourIds: manualColourIds ?? [] } : null,
   }) as Promise<ExportResult>;
+}
+
+export async function exportImageLine(
+  sessionId: number,
+  outputPath: string,
+  outputFormat: Exclude<OutputFormat, "jpg">,
+  imageLine: ImageLineExtraction,
+  lineColor: string | null,
+  overwrite: boolean
+): Promise<ExportResult & { maskHash: string }> {
+  return callEngine("export_image_line", {
+    sessionId, outputPath, outputFormat, imageLine, lineColor, overwrite,
+  }) as Promise<ExportResult & { maskHash: string }>;
 }
 
 /**

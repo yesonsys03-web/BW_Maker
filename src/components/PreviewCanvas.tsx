@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { mkdir, writeTextFile } from "@tauri-apps/plugin-fs";
-import { loadPngDataUrl, renderDocumentPreview, renderPreview } from "../lib/engine";
+import { loadPngDataUrl, renderDocumentPreview, renderImageLinePreview, renderPreview } from "../lib/engine";
 
 /**
  * 간헐 "흰 화면" 증상의 남은 부류(렌더 응답이 화면에 반영되지 않음)를 다음
@@ -61,7 +61,7 @@ import {
 import { documentPlaceholderKey, lineColorIdsFor, previewCacheKey, type PreviewCache } from "../lib/previewCache";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { FileStatus } from "../state/appStore";
-import type { EdgeLines, EngineError, OpenResult, TreeNode } from "../lib/types";
+import type { EdgeLines, EngineError, ImageLineExtraction, OpenResult, TreeNode } from "../lib/types";
 
 interface PreviewCanvasProps {
   sessionId: number | undefined;
@@ -82,6 +82,8 @@ interface PreviewCanvasProps {
    * 그건 파일 자체를 보여주는 화면이다.
    */
   lineColor: string | null;
+  /** Full-document rendered-image extraction mode for `color_to_line`. */
+  imageLine?: ImageLineExtraction | null;
   /**
    * 프리셋 규칙에 걸린 레이어 id(apply_preset의 matchedLayerIds). 색 통일은
    * 그중 지금 그리는 것에만 걸린다 — 아티스트가 손으로 체크해 넣은 색 레이어는
@@ -148,6 +150,7 @@ interface RenderSpec {
   visibleIds: number[];
   documentView: boolean;
   lineColor: string | null;
+  imageLine: ImageLineExtraction | null;
   /** 색 통일을 걸 레이어(previewCache의 lineColorIdsFor). null이면 전부. */
   lineColorIds: number[] | null;
   /** 색 경계선 생성 설정. null이면 꺼짐. */
@@ -185,6 +188,7 @@ export function PreviewCanvas({
   previewHiddenIds,
   soloIds,
   lineColor,
+  imageLine = null,
   matchedIds,
   edgeLines,
   edgeColourIds,
@@ -474,7 +478,8 @@ export function PreviewCanvas({
       visibleIds.length === 0
         ? null
         : previewCacheKey(
-            { path, mtime }, documentView, visibleIds, lineColor, matchedIds, edgeLines, edgeColourIds, includedIds
+            { path, mtime }, documentView, visibleIds, lineColor, matchedIds,
+            edgeLines, edgeColourIds, includedIds, imageLine
           );
     if (cacheKey) {
       const cached = cache.get(cacheKey);
@@ -549,7 +554,7 @@ export function PreviewCanvas({
     }
 
     const spec: RenderSpec = {
-      path, visibleIds, documentView, lineColor,
+      path, visibleIds, documentView, lineColor, imageLine,
       lineColorIds: lineColorIdsFor(visibleIds, lineColor, matchedIds),
       edgeLines,
       edgeColourIds,
@@ -600,7 +605,9 @@ export function PreviewCanvas({
             next.path,
             sid,
             (s) =>
-              next.documentView
+              next.imageLine?.enabled
+                ? renderImageLinePreview(s, PREVIEW_MAX_SIZE, next.imageLine, next.lineColor)
+              : next.documentView
                 ? renderDocumentPreview(s, PREVIEW_MAX_SIZE)
                 : renderPreview(s, next.visibleIds, PREVIEW_MAX_SIZE, next.lineColor,
                                 next.lineColorIds, next.edgeLines, next.edgeColourIds, next.includedIds),
@@ -647,7 +654,7 @@ export function PreviewCanvas({
     // 들고 있는 배열이 한 세대 옛것이어도 렌더 결과는 동일하다. 위 visibleKey의
     // 주석에 왜 배열 정체로는 안 되는지 적어두었다.
     dispatchRef.current = dispatch;
-  }, [path, mtime, visibleKey, documentView, lineColor, matchedIds, edgeLines, edgeColourIds, includedIds, paused, cache, showImage, onRenderingChange, onSessionRefreshed, onError]);
+  }, [path, mtime, visibleKey, documentView, lineColor, imageLine, matchedIds, edgeLines, edgeColourIds, includedIds, paused, cache, showImage, onRenderingChange, onSessionRefreshed, onError]);
 
   // 세션이 도착하면, 세션이 없어 못 낸 렌더(pendingRef의 no-session 주차분)를
   // 낸다. 본 효과는 일부러 세션에 의존하지 않으므로(재렌더 회피) 이 좁은

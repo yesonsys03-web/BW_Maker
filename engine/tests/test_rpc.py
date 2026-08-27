@@ -93,6 +93,53 @@ def test_export_png_over_rpc(fixture_psd, tmp_path):
         eng.close()
 
 
+def test_image_line_preview_and_export_share_mask_hash_over_rpc(tmp_path):
+    from PIL import Image
+    import numpy as np
+    from pytoshop import enums
+    from pytoshop.user import nested_layers
+
+    from conftest import write_psd
+
+    rgba = np.zeros((18, 20, 4), dtype=np.uint8)
+    rgba[:, :10] = [230, 30, 30, 255]
+    rgba[:, 10:] = [30, 30, 230, 255]
+    rgba[7, 2:18, :3] = 0
+    layer = nested_layers.Image(
+        name="merged", top=0, left=0, opacity=255, visible=True,
+        blend_mode=enums.BlendMode.normal,
+        channels={i: np.ascontiguousarray(rgba[..., i]) for i in range(3)}
+                 | {-1: np.ascontiguousarray(rgba[..., 3])},
+    )
+    src = write_psd(tmp_path / "src.psd", [layer], width=20, height=18)
+    opts = {
+        "enabled": True, "version": 1, "darkThreshold": 80,
+        "boundaryThreshold": 30, "minLength": 3, "width": 1,
+    }
+
+    eng = EngineProc()
+    try:
+        sid = eng.call("open_psd", path=src)["result"]["sessionId"]
+        preview = eng.call(
+            "render_image_line_preview", sessionId=sid, maxSize=12,
+            imageLine=opts, lineColor="#112233",
+        )["result"]
+        out = tmp_path / "line.png"
+        exported = eng.call(
+            "export_image_line", sessionId=sid, outputPath=str(out),
+            outputFormat="png", imageLine=opts, lineColor="#112233",
+            overwrite=False,
+        )["result"]
+        assert preview["maskHash"] == exported["maskHash"]
+        assert Image.open(preview["pngPath"]).mode == "RGBA"
+        arr = np.array(Image.open(out).convert("RGBA"))
+        assert arr.shape == (18, 20, 4)
+        assert arr[0, 0, 3] == 0
+        assert arr[..., 3].max() > 0
+    finally:
+        eng.close()
+
+
 def test_export_png_split_over_rpc(fixture_psd, tmp_path):
     """분할 PNG 내보내기: 파일마다 그 파일에 들어간 엔트리 하나로 검증돼야 한다.
 

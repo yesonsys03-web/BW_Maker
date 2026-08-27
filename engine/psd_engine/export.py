@@ -180,3 +180,12 @@ def export_psd_split(session, entries, output_path, embed_preview=True,
         if progress:
             progress("write", i + 1, total)
     return {"outputs": outputs, "layerCount": len(entries)}
+
+
+def export_image_line(session, output_path, output_format, image_line,
+                      line_color=None, overwrite=False):
+    """Export the rendered-document color_to_line mask without involving layer plans."""
+    from .imageline import export_image_line as _export_image_line
+
+    return _export_image_line(session, output_path, output_format, image_line,
+                              line_color, overwrite=overwrite)

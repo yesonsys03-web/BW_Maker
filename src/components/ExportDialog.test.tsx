@@ -9,12 +9,13 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { ExportDialog } from "./ExportDialog";
 import { save } from "@tauri-apps/plugin-dialog";
-import { exportPsd } from "../lib/engine";
+import { exportImageLine, exportPsd } from "../lib/engine";
 import type { OpsState } from "../lib/opsReducer";
 import type { TreeNode } from "../lib/types";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn() }));
 vi.mock("../lib/engine", () => ({
+  exportImageLine: vi.fn(),
   exportPsd: vi.fn(),
   onEngineEvent: vi.fn(async () => () => {}),
   openPsd: vi.fn(),
@@ -33,6 +34,7 @@ beforeEach(() => {
   vi.mocked(save).mockReset().mockResolvedValue("/out.psd");
   // 내보내기 RPC는 호출 여부만 본다 — 미해결로 두면 결과 화면을 흉내 낼 필요가 없다.
   vi.mocked(exportPsd).mockReset().mockImplementation(() => new Promise(() => {}));
+  vi.mocked(exportImageLine).mockReset().mockImplementation(() => new Promise(() => {}));
 });
 
 const tree: TreeNode[] = [1, 2].map((id) => ({
@@ -68,6 +70,23 @@ function makeProps(over: Partial<Parameters<typeof ExportDialog>[0]> = {}) {
     ...over,
   };
 }
+
+const imageLinePreset = {
+  outputSuffix: "_LINE",
+  naming: "pathPrefix" as const,
+  outputFormat: "png" as const,
+  embedPreview: true,
+  splitLayers: false,
+  lineColor: null,
+  imageLine: {
+    enabled: true,
+    version: 1,
+    darkThreshold: 96,
+    boundaryThreshold: 32,
+    minLength: 8,
+    width: 3,
+  },
+};
 
 test("no pending detection (null) exports immediately", async () => {
   render(<ExportDialog {...makeProps({ onWaitDetection: () => null })} />);
@@ -114,4 +133,68 @@ test("closing while waiting cancels the export", async () => {
   release();
   await new Promise((r) => setTimeout(r, 0));
   expect(exportPsd).not.toHaveBeenCalled();
+});
+
+test("imageLine can export with zero entries through the new route", async () => {
+  render(<ExportDialog {...makeProps({ preset: imageLinePreset as any, ops: makeOps([]) })} />);
+  fireEvent.click(screen.getByRole("button", { name: "내보내기" }));
+
+  await waitFor(() => expect(exportImageLine).toHaveBeenCalledTimes(1));
+  expect(exportImageLine).toHaveBeenCalledWith(
+    3, "/out.psd", "png", imageLinePreset.imageLine, null, true
+  );
+  expect(exportPsd).not.toHaveBeenCalled();
+});
+
+test("legacy zero-entry export remains disabled", () => {
+  render(<ExportDialog {...makeProps({ ops: makeOps([]) })} />);
+  const button = screen.getByRole("button", { name: "내보내기" }) as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  expect(exportPsd).not.toHaveBeenCalled();
+  expect(exportImageLine).not.toHaveBeenCalled();
+});
+
+test("imageLine output formats omit jpg while legacy export still offers it", async () => {
+  const legacy = render(<ExportDialog {...makeProps()} />);
+  expect(screen.getByRole("option", { name: "JPG — 흰 배경" })).toBeTruthy();
+  legacy.unmount();
+
+  render(<ExportDialog {...makeProps({ preset: imageLinePreset as any })} />);
+  expect(screen.queryByRole("option", { name: "JPG — 흰 배경" })).toBeNull();
+  expect(screen.queryByText("파일명 규칙")).toBeNull();
+  expect(screen.queryByText("레이어마다 파일 따로 내보내기")).toBeNull();
+});
+
+test("an invalid imageLine jpg preset is rejected instead of silently coerced", async () => {
+  const onError = vi.fn();
+  render(<ExportDialog {...makeProps({
+    preset: { ...imageLinePreset, outputFormat: "jpg" as const } as any,
+    onError,
+  })} />);
+  fireEvent.click(screen.getByRole("button", { name: "내보내기" }));
+
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  expect(exportImageLine).not.toHaveBeenCalled();
+});
+
+test("a verified imageLine export is shown as successful", async () => {
+  vi.mocked(exportImageLine).mockResolvedValueOnce({
+    outputPath: "/out.png",
+    layerCount: 1,
+    maskHash: "mask",
+    verification: {
+      ok: true,
+      canvasOk: true,
+      layerCountOk: true,
+      expectedLayers: 1,
+      actualLayers: 1,
+      layers: [{
+        name: "color_to_line", nameOk: true,
+        pixelChecked: true, pixelOk: true,
+      }],
+    },
+  });
+  render(<ExportDialog {...makeProps({ preset: imageLinePreset as any })} />);
+  fireEvent.click(screen.getByRole("button", { name: "내보내기" }));
+  await waitFor(() => expect(screen.getByText("검증 통과")).toBeTruthy());
 });

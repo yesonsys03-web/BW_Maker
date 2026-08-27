@@ -110,6 +110,20 @@ export interface Preset {
    * 기본값의 근거는 docs/superpowers/specs/2026-08-07-character-colour-boundary-lines-design.md 7절.
    */
   edgeLines: EdgeLines;
+  /**
+   * 전체 색 그림에서 선화를 추출하는 고정 프리셋. 기존 레이어 이름 기반
+   * 프리셋과 독립이며, 없던 저장 프리셋은 disabled로 읽는다.
+   */
+  imageLine?: ImageLineExtraction;
+}
+
+export interface ImageLineExtraction {
+  enabled: boolean;
+  version: number;
+  darkThreshold: number;
+  boundaryThreshold: number;
+  minLength: number;
+  width: number;
 }
 
 export interface EdgeLines {

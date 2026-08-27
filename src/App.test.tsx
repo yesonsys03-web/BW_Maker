@@ -18,6 +18,7 @@ const engine = vi.hoisted(() => ({
   renderThumbnails: vi.fn(),
   renderPreview: vi.fn(),
   renderDocumentPreview: vi.fn(),
+  renderImageLinePreview: vi.fn(),
   loadPngDataUrl: vi.fn(),
   pinFile: vi.fn(),
   collectPsdFiles: vi.fn(),
@@ -74,7 +75,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import App, { CACHE_WORKERS_STORAGE_KEY, DEFAULT_CACHE_WORKERS } from "./App";
 import { PreviewCanvas } from "./components/PreviewCanvas";
-import { loadPresets } from "./lib/presets";
+import { COLOR_TO_LINE_PRESET, loadPresets } from "./lib/presets";
 import { PreviewCache, previewRenderSpec } from "./lib/previewCache";
 import { previewFileName, type ProjectEntry, type ProjectFile } from "./lib/project";
 import { loadProjectFrom, saveProjectTo } from "./lib/projectFs";
@@ -195,6 +196,7 @@ beforeEach(() => {
   engine.renderThumbnails.mockResolvedValue({ thumbs: {} });
   engine.renderPreview.mockResolvedValue({ pngPath: "/tmp/p.png" });
   engine.renderDocumentPreview.mockResolvedValue({ pngPath: "/tmp/p.png" });
+  engine.renderImageLinePreview.mockResolvedValue({ pngPath: "/tmp/image-line.png", maskHash: "mask" });
   engine.loadPngDataUrl.mockResolvedValue("data:image/png;base64,AAA");
   engine.onEngineDead.mockResolvedValue(() => {});
   engine.onEngineEvent.mockResolvedValue(() => {});
@@ -306,6 +308,20 @@ test("the load queue opens files one at a time, not all at once", async () => {
   expect(opens).toHaveLength(1);
   await finishOpen(0, 1);
   await waitFor(() => expect(opens).toHaveLength(2));
+});
+
+test("color_to_line routes the active preview through the image-line RPC", async () => {
+  seedWorkerCount(1);
+  vi.mocked(loadPresets).mockResolvedValueOnce([COLOR_TO_LINE_PRESET]);
+  vi.mocked(openDialog).mockResolvedValueOnce([PATHS[0]] as never);
+  engine.applyPreset.mockResolvedValue({ matchedLayerIds: [], operations: [] });
+  render(<App />);
+  await waitFor(() => expect(screen.getByText(COLOR_TO_LINE_PRESET.name)).toBeTruthy());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await addFiles({ click });
+  await finishOpen(0, 1, [1]);
+  await waitFor(() => expect(engine.renderImageLinePreview).toHaveBeenCalled());
+  expect(engine.renderPreview).not.toHaveBeenCalled();
 });
 
 test("stop stays stopped when a file is clicked afterwards", async () => {

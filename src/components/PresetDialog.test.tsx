@@ -10,7 +10,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { PresetDialog } from "./PresetDialog";
-import { DEFAULT_EDGE_LINES, BG_PRESET } from "../lib/presets";
+import { DEFAULT_EDGE_LINES, BG_PRESET, COLOR_TO_LINE_PRESET } from "../lib/presets";
 
 afterEach(cleanup);
 
@@ -59,4 +59,17 @@ test("the edge-mode control is not offered when edge lines are off", () => {
       .queryAllByRole("combobox")
       .some((el) => el.querySelector('option[value="region"]') !== null),
   ).toBe(false);
+});
+
+test("color_to_line preset editing never offers jpg", () => {
+  render(
+    <PresetDialog
+      mode="edit"
+      preset={COLOR_TO_LINE_PRESET}
+      existingNames={[]}
+      onSave={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+  expect(screen.queryByRole("option", { name: "JPG — 흰 배경" })).toBeNull();
 });

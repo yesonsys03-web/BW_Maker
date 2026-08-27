@@ -87,6 +87,10 @@ function fileName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+function imageLineEnabled(preset: Preset): boolean {
+  return ((preset as Preset & { imageLine?: { enabled?: boolean } }).imageLine?.enabled) === true;
+}
+
 /** 중지하고 남은 실행. 재개가 그대로 이어받도록 원래 설정을 함께 든다. */
 interface StoppedRun {
   paths: string[];
@@ -345,6 +349,10 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
       const dir = outputMode === "customDir" ? outputDir : null;
       if (outputMode === "customDir" && !dir) {
         onError("배치 실행 실패", { message: "출력 폴더를 선택하세요.", traceback: "" });
+        return;
+      }
+      if (imageLineEnabled(selectedPreset) && selectedPreset.outputFormat === "jpg") {
+        onError("배치 실행 실패", { message: "imageLine 배치는 PNG 또는 PSD만 지원합니다.", traceback: "" });
         return;
       }
 

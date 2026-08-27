@@ -1,5 +1,5 @@
 import { isDocumentView, visibleIdsForPreview } from "./preview";
-import type { EdgeLines, TreeNode } from "./types";
+import type { EdgeLines, ImageLineExtraction, TreeNode } from "./types";
 
 /**
  * 렌더된 미리보기 이미지(data URL) 캐시 상한(문자 수). 초과하면 LRU로 버린다 —
@@ -38,7 +38,8 @@ export function previewRenderSpec(
    * 호출부(App.tsx의 준비 큐)가 렌더 호출에 같은 값을 다시 쓸 수 있게 하기
    * 위해서다 — 화면이 그리는 값과 미리 만들어두는 값이 갈리면 안 된다.
    */
-  edgeColourIds: number[]
+  edgeColourIds: number[],
+  imageLine: ImageLineExtraction | null = null
 ): {
   visibleIds: number[];
   documentView: boolean;
@@ -61,7 +62,8 @@ export function previewRenderSpec(
     edgeColourIds,
     includedIds,
     key: previewCacheKey(
-      file, documentView, visibleIds, lineColor, matchedIds, edgeLines, edgeColourIds, includedIds
+      file, documentView, visibleIds, lineColor, matchedIds, edgeLines,
+      edgeColourIds, includedIds, imageLine
     ),
   };
 }
@@ -130,7 +132,7 @@ export interface PreviewFileId {
  * 엔진 디스크 캐시는 이 번호와 무관한 자기 키를 쓰므로 스윕한 폴더는 그대로
  * 적중한다(실측 재합성 0.03~0.3초).
  */
-export const PREVIEW_PICTURE_VERSION = 12;
+export const PREVIEW_PICTURE_VERSION = 18;
 
 export function previewCacheKey(
   file: PreviewFileId,
@@ -150,7 +152,8 @@ export function previewCacheKey(
    * 경우가 visibleIds는 같아도 그려지는 그림은 다를 수 있다 — 키가 그 차이를
    * 못 담으면 하나가 다른 하나의 캐시를 그대로 돌려준다.
    */
-  includedIds: number[]
+  includedIds: number[],
+  imageLine: ImageLineExtraction | null = null
 ): string | null {
   if (file.mtime === undefined) return null;
   // 문서 보기는 visibleIds/lineColor/edgeLines를 쓰지 않지만 키에 남겨도 해롭지
@@ -177,17 +180,19 @@ export function previewCacheKey(
   // visibleIds로 대신할 수 없으므로 따로 싣는다.
   const lineColorIds = lineColorIdsFor(visibleIds, lineColor, matchedIds);
   const edgeLinesKey = edgeLines !== null && edgeLines.enabled ? JSON.stringify(edgeLines) : "off";
+  const imageLineKey = imageLine?.enabled ? JSON.stringify(imageLine) : "off";
   return [
     `v${PREVIEW_PICTURE_VERSION}`,
     file.path,
     file.mtime,
-    documentView ? "doc" : "composite",
+    imageLine?.enabled ? "image-line" : documentView ? "doc" : "composite",
     lineColor ?? "",
     lineColorIds === null ? "all" : lineColorIds.join(","),
     visibleIds.join(","),
     edgeLinesKey,
     edgeColourIds.join(","),
     includedIds.join(","),
+    imageLineKey,
   ].join("\n");
 }
 

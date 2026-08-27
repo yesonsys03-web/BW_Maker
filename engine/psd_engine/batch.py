@@ -17,6 +17,36 @@ from .verify import verify_export
 from .verify_raster import verify_raster
 
 
+def _process_image_line_one(store, path, preset, output_dir, overwrite, progress):
+    fmt = preset.get("outputFormat", "psd")
+    if fmt == "jpg":
+        raise ValueError("imageLine batch export supports png or psd, not jpg")
+    if fmt not in ("png", "psd"):
+        raise ValueError(f"unsupported imageLine output format: {fmt}")
+    sid = store.open(path)
+    try:
+        from .imageline import export_image_line
+
+        s = store.get(sid)
+        src = Path(path)
+        out_dir = Path(output_dir) if output_dir else src.parent
+        out_path = out_dir / f"{src.stem}{preset['outputSuffix']}{output_extension(src, fmt)}"
+        result = export_image_line(
+            s, out_path, fmt, preset["imageLine"],
+            line_color=preset.get("lineColor"), overwrite=overwrite)
+        verification = result["verification"]
+        return {
+            "path": str(path), "ok": verification["ok"],
+            "outputPath": result["outputPath"],
+            "layerCount": result["layerCount"],
+            "verification": verification,
+            "skippedLayers": [],
+            "imageLine": {"maskHash": result["maskHash"]},
+        }
+    finally:
+        store.close(sid)
+
+
 def _add_manual_lines(session, matched, manual_line_ids):
     """
     화면에서 손으로 "라인으로 지정"한 레이어를 규칙 결과에 보탠다.
@@ -55,6 +85,10 @@ def _process_one(store, path, preset, output_dir, overwrite, progress,
     # warmworker.export_file이 이 함수를 그대로 부른다 — 워커로 나눠 돌린 배치가
     # 순차 배치와 같은 산출물을 내는 근거가 "같은 함수"라는 사실 하나이므로,
     # 시그니처나 결과 모양을 바꾸면 그쪽도 같이 볼 것.
+    if (preset.get("imageLine") or {}).get("enabled"):
+        return _process_image_line_one(store, path, preset, output_dir, overwrite,
+                                       progress)
+
     sid = store.open(path)
     try:
         s = store.get(sid)

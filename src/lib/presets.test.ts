@@ -21,7 +21,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   writeTextFile: (...a: unknown[]) => writeTextFileMock(...a),
 }));
 
-import { BG_PRESET, CHAR_PRESET, PROP_PRESET, DEFAULT_EDGE_LINES, DEFAULT_EXCLUDE_TOKENS, DEFAULT_PRESETS, isValidLineColor, loadPresets, parsePresets, savePresets } from "./presets";
+import { BG_PRESET, CHAR_PRESET, COLOR_TO_LINE_COLOR, COLOR_TO_LINE_IMAGE_LINE, COLOR_TO_LINE_PRESET, DISABLED_IMAGE_LINE, PROP_PRESET, DEFAULT_EDGE_LINES, DEFAULT_EXCLUDE_TOKENS, DEFAULT_PRESETS, isValidLineColor, loadPresets, parsePresets, savePresets } from "./presets";
 import type { Preset } from "./types";
 
 const APP_DATA_DIR = "/mock/appdata";
@@ -82,6 +82,7 @@ test("BG_PRESET matches the brief contract", () => {
       enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
       colourMode: "composite", edgeMode: "region", widthScale: 1,
     },
+    imageLine: DISABLED_IMAGE_LINE,
   });
 });
 
@@ -107,8 +108,8 @@ test("CHAR_PRESET은 BG와 **세 가지만** 다르다", () => {
 test("loadPresets returns the built-ins when the file does not exist", async () => {
   existsMock.mockResolvedValue(false);
   const result = await loadPresets();
-  expect(result).toEqual([BG_PRESET, CHAR_PRESET, PROP_PRESET]);
-  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR", "PROP"]);
+  expect(result).toEqual([BG_PRESET, CHAR_PRESET, PROP_PRESET, COLOR_TO_LINE_PRESET]);
+  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR", "PROP", "color_to_line"]);
   expect(readTextFileMock).not.toHaveBeenCalled();
 });
 
@@ -122,7 +123,7 @@ test("loadPresets가 돌려준 기본 프리셋을 고쳐도 원본이 안 바�
 
 test("loadPresets reads and parses existing JSON (round trip)", async () => {
   // 기본이 다 들어 있는 파일이라 채워 넣을 것이 없다 — 읽은 그대로 나와야 한다.
-  const stored: Preset[] = [BG_PRESET, CHAR_PRESET, PROP_PRESET, { ...BG_PRESET, name: "second" }];
+  const stored: Preset[] = [BG_PRESET, CHAR_PRESET, PROP_PRESET, COLOR_TO_LINE_PRESET, { ...BG_PRESET, name: "second" }];
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify(stored));
 
@@ -145,7 +146,7 @@ test("loadPresets tops up defaults that a legacy presets.json never had", async 
 
   // 빠진 기본은 **끝에** 붙는다 — 첫 프리셋이 바뀌면 배치가 조용히 다른
   // 프리셋으로 돈다(BatchPanel은 드롭다운 첫 번째로 돈다).
-  expect(result.map((p) => p.name)).toEqual(["line 추출", "BG", "CHAR", "PROP"]);
+  expect(result.map((p) => p.name)).toEqual(["line 추출", "BG", "CHAR", "PROP", "color_to_line"]);
   // 끼워 넣기는 메모리에서만 한다 — 저장은 아티스트가 누를 때만이다.
   expect(writeTextFileMock).not.toHaveBeenCalled();
 });
@@ -159,7 +160,7 @@ test("loadPresets does not overwrite a default the artist has edited", async () 
 
   const result = await loadPresets();
 
-  expect(result.map((p) => p.name)).toEqual(["CHAR", "BG", "PROP"]);
+  expect(result.map((p) => p.name)).toEqual(["CHAR", "BG", "PROP", "color_to_line"]);
   expect(result.find((p) => p.name === "CHAR")?.lineColor).toBeNull();
 });
 
@@ -188,7 +189,7 @@ test("topping up a new default never changes which preset is first", async () =>
   const result = await loadPresets();
 
   expect(result[0].name).toBe("BG");
-  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR", "PROP"]);
+  expect(result.map((p) => p.name)).toEqual(["BG", "CHAR", "PROP", "color_to_line"]);
 });
 
 test("loadPresets throws on corrupted JSON instead of absorbing the error", async () => {
@@ -221,6 +222,22 @@ test("loadPresets throws when a field has the wrong type/value (e.g. an invalid 
   await expect(loadPresets()).rejects.toThrow(/merge/);
 });
 
+test("imageLine presets reject jpg at the schema boundary", () => {
+  expect(() => parsePresets(JSON.stringify([{
+    ...COLOR_TO_LINE_PRESET,
+    outputFormat: "jpg",
+  }]))).toThrow(/imageLine은 png 또는 psd/);
+});
+
+test("saved imageLine v1 presets are upgraded to the current fixed configuration", () => {
+  const [preset] = parsePresets(JSON.stringify([{
+    ...COLOR_TO_LINE_PRESET,
+    imageLine: { ...COLOR_TO_LINE_PRESET.imageLine, darkThreshold: 128 },
+  }]));
+  expect(preset.imageLine).toEqual(COLOR_TO_LINE_IMAGE_LINE);
+  expect(preset.lineColor).toBe(COLOR_TO_LINE_COLOR);
+});
+
 test("loadPresets accepts a well-formed preset list and preserves every field exactly", async () => {
   const wellFormed: Preset = {
     name: "custom",
@@ -244,6 +261,7 @@ test("loadPresets accepts a well-formed preset list and preserves every field ex
       enabled: true, threshold: 30, gap: 6, width: 7, minLength: 10, lineAlpha: 70,
       colourMode: "paste", edgeMode: "change", widthScale: 0.75,
     },
+    imageLine: { ...DISABLED_IMAGE_LINE },
   };
   existsMock.mockResolvedValue(true);
   readTextFileMock.mockResolvedValue(JSON.stringify([wellFormed]));

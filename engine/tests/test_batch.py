@@ -85,6 +85,82 @@ def test_batch_no_match_is_failure(fixture_psd, tmp_path):
     assert "no layers matched" in r["results"][0]["error"]["message"]
 
 
+def test_batch_image_line_bypasses_no_match_failure(fixture_psd, tmp_path, monkeypatch):
+    calls = []
+
+    def export_image_line(session, output_path, output_format, image_line, line_color=None, overwrite=False):
+        calls.append((session["path"], str(output_path), output_format, image_line, line_color, overwrite))
+        return {
+            "outputPath": str(output_path),
+            "layerCount": 1,
+            "maskHash": "mask-1",
+            "verification": {
+                "ok": True, "canvasOk": True, "layerCountOk": True,
+                "expectedLayers": 1, "actualLayers": 1, "layers": [],
+            },
+        }
+
+    monkeypatch.setattr("psd_engine.imageline.export_image_line", export_image_line)
+    preset = {
+        **PRESET,
+        "include": {"type": "contains", "value": "zzz", "caseSensitive": False},
+        "outputFormat": "png",
+        "imageLine": {
+            "enabled": True, "version": 1, "darkThreshold": 96,
+            "boundaryThreshold": 32, "minLength": 8, "width": 3,
+        },
+        "lineColor": "#000000",
+    }
+
+    r = run_batch([str(fixture_psd)], preset, output_dir=str(tmp_path))
+
+    assert r["results"][0]["ok"] is True, r["results"][0].get("error")
+    assert r["results"][0]["outputPath"].endswith(".png")
+    assert r["results"][0]["layerCount"] == 1
+    assert calls == [(
+        str(fixture_psd), str(tmp_path / "fixture_LINE.png"), "png",
+        preset["imageLine"], "#000000", False,
+    )]
+
+
+def test_batch_image_line_accepts_one_layer_psd(fixture_psd, tmp_path):
+    preset = {
+        **PRESET,
+        "outputFormat": "psd",
+        "imageLine": {
+            "enabled": True, "version": 1, "darkThreshold": 96,
+            "boundaryThreshold": 32, "minLength": 8, "width": 3,
+        },
+    }
+
+    r = run_batch([str(fixture_psd)], preset, output_dir=str(tmp_path))
+
+    assert r["results"][0]["ok"] is True, r["results"][0].get("error")
+    assert r["results"][0]["outputPath"].endswith(".psd")
+    assert len(list(PSDImage.open(r["results"][0]["outputPath"]))) == 1
+
+
+def test_batch_image_line_rejects_jpg_before_matching(fixture_psd, tmp_path, monkeypatch):
+    def export_image_line(*args, **kwargs):
+        raise AssertionError("unused")
+
+    monkeypatch.setattr("psd_engine.imageline.export_image_line", export_image_line)
+    preset = {
+        **PRESET,
+        "outputFormat": "jpg",
+        "include": {"type": "contains", "value": "zzz", "caseSensitive": False},
+        "imageLine": {
+            "enabled": True, "version": 1, "darkThreshold": 96,
+            "boundaryThreshold": 32, "minLength": 8, "width": 3,
+        },
+    }
+
+    r = run_batch([str(fixture_psd)], preset, output_dir=str(tmp_path))
+
+    assert r["results"][0]["ok"] is False
+    assert "not jpg" in r["results"][0]["error"]["message"]
+
+
 def test_batch_writes_png_when_the_preset_says_so(fixture_psd, tmp_path):
     r = run_batch([str(fixture_psd)], {**PRESET, "outputFormat": "png"},
                   output_dir=str(tmp_path))
