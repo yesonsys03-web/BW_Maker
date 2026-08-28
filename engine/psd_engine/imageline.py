@@ -10,6 +10,7 @@ from collections import OrderedDict, deque
 import numpy as np
 from PIL import Image, ImageFilter
 
+from .edges import build_overlay
 from .export import _output_version
 from .paths import ensure_writable_path, long_path
 from .patches import apply_pytoshop_patches
@@ -123,6 +124,59 @@ def _remove_short_components(mask, min_length):
     return np.asarray(keep_labels, dtype=bool)[labels]
 
 
+def _missing_colour_edges(rgba, line_alpha, min_length):
+    """Add abrupt colour-only silhouettes using the proven CHAR edge path."""
+    height, width = line_alpha.shape
+    out = np.zeros((height, width), dtype=np.uint8)
+    tile_size = 512
+    overlap = 32
+    edge_options = {
+        "enabled": True,
+        "threshold": 12,
+        "gap": 2,
+        "width": 1,
+        "minLength": min_length,
+        "lineAlpha": 200,
+        "colourMode": "composite",
+        "edgeMode": "change",
+        "widthScale": 1,
+    }
+    for y0 in range(0, height, tile_size):
+        y1 = min(height, y0 + tile_size)
+        ey0, ey1 = max(0, y0 - overlap), min(height, y1 + overlap)
+        for x0 in range(0, width, tile_size):
+            x1 = min(width, x0 + tile_size)
+            ex0, ex1 = max(0, x0 - overlap), min(width, x1 + overlap)
+            tile = rgba[ey0:ey1, ex0:ex1]
+            overlay = build_overlay(
+                tile,
+                line_alpha[ey0:ey1, ex0:ex1],
+                edge_options,
+            )[..., 3]
+
+            # Colour-change detection can follow broad illumination gradients.
+            # A real painted silhouette changes abruptly within 3px; a radial
+            # glow does not.
+            sharp_range = np.zeros(overlay.shape, dtype=np.int16)
+            for channel in range(3):
+                image = Image.fromarray(tile[..., channel], "L")
+                high = np.array(
+                    image.filter(ImageFilter.MaxFilter(3)), dtype=np.int16)
+                low = np.array(
+                    image.filter(ImageFilter.MinFilter(3)), dtype=np.int16)
+                np.maximum(sharp_range, high - low, out=sharp_range)
+            edge = np.where(
+                sharp_range >= 12, overlay, 0).astype(np.uint8)
+            edge = np.array(
+                Image.fromarray(edge, "L").filter(
+                    ImageFilter.GaussianBlur(0.5)))
+            out[y0:y1, x0:x1] = edge[
+                y0 - ey0:y1 - ey0,
+                x0 - ex0:x1 - ex0,
+            ]
+    return out
+
+
 def extract_image_line(session, image_line):
     opts = normalize_options(image_line)
     cache_key = None
@@ -164,7 +218,6 @@ def extract_image_line(session, image_line):
         rgba, alpha, lum, local_background, channel_contrast, contrast,
         dark_lines,
     ))
-    boundary_done = time.perf_counter()
     mask = _remove_short_components(dark_lines, opts["minLength"])
     mask_u8 = np.array(
         Image.fromarray(mask.astype(np.uint8) * 255, "L").filter(
@@ -172,6 +225,11 @@ def extract_image_line(session, image_line):
         )
     )
     mask_u8[mask_u8 >= 240] = 255
+    base_done = time.perf_counter()
+    missing_edges = _missing_colour_edges(rgba, mask_u8, opts["minLength"])
+    np.maximum(mask_u8, missing_edges, out=mask_u8)
+    boundary_peak += mask.nbytes + mask_u8.nbytes + missing_edges.nbytes
+    boundary_done = time.perf_counter()
     mask_u8[~alpha] = 0
     mask_u8 = np.ascontiguousarray(mask_u8)
     finished = time.perf_counter()
@@ -180,8 +238,10 @@ def extract_image_line(session, image_line):
     profile = {
         "compositeSeconds": composite_done - started,
         "darkExtractionSeconds": dark_done - composite_done,
-        "boundaryExtractionSeconds": boundary_done - dark_done,
-        "suppressionUnionSeconds": finished - boundary_done,
+        "boundaryExtractionSeconds": boundary_done - base_done,
+        "suppressionUnionSeconds": (
+            base_done - dark_done + finished - boundary_done
+        ),
         "totalSeconds": finished - started,
         "peakTrackedArrayBytes": int(boundary_peak),
         "algorithmPeakRssDeltaBytes": (

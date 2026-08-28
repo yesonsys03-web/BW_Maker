@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "kind": "color-only-edge-boundary-test-report",
+  "feature": "color_to_line",
+  "sourceSample": "cloor_to_line1.psd",
+  "priorOutput": "cloor_to_line1_co.psd",
+  "canvas": [5100, 3351],
+  "qaCrop": {"x": 4000, "y": 100, "width": 800, "height": 800},
+  "bulbSegmentation": {
+    "rule": "R > 225, G > 220, B < 210",
+    "fillPixels": 63074,
+    "boundaryPixels": 1635,
+    "directBoundaryCoverage": 0.952905,
+    "twoPixelBoundaryCoverage": 0.997554
+  },
+  "gradientRejection": {
+    "syntheticRegression": true,
+    "realRadialGlowOutlineRejected": true
+  },
+  "output": {
+    "maskHash": "57593dd825a65b9f69db39c064c921819303141d469b66bcc9da89339c00e0de",
+    "pngReadbackVerified": true,
+    "psdReadbackVerified": true,
+    "pngPsdMaskEqual": true,
+    "psdLayerCount": 1,
+    "opaqueCoreRgba": [61, 61, 61, 255]
+  },
+  "performance": {
+    "totalSeconds": 25.8301,
+    "peakTrackedArrayBytes": 256351500,
+    "algorithmPeakRssDeltaBytes": 299499520,
+    "steadyBudgetBytes": 367001600,
+    "peakBudgetBytes": 524288000,
+    "withinBudget": true
+  }
+}

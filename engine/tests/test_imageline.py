@@ -79,14 +79,52 @@ def test_dense_but_elongated_dark_stroke_is_not_mistaken_for_a_fill(tmp_path):
     assert stroke.sum(axis=0).max() <= 12
 
 
-def test_flat_colour_boundaries_are_removed_with_the_colour(tmp_path):
+def test_abrupt_colour_only_boundary_is_added(tmp_path):
     rgba = np.zeros((14, 18, 4), dtype=np.uint8)
     rgba[:, :9] = [220, 20, 20, 255]
     rgba[:, 9:] = [20, 80, 230, 255]
     path = tmp_path / "boundary.psd"
     write_psd(path, [_rgba_layer("art", rgba)], width=18, height=14)
     mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[:, 8:10].max() > 0
+
+
+def test_colour_only_bulb_gets_a_closed_line_without_filling_its_interior(tmp_path):
+    rgba = np.full((48, 48, 4), [235, 225, 200, 255], dtype=np.uint8)
+    yy, xx = np.ogrid[:48, :48]
+    bulb = (xx - 24) ** 2 + (yy - 24) ** 2 <= 12 ** 2
+    rgba[bulb, :3] = [250, 245, 135]
+    path = tmp_path / "bulb.psd"
+    write_psd(path, [_rgba_layer("art", rgba)], width=48, height=48)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[12, 24] > 0
+    assert mask[24, 12] > 0
+    assert mask[24, 36] > 0
+    assert mask[36, 24] > 0
+    assert mask[24, 24] == 0
+
+
+def test_smooth_illumination_gradient_does_not_become_a_line(tmp_path):
+    yy, xx = np.ogrid[:64, :64]
+    radius = np.sqrt((xx - 32) ** 2 + (yy - 32) ** 2)
+    value = np.clip(235 + radius * 0.25, 0, 255).astype(np.uint8)
+    rgba = np.empty((64, 64, 4), dtype=np.uint8)
+    rgba[..., :3] = value[..., None]
+    rgba[..., 3] = 255
+    path = tmp_path / "glow.psd"
+    write_psd(path, [_rgba_layer("art", rgba)], width=64, height=64)
+    mask, _ = extract_image_line(_session(path), OPTS)
     assert mask.max() == 0
+
+
+def test_colour_only_edge_stays_continuous_across_internal_tiles(tmp_path):
+    rgba = np.empty((64, 1100, 4), dtype=np.uint8)
+    rgba[:, :1024] = [220, 40, 40, 255]
+    rgba[:, 1024:] = [40, 80, 220, 255]
+    path = tmp_path / "tile-seam.psd"
+    write_psd(path, [_rgba_layer("art", rgba)], width=1100, height=64)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert (mask[4:60, 1023:1025].max(axis=1) > 0).all()
 
 
 def test_colour_boundaries_near_dark_lines_are_suppressed(tmp_path):
@@ -223,6 +261,28 @@ def test_real_sample_qa_report_records_memory_cache_and_readback_proof():
     assert verification["exports"]["batchReadbackVerified"] is True
     assert verification["exports"]["pngPsdAlphaEqual"] is True
     assert verification["allCropMetricGatesPassed"] is True
+
+
+def test_color_only_bulb_qa_report_proves_complete_clean_boundary():
+    path = Path(__file__).parent / "fixtures" / "color_only_edge_qa_report.json"
+    report = json.loads(path.read_text(encoding="utf-8"))
+    bulb = report["bulbSegmentation"]
+    output = report["output"]
+    performance = report["performance"]
+    assert bulb["directBoundaryCoverage"] >= 0.95
+    assert bulb["twoPixelBoundaryCoverage"] >= 0.99
+    assert report["gradientRejection"]["syntheticRegression"] is True
+    assert report["gradientRejection"]["realRadialGlowOutlineRejected"] is True
+    assert output["pngReadbackVerified"] is True
+    assert output["psdReadbackVerified"] is True
+    assert output["pngPsdMaskEqual"] is True
+    assert output["opaqueCoreRgba"] == [61, 61, 61, 255]
+    assert performance["withinBudget"] is True
+    assert performance["peakTrackedArrayBytes"] <= performance["steadyBudgetBytes"]
+    assert (
+        performance["algorithmPeakRssDeltaBytes"]
+        <= performance["peakBudgetBytes"]
+    )
 
 
 def test_document_rgba_falls_back_only_for_missing_scipy_gradient_support():
