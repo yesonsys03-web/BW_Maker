@@ -167,9 +167,31 @@ def _missing_colour_edges(rgba, line_alpha, min_length):
                 np.maximum(sharp_range, high - low, out=sharp_range)
             edge = np.where(
                 sharp_range >= 12, overlay, 0).astype(np.uint8)
+            solid_core = np.array(
+                Image.fromarray(
+                    (edge >= 64).astype(np.uint8) * 255,
+                    "L",
+                )
+                .filter(ImageFilter.MaxFilter(3))
+                .filter(ImageFilter.MinFilter(3))
+            ) > 0
+            protected_line = np.array(
+                Image.fromarray(
+                    (
+                        line_alpha[ey0:ey1, ex0:ex1] >= 128
+                    ).astype(np.uint8) * 255,
+                    "L",
+                ).filter(ImageFilter.MaxFilter(7))
+            ) > 0
+            solid_core &= ~protected_line
             edge = np.array(
-                Image.fromarray(edge, "L").filter(
-                    ImageFilter.GaussianBlur(0.5)))
+                Image.fromarray(
+                    solid_core.astype(np.uint8) * 255,
+                    "L",
+                ).filter(ImageFilter.GaussianBlur(0.75))
+            )
+            edge[solid_core] = 255
+            edge[edge >= 240] = 255
             out[y0:y1, x0:x1] = edge[
                 y0 - ey0:y1 - ey0,
                 x0 - ex0:x1 - ex0,
@@ -227,8 +249,18 @@ def extract_image_line(session, image_line):
     mask_u8[mask_u8 >= 240] = 255
     base_done = time.perf_counter()
     missing_edges = _missing_colour_edges(rgba, mask_u8, opts["minLength"])
+    replacement_zone = np.array(
+        Image.fromarray(
+            (missing_edges >= 128).astype(np.uint8) * 255,
+            "L",
+        ).filter(ImageFilter.MaxFilter(7))
+    ) > 0
+    mask_u8[replacement_zone & (mask_u8 < 128)] = 0
     np.maximum(mask_u8, missing_edges, out=mask_u8)
-    boundary_peak += mask.nbytes + mask_u8.nbytes + missing_edges.nbytes
+    boundary_peak += (
+        mask.nbytes + mask_u8.nbytes + missing_edges.nbytes
+        + replacement_zone.nbytes
+    )
     boundary_done = time.perf_counter()
     mask_u8[~alpha] = 0
     mask_u8 = np.ascontiguousarray(mask_u8)

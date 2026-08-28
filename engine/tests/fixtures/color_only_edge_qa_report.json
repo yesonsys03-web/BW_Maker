@@ -10,15 +10,15 @@
     "rule": "R > 225, G > 220, B < 210",
     "fillPixels": 63074,
     "boundaryPixels": 1635,
-    "directBoundaryCoverage": 0.952905,
-    "twoPixelBoundaryCoverage": 0.997554
+    "directBoundaryCoverage": 0.979817,
+    "twoPixelBoundaryCoverage": 1.0
   },
   "gradientRejection": {
     "syntheticRegression": true,
     "realRadialGlowOutlineRejected": true
   },
   "output": {
-    "maskHash": "57593dd825a65b9f69db39c064c921819303141d469b66bcc9da89339c00e0de",
+    "maskHash": "970519f758d25d7fe39b15ad6b1d25260c14ffc76c2561ceb1a56965e9af8f49",
     "pngReadbackVerified": true,
     "psdReadbackVerified": true,
     "pngPsdMaskEqual": true,
@@ -26,9 +26,9 @@
     "opaqueCoreRgba": [61, 61, 61, 255]
   },
   "performance": {
-    "totalSeconds": 25.8301,
-    "peakTrackedArrayBytes": 256351500,
-    "algorithmPeakRssDeltaBytes": 299499520,
+    "totalSeconds": 31.5444,
+    "peakTrackedArrayBytes": 273441600,
+    "algorithmPeakRssDeltaBytes": 312848384,
     "steadyBudgetBytes": 367001600,
     "peakBudgetBytes": 524288000,
     "withinBudget": true

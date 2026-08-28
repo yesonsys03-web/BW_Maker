@@ -132,7 +132,7 @@ export interface PreviewFileId {
  * 엔진 디스크 캐시는 이 번호와 무관한 자기 키를 쓰므로 스윕한 폴더는 그대로
  * 적중한다(실측 재합성 0.03~0.3초).
  */
-export const PREVIEW_PICTURE_VERSION = 19;
+export const PREVIEW_PICTURE_VERSION = 20;
 
 export function previewCacheKey(
   file: PreviewFileId,
