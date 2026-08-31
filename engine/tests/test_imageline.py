@@ -448,6 +448,39 @@ def test_flattened_character_coloured_detail_gets_a_line_boundary():
     assert edges[24, 30] == 0
 
 
+def test_flattened_cel_graphic_boundaries_have_fixed_width():
+    rgba = np.full((40, 60, 4), [220, 50, 80, 255], dtype=np.uint8)
+    rgba[:, 30:, :3] = [45, 30, 55]
+    edges = imageline._thin_colour_edges(rgba)
+    columns = np.flatnonzero(edges[20] > 0)
+    assert columns.tolist() == [28, 29, 30]
+    assert edges[20, 10] == 0
+    assert edges[20, 45] == 0
+
+
+def test_low_contrast_turn_boundary_can_be_continuous():
+    rgba = np.full((40, 60, 4), [100, 100, 100, 255], dtype=np.uint8)
+    rgba[:, 30:, :3] = [108, 108, 108]
+    assert imageline._thin_colour_edges(
+        rgba,
+        include_alpha=False,
+        threshold=8,
+    )[20, 29] == 255
+    assert imageline._thin_colour_edges(
+        rgba,
+        include_alpha=False,
+        threshold=12,
+    ).max() == 0
+
+
+def test_specialized_colour_group_names_are_recognized():
+    assert imageline._is_colour_group_name("COLORS")
+    assert imageline._is_colour_group_name("HAIR COLOR")
+    assert imageline._is_colour_group_name("HAIR COLOUR")
+    assert imageline._is_colour_group_name("HEADSCARF COLOR")
+    assert not imageline._is_colour_group_name("COLOR PALETTE")
+
+
 def test_unnamed_reference_line_paired_with_fill_is_extracted(tmp_path):
     from pytoshop.user import nested_layers
 
@@ -515,7 +548,7 @@ def test_visible_composite_edges_fill_semantic_root_line_omissions(
         nested_layers.Group(name="TEMPLATE", layers=[
             _rgba_layer("guide", template),
         ]),
-        nested_layers.Group(name="TURN", layers=[
+        nested_layers.Group(name="DESIGN", layers=[
             _rgba_layer("colour detail", detail),
             _rgba_layer("LINE", line),
         ]),
@@ -524,7 +557,7 @@ def test_visible_composite_edges_fill_semantic_root_line_omissions(
     rendered[15:45, 45:75, :3] = [220, 40, 90]
     rendered[8:52, 15, :3] = [35, 35, 35]
     session = _session(path)
-    turn = next(layer for layer in session["psd"] if layer.name == "TURN")
+    turn = next(layer for layer in session["psd"] if layer.name == "DESIGN")
     monkeypatch.setattr(
         type(turn),
         "composite",
@@ -778,6 +811,166 @@ def test_rendered_line_density_is_binary_and_uniform():
     mask = np.array([[0, 16, 64, 173, 255]], dtype=np.uint8)
     rendered = mask_to_rgba(mask, "#3d3d3d")
     assert rendered[0, :, 3].tolist() == [0, 0, 255, 255, 255]
+
+
+def test_explicit_source_line_rendering_preserves_antialias_fringe():
+    mask = np.array([[0, 16, 64, 173, 255]], dtype=np.uint8)
+    rendered = mask_to_rgba(
+        mask,
+        "#3d3d3d",
+        preserve_antialias=True,
+    )
+    assert rendered[0, :, 3].tolist() == [0, 16, 255, 255, 255]
+
+
+def test_opaque_authored_lines_and_component_lines_are_extracted(tmp_path):
+    from pytoshop.user import nested_layers
+
+    body = np.zeros((50, 70, 4), dtype=np.uint8)
+    body[5:45, 20, :] = [20, 20, 20, 255]
+    mic = np.zeros((50, 70, 4), dtype=np.uint8)
+    mic[10:40, 50, :] = [20, 20, 20, 255]
+    mic_fill = np.zeros((50, 70, 4), dtype=np.uint8)
+    mic_fill[15:35, 45:55, :] = [180, 30, 50, 255]
+    path = tmp_path / "authored-turn-lines.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURN", layers=[
+            nested_layers.Group(name="LINES", layers=[
+                _rgba_layer("body", body),
+            ]),
+            nested_layers.Group(name="MIC", layers=[
+                _rgba_layer("mic colors", mic_fill),
+                _rgba_layer("mic", mic),
+            ]),
+        ]),
+    ], width=70, height=50)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[5:45, 20].min() == 255
+    assert mask[10:40, 50].min() == 255
+    assert mask[15:35, 45:55].max() == 255
+    assert mask[20, 47] == 0
+
+
+def test_turn_colour_boundary_reaches_authored_line_without_crossing(
+        tmp_path, monkeypatch):
+    from pytoshop.user import nested_layers
+
+    line = np.zeros((50, 70, 4), dtype=np.uint8)
+    line[25, 25:45, :] = [20, 20, 20, 255]
+    left = np.zeros((50, 70, 4), dtype=np.uint8)
+    left[5:45, 10:35, :] = [220, 40, 80, 255]
+    right = np.zeros((50, 70, 4), dtype=np.uint8)
+    right[5:45, 35:60, :] = [60, 30, 45, 255]
+    path = tmp_path / "turn-colour-crossing.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURN", layers=[
+            nested_layers.Group(name="COLORS", layers=[
+                _rgba_layer("left", left),
+                _rgba_layer("right", right),
+            ]),
+            nested_layers.Group(name="LINES", layers=[
+                _rgba_layer("body", line),
+            ]),
+        ]),
+    ], width=70, height=50)
+    rendered = np.zeros((50, 70, 4), dtype=np.uint8)
+    rendered[5:45, 10:35, :] = [220, 40, 80, 255]
+    rendered[5:45, 35:60, :] = [60, 30, 45, 255]
+    final_rendered = rendered.copy()
+    final_rendered[26:45, 10:60, :] = [220, 40, 80, 255]
+    session = _session(path)
+    colors = next(
+        layer for layer in session["psd"].descendants()
+        if layer.is_group() and layer.name == "COLORS"
+    )
+    monkeypatch.setattr(
+        type(colors),
+        "composite",
+        lambda self: Image.fromarray(
+            (
+                rendered.copy()
+                if self.name == "COLORS"
+                else final_rendered.copy()
+            ),
+            "RGBA",
+        ),
+    )
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[20:25, 34].min() > 0
+    assert mask[25, 25:45].min() == 255
+    assert mask[26:31, 34].max() == 0
+
+
+def test_occluded_turn_colour_boundary_is_not_added(tmp_path, monkeypatch):
+    from pytoshop.user import nested_layers
+
+    line = np.zeros((50, 70, 4), dtype=np.uint8)
+    line[25, 25:45, :] = [20, 20, 20, 255]
+    colour = np.zeros((50, 70, 4), dtype=np.uint8)
+    colour[5:45, 10:35, :] = [220, 40, 80, 255]
+    colour[5:45, 35:60, :] = [60, 30, 45, 255]
+    path = tmp_path / "occluded-turn-colour.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURN", layers=[
+            nested_layers.Group(name="HAIR COLOUR", layers=[
+                _rgba_layer("hair", colour),
+            ]),
+            nested_layers.Group(name="LINES", layers=[
+                _rgba_layer("body", line),
+            ]),
+        ]),
+    ], width=70, height=50)
+    uniform = np.full((50, 70, 4), [120, 80, 90, 255], dtype=np.uint8)
+    session = _session(path)
+    group_type = type(next(
+        layer for layer in session["psd"] if layer.name == "TURN"
+    ))
+
+    def composite(group):
+        image = colour if group.name == "HAIR COLOUR" else uniform
+        return Image.fromarray(image.copy(), "RGBA")
+
+    monkeypatch.setattr(group_type, "composite", composite)
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[20:25, 34].max() == 0
+    assert mask[25, 25:45].min() == 255
+
+
+def test_visible_colour_boundary_short_gaps_are_bridged():
+    edges = np.zeros((30, 20), dtype=np.uint8)
+    edges[2:28, 10] = 255
+    support = np.zeros((30, 20), dtype=bool)
+    support[2:12, 10] = True
+    support[17:28, 10] = True
+    kept = imageline._retain_visible_edge_runs(edges, support)
+    assert kept[2:28, 10].min() == 255
+
+
+def test_fill_inside_mixed_line_container_is_hollowed(tmp_path):
+    from pytoshop.user import nested_layers
+
+    authored = np.zeros((50, 70, 4), dtype=np.uint8)
+    authored[5:45, 15, :] = [20, 20, 20, 255]
+    authored[10:40, 35:65, :] = [20, 20, 20, 255]
+    fill = np.zeros((50, 70, 4), dtype=np.uint8)
+    fill[10:40, 35:65, :] = [100, 40, 60, 255]
+    path = tmp_path / "mixed-line-container.psd"
+    write_psd(path, [
+        nested_layers.Group(name="ART", layers=[
+            nested_layers.Group(name="LINE", layers=[
+                nested_layers.Group(name="COLOUR", layers=[
+                    _rgba_layer("prop fill", fill),
+                ]),
+                nested_layers.Group(name="drawing", layers=[
+                    _rgba_layer("ink", authored),
+                ]),
+            ]),
+        ]),
+    ], width=70, height=50)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[5:45, 15].min() >= 240
+    assert mask[10, 35:65].min() >= 240
+    assert mask[25, 50] == 0
 
 
 def test_png_export_has_white_paper_background_and_uses_mask_hash(tmp_path):

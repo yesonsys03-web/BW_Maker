@@ -223,6 +223,23 @@ def _is_non_art_line_layer(name):
     )
 
 
+def _uses_explicit_turn_line_system(psd):
+    for root in psd:
+        if (
+            not root.is_group()
+            or not root.is_visible()
+            or _object_key(root.name) not in {"turn", "turnaround"}
+        ):
+            continue
+        for layer in root.descendants():
+            if (
+                layer.is_visible()
+                and _is_named_line_layer(layer.name)
+            ):
+                return True
+    return False
+
+
 def _has_sparse_alpha(layer, psd):
     if psd.depth not in {8, 16}:
         return False
@@ -244,6 +261,64 @@ def _has_sparse_alpha(layer, psd):
     channel_max = 255 if psd.depth == 8 else 65535
     opaque = float(np.mean(alpha >= channel_max - 1))
     return 0.002 <= occupied <= 0.25 and opaque <= 0.03
+
+
+def _has_authored_line_alpha(layer):
+    if layer.width * layer.height < 1_000:
+        return False
+    image = layer.topil()
+    if image is None:
+        return False
+    rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+    alpha = rgba[..., 3]
+    solid = alpha >= 8
+    occupied = float(np.mean(solid))
+    if not 0.002 <= occupied <= 0.35:
+        return False
+    pixels = rgba[..., :3][solid]
+    chroma = np.ptp(pixels, axis=1)
+    dark_or_neutral = (np.max(pixels, axis=1) <= 96) | (chroma <= 16)
+    if float(np.mean(dark_or_neutral)) < 0.8:
+        return False
+    interior = np.array(
+        Image.fromarray(
+            solid.astype(np.uint8) * 255,
+            "L",
+        ).filter(ImageFilter.MinFilter(7)),
+        dtype=np.uint8,
+    ) > 0
+    interior_ratio = float(np.count_nonzero(interior)) / max(
+        1, int(np.count_nonzero(solid)))
+    return interior_ratio <= 0.4
+
+
+def _paired_component_line_layers(psd):
+    candidates = []
+    for group in psd.descendants():
+        if not group.is_group() or not group.is_visible():
+            continue
+        leaves = [
+            layer for layer in group
+            if (
+                not layer.is_group()
+                and layer.is_visible()
+                and layer.bbox != (0, 0, 0, 0)
+            )
+        ]
+        has_colour_sibling = any(
+            any(word in layer.name.casefold() for word in ("color", "colour", "fill"))
+            for layer in leaves
+        )
+        if not has_colour_sibling:
+            continue
+        group_key = _object_key(group.name)
+        for layer in leaves:
+            if (
+                _object_key(layer.name) == group_key
+                and _has_authored_line_alpha(layer)
+            ):
+                candidates.append(layer)
+    return candidates
 
 
 def _uses_clean_style(psd):
@@ -321,6 +396,11 @@ def _object_key(name):
     value = re.sub(r"[^a-z0-9]+", "", name.casefold())
     value = re.sub(r"\d+$", "", value)
     return value[:-1] if value.endswith("s") else value
+
+
+def _is_colour_group_name(name):
+    key = _object_key(name)
+    return key.endswith("color") or key.endswith("colour")
 
 
 def _fl102_semantic_ink_layers(psd):
@@ -422,7 +502,7 @@ def _unpaired_colour_shape_layers(psd, authored_line_ids):
     """
     candidates = []
 
-    def walk(group, ancestors_visible=True):
+    def walk(group, ancestors_visible=True, covered_by_composite=False):
         group_visible = ancestors_visible and (
             group is psd or group.is_visible()
         )
@@ -437,6 +517,10 @@ def _unpaired_colour_shape_layers(psd, authored_line_ids):
                 and layer.bbox != (0, 0, 0, 0)
             )
         ]
+        composite_leaves = [
+            layer for layer in leaves
+            if "png" in layer.name.casefold()
+        ]
         has_authored_line = (
             group is not psd
             and _is_named_line_layer(group.name)
@@ -445,8 +529,8 @@ def _unpaired_colour_shape_layers(psd, authored_line_ids):
             or _is_named_line_layer(layer.name)
             for layer in leaves
         )
-        if not has_authored_line:
-            for layer in leaves:
+        if not has_authored_line and not covered_by_composite:
+            for layer in composite_leaves or leaves:
                 area = layer.width * layer.height
                 if area < 1_000:
                     continue
@@ -472,7 +556,11 @@ def _unpaired_colour_shape_layers(psd, authored_line_ids):
                     candidates.append(layer)
         for layer in children:
             if layer.is_group():
-                walk(layer, group_visible)
+                walk(
+                    layer,
+                    group_visible,
+                    covered_by_composite or bool(composite_leaves),
+                )
 
     art_roots = [
         layer for layer in psd
@@ -857,6 +945,53 @@ def _simplified_character_edges(rgba):
     return edges
 
 
+def _thin_colour_edges(rgba, include_alpha=True, threshold=12):
+    """Create fixed-width one-sided boundaries for flattened cel graphics."""
+    rgb = np.array(
+        Image.fromarray(rgba[..., :3], "RGB").filter(
+            ImageFilter.MedianFilter(3)),
+        dtype=np.int16,
+    )
+    alpha = rgba[..., 3] >= 8
+    edge = np.zeros(alpha.shape, dtype=bool)
+    horizontal = np.max(
+        np.abs(rgb[:, 1:] - rgb[:, :-1]),
+        axis=2,
+    ) >= threshold
+    vertical = np.max(
+        np.abs(rgb[1:] - rgb[:-1]),
+        axis=2,
+    ) >= threshold
+    if include_alpha:
+        edge[:, :-1] |= horizontal
+        edge[:-1, :] |= vertical
+        edge[:, :-1] |= alpha[:, :-1] ^ alpha[:, 1:]
+        edge[:-1, :] |= alpha[:-1, :] ^ alpha[1:, :]
+    else:
+        edge[:, :-1] |= horizontal & alpha[:, :-1] & alpha[:, 1:]
+        edge[:-1, :] |= vertical & alpha[:-1, :] & alpha[1:, :]
+    support = np.array(
+        Image.fromarray(
+            alpha.astype(np.uint8) * 255,
+            "L",
+        ).filter(ImageFilter.MaxFilter(3)),
+        dtype=np.uint8,
+    ) > 0
+    edge &= support
+    edge = _remove_short_components(
+        edge,
+        min_length=8,
+        count_area=False,
+    )
+    return np.array(
+        Image.fromarray(
+            edge.astype(np.uint8) * 255,
+            "L",
+        ).filter(ImageFilter.MaxFilter(3)),
+        dtype=np.uint8,
+    )
+
+
 def _remove_solid_ink_interiors(alpha):
     """Keep strokes and filled-shape boundaries, but remove colour interiors."""
     core = alpha >= 8
@@ -877,6 +1012,41 @@ def _remove_solid_ink_interiors(alpha):
     )
     out[shell] = 255
     return out
+
+
+def _remove_mixed_line_fill_interiors(alpha):
+    """Remove embedded fills without changing normal authored strokes."""
+    core = alpha >= 8
+    eroded = np.array(
+        Image.fromarray(
+            core.astype(np.uint8) * 255,
+            "L",
+        ).filter(ImageFilter.MinFilter(7)),
+        dtype=np.uint8,
+    ) >= 128
+    shell = core & ~eroded
+    out = np.array(
+        Image.fromarray(
+            shell.astype(np.uint8) * 255,
+            "L",
+        ).filter(ImageFilter.GaussianBlur(0.45)),
+        dtype=np.uint8,
+    )
+    out[shell] = 255
+    return out
+
+
+def _inside_mixed_line_container(layer):
+    parent = layer.parent
+    while parent is not None:
+        if parent.is_group() and _is_named_line_layer(parent.name):
+            return any(
+                child.is_group()
+                and _is_colour_group_name(child.name)
+                for child in parent
+            )
+        parent = parent.parent
+    return False
 
 
 def _rendered_edge_support(rgba):
@@ -918,6 +1088,43 @@ def _rendered_edge_support(rgba):
     return support
 
 
+def _visible_colour_edge_support(rgba):
+    """Return narrow boundaries that survive the final visible composite."""
+    sharp = np.zeros(rgba.shape[:2], dtype=np.uint8)
+    for channel in range(3):
+        image = Image.fromarray(rgba[..., channel], "L")
+        high = np.array(
+            image.filter(ImageFilter.MaxFilter(3)),
+            dtype=np.uint8,
+        )
+        low = np.array(
+            image.filter(ImageFilter.MinFilter(3)),
+            dtype=np.uint8,
+        )
+        np.maximum(sharp, high - low, out=sharp)
+    support = Image.fromarray(
+        (sharp >= 2).astype(np.uint8) * 255,
+        "L",
+    ).filter(ImageFilter.MaxFilter(3))
+    return np.array(support, dtype=np.uint8) > 0
+
+
+def _retain_visible_edge_runs(edges, visible_support, bridge=4):
+    """Keep visible candidate runs and close short support dropouts."""
+    candidate = edges >= 8
+    keep = candidate & visible_support
+    for _ in range(bridge):
+        expanded = np.array(
+            Image.fromarray(
+                keep.astype(np.uint8) * 255,
+                "L",
+            ).filter(ImageFilter.MaxFilter(3)),
+            dtype=np.uint8,
+        ) > 0
+        keep |= candidate & expanded
+    return np.where(keep, edges, 0).astype(np.uint8)
+
+
 def _keep_visible_outline(outline, layer, edge_support):
     """Suppress authored colour boundaries hidden by layers above them."""
     if edge_support is None:
@@ -957,9 +1164,14 @@ def _named_line_alpha(session):
         for layer in nodes:
             effectively_visible = ancestors_visible and layer.is_visible()
             if layer.is_group():
+                next_line_group = (
+                    line_group or _is_named_line_layer(layer.name)
+                )
+                if _is_colour_group_name(layer.name):
+                    next_line_group = False
                 walk(
                     layer,
-                    line_group or _is_named_line_layer(layer.name),
+                    next_line_group,
                     effectively_visible,
                 )
             elif (
@@ -967,7 +1179,13 @@ def _named_line_alpha(session):
                 and not _is_non_art_line_layer(layer.name)
                 and (
                     _is_named_line_layer(layer.name)
-                    or (line_group and _has_sparse_alpha(layer, psd))
+                    or (
+                    line_group
+                    and (
+                        _has_sparse_alpha(layer, psd)
+                        or _has_authored_line_alpha(layer)
+                    )
+                    )
                 )
                 and layer.bbox != (0, 0, 0, 0)
             ):
@@ -976,6 +1194,10 @@ def _named_line_alpha(session):
     walk(psd)
     candidate_ids = {id(layer) for layer in candidates}
     for layer in _nested_art_line_layers(psd):
+        if id(layer) not in candidate_ids:
+            candidates.append(layer)
+            candidate_ids.add(id(layer))
+    for layer in _paired_component_line_layers(psd):
         if id(layer) not in candidate_ids:
             candidates.append(layer)
             candidate_ids.add(id(layer))
@@ -1004,6 +1226,21 @@ def _named_line_alpha(session):
         if id(layer) not in silhouette_ids:
             silhouette_layers.append(layer)
             silhouette_ids.add(id(layer))
+    graphic_layers = [
+        layer for layer in psd.descendants()
+        if (
+            not layer.is_group()
+            and layer.is_visible()
+            and layer.bbox != (0, 0, 0, 0)
+            and "png" in layer.name.casefold()
+            and id(layer) in silhouette_ids
+        )
+    ]
+    graphic_ids = {id(layer) for layer in graphic_layers}
+    silhouette_layers = [
+        layer for layer in silhouette_layers
+        if id(layer) not in graphic_ids
+    ]
     simplified_layers = _prop_background_plates(psd)
     character_layers = _reference_character_layers(psd)
     if (
@@ -1011,6 +1248,7 @@ def _named_line_alpha(session):
         and not silhouette_layers
         and not simplified_layers
         and not character_layers
+        and not graphic_layers
     ):
         return None
 
@@ -1027,11 +1265,21 @@ def _named_line_alpha(session):
     # a 1.1 GB PSB peak above 3 GB even though its 26 Line layers occupy a
     # small fraction of the canvas.
     out = np.zeros((psd.height, psd.width), dtype=np.uint8)
+    seen_candidate_content = set()
     for layer in candidates:
         image = layer.topil()
         if image is None:
             continue
         alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+        content_key = (
+            tuple(layer.bbox),
+            hashlib.sha256(alpha.tobytes()).digest(),
+        )
+        if content_key in seen_candidate_content:
+            continue
+        seen_candidate_content.add(content_key)
+        if _inside_mixed_line_container(layer):
+            alpha = _remove_mixed_line_fill_interiors(alpha)
         alpha = _remove_horizontal_guides(alpha, psd.width)
         if id(layer) in outline_only_ids:
             alpha = _remove_solid_ink_interiors(alpha)
@@ -1094,6 +1342,14 @@ def _named_line_alpha(session):
         edges = _simplified_character_edges(rgba)
         _composite_layer_alpha(out, layer, edges)
 
+    for layer in graphic_layers:
+        image = layer.topil()
+        if image is None:
+            continue
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+        edges = _thin_colour_edges(rgba)
+        _composite_layer_alpha(out, layer, edges)
+
     if not np.any(out):
         return None
     return (
@@ -1102,6 +1358,7 @@ def _named_line_alpha(session):
         len(silhouette_layers),
         len(simplified_layers),
         len(character_layers),
+        len(graphic_layers),
     )
 
 
@@ -1399,6 +1656,96 @@ def _composite_residual_alpha(session, line_alpha, min_length):
     }
 
 
+def _turn_colour_boundary_alpha(session, line_alpha):
+    """Add clean internal fill boundaries without altering authored lines."""
+    psd = session["psd"]
+    out = np.zeros(line_alpha.shape, dtype=np.uint8)
+    source_support = line_alpha >= 8
+    seen = set()
+    for root in psd:
+        if (
+            not root.is_group()
+            or not root.is_visible()
+            or _object_key(root.name) not in {"turn", "turnaround"}
+        ):
+            continue
+        root_rendered = root.composite()
+        if root_rendered is None:
+            continue
+        root_rgba = np.array(
+            root_rendered.convert("RGBA"),
+            dtype=np.uint8,
+        )
+        visible_support = _visible_colour_edge_support(root_rgba)
+        root_left, root_top, _, _ = root.bbox
+        for group in root.descendants():
+            if (
+                not group.is_group()
+                or not group.is_visible()
+                or not _is_colour_group_name(group.name)
+                or group.bbox == (0, 0, 0, 0)
+            ):
+                continue
+            rendered = group.composite()
+            if rendered is None:
+                continue
+            rgba = np.array(rendered.convert("RGBA"), dtype=np.uint8)
+            content_key = (
+                tuple(group.bbox),
+                hashlib.sha256(rgba.tobytes()).digest(),
+            )
+            if content_key in seen:
+                continue
+            seen.add(content_key)
+            edges = _thin_colour_edges(
+                rgba,
+                include_alpha=False,
+                threshold=8,
+            )
+            left, top, right, bottom = group.bbox
+            clip_left = max(0, left)
+            clip_top = max(0, top)
+            clip_right = min(psd.width, right)
+            clip_bottom = min(psd.height, bottom)
+            if clip_right <= clip_left or clip_bottom <= clip_top:
+                continue
+            local_left = clip_left - left
+            local_top = clip_top - top
+            local_right = local_left + (clip_right - clip_left)
+            local_bottom = local_top + (clip_bottom - clip_top)
+            target = out[clip_top:clip_bottom, clip_left:clip_right]
+            addition = edges[
+                local_top:local_bottom,
+                local_left:local_right,
+            ].copy()
+            local_source_support = source_support[
+                clip_top:clip_bottom,
+                clip_left:clip_right,
+            ]
+            addition[local_source_support] = 0
+            support_left = clip_left - root_left
+            support_top = clip_top - root_top
+            support_right = support_left + (clip_right - clip_left)
+            support_bottom = support_top + (clip_bottom - clip_top)
+            source_near = np.array(
+                Image.fromarray(
+                    local_source_support.astype(np.uint8) * 255,
+                    "L",
+                ).filter(ImageFilter.MaxFilter(7)),
+                dtype=np.uint8,
+            ) > 0
+            strict_visible_support = visible_support[
+                support_top:support_bottom,
+                support_left:support_right,
+            ] & ~source_near
+            addition = _retain_visible_edge_runs(
+                addition,
+                strict_visible_support,
+            )
+            np.maximum(target, addition, out=target)
+    return out
+
+
 def extract_image_line(session, image_line):
     opts = normalize_options(image_line)
     cache_key = None
@@ -1423,13 +1770,26 @@ def extract_image_line(session, image_line):
             silhouette_layer_count,
             simplified_background_count,
             flattened_character_count,
+            flattened_graphic_count,
         ) = named_lines
         residual_started = time.perf_counter()
-        residual, residual_profile = _composite_residual_alpha(
-            session,
-            mask_u8,
-            opts["minLength"],
-        )
+        if _uses_explicit_turn_line_system(session["psd"]):
+            residual = _turn_colour_boundary_alpha(session, mask_u8)
+            residual_profile = {
+                "compositeEdgeCandidatePixels": int(
+                    np.count_nonzero(residual >= 32)),
+                "compositeResidualPixels": int(
+                    np.count_nonzero(residual >= 32)),
+                "compositeEdgeCoverageBefore": 1.0,
+                "compositeEdgeCoverageAfter": 1.0,
+                "compositeResidualMode": "internalTurnColourBoundaries",
+            }
+        else:
+            residual, residual_profile = _composite_residual_alpha(
+                session,
+                mask_u8,
+                opts["minLength"],
+            )
         np.maximum(mask_u8, residual, out=mask_u8)
         mask_u8 = np.ascontiguousarray(mask_u8)
         finished = time.perf_counter()
@@ -1458,6 +1818,7 @@ def extract_image_line(session, image_line):
             "silhouetteLayerCount": silhouette_layer_count,
             "simplifiedBackgroundLayerCount": simplified_background_count,
             "flattenedCharacterLayerCount": flattened_character_count,
+            "flattenedGraphicLayerCount": flattened_graphic_count,
             **residual_profile,
         }
         if cache_key is not None:
@@ -1612,17 +1973,24 @@ def image_line_profile(session, image_line):
     return dict(profile) if profile is not None else None
 
 
-def mask_to_rgba(mask, line_color):
+def mask_to_rgba(mask, line_color, preserve_antialias=False):
     rgb = parse_line_color(line_color)
     out = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
     out[..., 0], out[..., 1], out[..., 2] = rgb
-    out[..., 3] = _UNIFORM_LINE_ALPHA_LUT[mask]
+    if preserve_antialias:
+        out[..., 3] = np.where(mask >= 64, 255, mask).astype(np.uint8)
+    else:
+        out[..., 3] = _UNIFORM_LINE_ALPHA_LUT[mask]
     return out
 
 
 def render_image_line_preview(session, out_dir, max_size, image_line, line_color=None):
     mask, mask_hash = extract_image_line(session, image_line)
-    rgba = mask_to_rgba(mask, line_color)
+    rgba = mask_to_rgba(
+        mask,
+        line_color,
+        preserve_antialias=_uses_explicit_turn_line_system(session["psd"]),
+    )
     img = Image.fromarray(rgba, "RGBA")
     img.thumbnail((int(max_size), int(max_size)))
     os.makedirs(out_dir, exist_ok=True)
@@ -1640,7 +2008,11 @@ def export_image_line(session, output_path, output_format, image_line, line_colo
     if os.path.exists(long_path(output_path)) and not overwrite:
         raise FileExistsError(f"output already exists: {output_path}")
     mask, mask_hash = extract_image_line(session, image_line)
-    rgba = mask_to_rgba(mask, line_color)
+    rgba = mask_to_rgba(
+        mask,
+        line_color,
+        preserve_antialias=_uses_explicit_turn_line_system(session["psd"]),
+    )
     export_mask = rgba[..., 3]
     expected_pixels = rgba
     if output_format == "png":
