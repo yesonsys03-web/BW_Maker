@@ -52,7 +52,7 @@ jobs:
         run: pwsh -File scripts/build-engine.ps1
 
       - name: Build installers
-        run: pnpm run tauri build -- --bundles nsis msi
+        run: pnpm tauri build --bundles nsis msi
 
       # 릴리스 태그/이름의 단일 출처는 tauri.conf.json의 version이다. 태그 push로
       # 들어온 경우에도 같은 값을 쓰므로 태그와 앱 버전이 갈라지지 않는다.
