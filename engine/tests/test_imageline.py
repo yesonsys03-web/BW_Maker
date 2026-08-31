@@ -895,6 +895,11 @@ def test_turn_colour_boundary_reaches_authored_line_without_crossing(
             "RGBA",
         ),
     )
+    monkeypatch.setattr(
+        imageline,
+        "_document_rgba",
+        lambda session: final_rendered.copy(),
+    )
     mask, _ = extract_image_line(session, OPTS)
     assert mask[20:25, 34].min() > 0
     assert mask[25, 25:45].min() == 255
@@ -931,6 +936,11 @@ def test_occluded_turn_colour_boundary_is_not_added(tmp_path, monkeypatch):
         return Image.fromarray(image.copy(), "RGBA")
 
     monkeypatch.setattr(group_type, "composite", composite)
+    monkeypatch.setattr(
+        imageline,
+        "_document_rgba",
+        lambda session: uniform.copy(),
+    )
     mask, _ = extract_image_line(session, OPTS)
     assert mask[20:25, 34].max() == 0
     assert mask[25, 25:45].min() == 255
@@ -944,6 +954,49 @@ def test_visible_colour_boundary_short_gaps_are_bridged():
     support[17:28, 10] = True
     kept = imageline._retain_visible_edge_runs(edges, support)
     assert kept[2:28, 10].min() == 255
+
+
+def test_direct_hair_fill_layers_get_internal_boundaries(
+        tmp_path, monkeypatch):
+    from pytoshop.user import nested_layers
+
+    base = np.zeros((50, 70, 4), dtype=np.uint8)
+    base[5:45, 10:60, :] = [220, 120, 90, 255]
+    detail = np.zeros((50, 70, 4), dtype=np.uint8)
+    detail[5:45, 35:60, :] = [180, 80, 70, 255]
+    line = np.zeros((50, 70, 4), dtype=np.uint8)
+    line[25, 10:60, :] = [20, 20, 20, 255]
+    path = tmp_path / "direct-hair-colour.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURN", layers=[
+            nested_layers.Group(name="HAIR", layers=[
+                _rgba_layer("hair base", base),
+                _rgba_layer("hair detail", detail),
+                _rgba_layer("hair line", line),
+            ]),
+        ]),
+    ], width=70, height=50)
+    rendered = base.copy()
+    rendered[5:45, 35:60, :] = [180, 80, 70, 255]
+    rendered[25, 10:60, :] = [20, 20, 20, 255]
+    session = _session(path)
+    hair = next(
+        layer for layer in session["psd"].descendants()
+        if layer.is_group() and layer.name == "HAIR"
+    )
+    monkeypatch.setattr(
+        type(hair),
+        "composite",
+        lambda self: Image.fromarray(rendered.copy(), "RGBA"),
+    )
+    monkeypatch.setattr(
+        imageline,
+        "_document_rgba",
+        lambda session: rendered.copy(),
+    )
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[10:20, 34].min() > 0
+    assert mask[25, 10:60].min() > 0
 
 
 def test_fill_inside_mixed_line_container_is_hollowed(tmp_path):

@@ -1090,23 +1090,41 @@ def _rendered_edge_support(rgba):
 
 def _visible_colour_edge_support(rgba):
     """Return narrow boundaries that survive the final visible composite."""
-    sharp = np.zeros(rgba.shape[:2], dtype=np.uint8)
-    for channel in range(3):
-        image = Image.fromarray(rgba[..., channel], "L")
-        high = np.array(
-            image.filter(ImageFilter.MaxFilter(3)),
-            dtype=np.uint8,
-        )
-        low = np.array(
-            image.filter(ImageFilter.MinFilter(3)),
-            dtype=np.uint8,
-        )
-        np.maximum(sharp, high - low, out=sharp)
-    support = Image.fromarray(
-        (sharp >= 2).astype(np.uint8) * 255,
-        "L",
-    ).filter(ImageFilter.MaxFilter(3))
-    return np.array(support, dtype=np.uint8) > 0
+    height, width = rgba.shape[:2]
+    support = np.zeros((height, width), dtype=bool)
+    tile_size = 512
+    overlap = 4
+    for y0 in range(0, height, tile_size):
+        y1 = min(height, y0 + tile_size)
+        ey0, ey1 = max(0, y0 - overlap), min(height, y1 + overlap)
+        for x0 in range(0, width, tile_size):
+            x1 = min(width, x0 + tile_size)
+            ex0, ex1 = max(0, x0 - overlap), min(width, x1 + overlap)
+            tile = rgba[ey0:ey1, ex0:ex1]
+            sharp = np.zeros(tile.shape[:2], dtype=np.uint8)
+            for channel in range(3):
+                image = Image.fromarray(tile[..., channel], "L")
+                high = np.array(
+                    image.filter(ImageFilter.MaxFilter(3)),
+                    dtype=np.uint8,
+                )
+                low = np.array(
+                    image.filter(ImageFilter.MinFilter(3)),
+                    dtype=np.uint8,
+                )
+                np.maximum(sharp, high - low, out=sharp)
+            expanded = np.array(
+                Image.fromarray(
+                    (sharp >= 2).astype(np.uint8) * 255,
+                    "L",
+                ).filter(ImageFilter.MaxFilter(3)),
+                dtype=np.uint8,
+            ) > 0
+            support[y0:y1, x0:x1] = expanded[
+                y0 - ey0:y1 - ey0,
+                x0 - ex0:x1 - ex0,
+            ]
+    return support
 
 
 def _retain_visible_edge_runs(edges, visible_support, bridge=4):
@@ -1661,31 +1679,66 @@ def _turn_colour_boundary_alpha(session, line_alpha):
     psd = session["psd"]
     out = np.zeros(line_alpha.shape, dtype=np.uint8)
     source_support = line_alpha >= 8
+    visible_support = _visible_colour_edge_support(
+        _document_rgba(session))
     seen = set()
     for root in psd:
         if (
             not root.is_group()
             or not root.is_visible()
-            or _object_key(root.name) not in {"turn", "turnaround"}
+            or _object_key(root.name) in {
+                "template", "extraref", "colorpalette", "colourpalette",
+            }
         ):
             continue
-        root_rendered = root.composite()
-        if root_rendered is None:
-            continue
-        root_rgba = np.array(
-            root_rendered.convert("RGBA"),
-            dtype=np.uint8,
-        )
-        visible_support = _visible_colour_edge_support(root_rgba)
-        root_left, root_top, _, _ = root.bbox
+
+        sources = []
         for group in root.descendants():
             if (
                 not group.is_group()
                 or not group.is_visible()
-                or not _is_colour_group_name(group.name)
                 or group.bbox == (0, 0, 0, 0)
             ):
                 continue
+            parent = group.parent
+            effectively_visible = True
+            while parent is not None and parent is not psd:
+                effectively_visible &= parent.is_visible()
+                parent = parent.parent
+            if not effectively_visible:
+                continue
+            if _is_colour_group_name(group.name):
+                sources.append(group)
+                continue
+            direct_leaves = [
+                layer for layer in group
+                if (
+                    not layer.is_group()
+                    and layer.is_visible()
+                    and layer.bbox != (0, 0, 0, 0)
+                )
+            ]
+            direct_lines = [
+                layer for layer in direct_leaves
+                if _is_named_line_layer(layer.name)
+            ]
+            direct_fills = [
+                layer for layer in direct_leaves
+                if (
+                    not _is_named_line_layer(layer.name)
+                    and not _is_colour_group_name(layer.name)
+                )
+            ]
+            if (
+                len(direct_fills) >= 2
+                and (
+                    _is_named_line_layer(group.name)
+                    or direct_lines
+                )
+            ):
+                sources.append(group)
+
+        for group in sources:
             rendered = group.composite()
             if rendered is None:
                 continue
@@ -1723,10 +1776,6 @@ def _turn_colour_boundary_alpha(session, line_alpha):
                 clip_left:clip_right,
             ]
             addition[local_source_support] = 0
-            support_left = clip_left - root_left
-            support_top = clip_top - root_top
-            support_right = support_left + (clip_right - clip_left)
-            support_bottom = support_top + (clip_bottom - clip_top)
             source_near = np.array(
                 Image.fromarray(
                     local_source_support.astype(np.uint8) * 255,
@@ -1735,8 +1784,8 @@ def _turn_colour_boundary_alpha(session, line_alpha):
                 dtype=np.uint8,
             ) > 0
             strict_visible_support = visible_support[
-                support_top:support_bottom,
-                support_left:support_right,
+                clip_top:clip_bottom,
+                clip_left:clip_right,
             ] & ~source_near
             addition = _retain_visible_edge_runs(
                 addition,
