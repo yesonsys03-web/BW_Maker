@@ -59,13 +59,13 @@ import tempfile
 from collections import deque
 from pathlib import Path
 
-from psd_tools import PSDImage
 from psd_tools.constants import ColorMode
 
 from .linedetect import (judge_drawn_lines, measure_strokes,
                          measure_strokes_rgba, select_drawn_line_candidates)
 from .matching import match_preset, preset_operations
 from .render import _preview_tile, preview_scale
+from .session import is_flattened_image_path, open_document
 from .tree import build_tree
 
 
@@ -208,13 +208,14 @@ def warm_file(path, max_size, out, edge_lines=None, presets=None,
     from .rpc import _edge_settings_key, render_preview_cached
 
     mtime = os.path.getmtime(path)
-    psd = PSDImage.open(path)
+    psd = open_document(path)
     # 메인 엔진(session.open)과 같은 제한 — 거기서 못 여는 파일을 여기서 데워도
     # 쓸 사람이 없다.
     if psd.color_mode != ColorMode.RGB:
         raise ValueError(f"unsupported color mode: {psd.color_mode!r} (RGB only)")
     built = build_tree(psd)
     session = {"psd": psd, "path": str(path), "mtime": mtime,
+               "flattened_image": is_flattened_image_path(path),
                "tree": built["tree"], "layers_by_id": built["layers_by_id"]}
     scale = preview_scale(psd, max_size)
     leaves = [lid for lid, layer in built["layers_by_id"].items()
@@ -395,7 +396,7 @@ def prepare_file(path, job, max_size, out):
         preset = job["preset"]
         max_size = job.get("maxSize", max_size)
         mtime = os.path.getmtime(path)
-        psd = PSDImage.open(path)
+        psd = open_document(path)
         # 메인 엔진(session.open)과 같은 제한 — 거기서 못 여는 파일을 여기서
         # 준비해도 쓸 사람이 없다.
         if psd.color_mode != ColorMode.RGB:
@@ -438,6 +439,7 @@ def prepare_file(path, job, max_size, out):
         result["documentView"] = bool(visible) and set(visible) == set(initial)
         if args is not None:
             session = {"psd": psd, "path": str(path), "mtime": mtime,
+                       "flattened_image": is_flattened_image_path(path),
                        "tree": tree, "layers_by_id": built["layers_by_id"]}
             result["pngPath"] = render_preview_cached(
                 session, str(_prepare_png_dir()), args["visible"], max_size,

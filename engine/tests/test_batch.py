@@ -1,6 +1,7 @@
 import os
 import shutil
 
+import numpy as np
 from psd_tools import PSDImage
 
 from psd_engine.batch import run_batch
@@ -123,7 +124,7 @@ def test_batch_image_line_bypasses_no_match_failure(fixture_psd, tmp_path, monke
     )]
 
 
-def test_batch_image_line_accepts_one_layer_psd(fixture_psd, tmp_path):
+def test_batch_image_line_psd_has_line_over_white_background(fixture_psd, tmp_path):
     preset = {
         **PRESET,
         "outputFormat": "psd",
@@ -137,7 +138,11 @@ def test_batch_image_line_accepts_one_layer_psd(fixture_psd, tmp_path):
 
     assert r["results"][0]["ok"] is True, r["results"][0].get("error")
     assert r["results"][0]["outputPath"].endswith(".psd")
-    assert len(list(PSDImage.open(r["results"][0]["outputPath"]))) == 1
+    layers = list(PSDImage.open(r["results"][0]["outputPath"]))
+    assert [layer.name for layer in layers] == ["color_to_line", "Background"]
+    assert (
+        np.array(layers[1].topil().convert("RGBA"), dtype=np.uint8) == 255
+    ).all()
 
 
 def test_batch_image_line_rejects_jpg_before_matching(fixture_psd, tmp_path, monkeypatch):

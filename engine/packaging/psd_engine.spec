@@ -29,8 +29,10 @@ HERE = os.path.abspath(SPECPATH)  # noqa: F821 — PyInstaller가 spec 네임스
 # 실행 모드를 함수 안 임포트로 가르므로(--warm-worker → warmworker, 그 외 → rpc),
 # 정적 분석이 놓치면 그 모드만 사용자 PC에서 죽는다 — 같은 "싸고 확실하다" 판단이다.
 hiddenimports = (collect_submodules("psd_engine")
-                 + collect_submodules("psd_tools") + collect_submodules("pytoshop"))
-datas = collect_data_files("psd_tools") + collect_data_files("pytoshop")
+                 + collect_submodules("psd_tools") + collect_submodules("pytoshop")
+                 + collect_submodules("onnxruntime"))
+datas = (collect_data_files("psd_engine") + collect_data_files("psd_tools")
+         + collect_data_files("pytoshop"))
 
 a = Analysis(
     [os.path.join(HERE, "engine_main.py")],

@@ -31,6 +31,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 from psd_engine.patches import apply_pytoshop_patches
 from pytoshop import enums
 from pytoshop.user import nested_layers
@@ -194,6 +195,34 @@ def main():
             exported["verification"]["ok"] is True,
             json.dumps(exported["verification"], ensure_ascii=False)[:500],
         )
+
+        # 평면 이미지 전용 ONNX 모델과 가중치가 번들에 함께 들어왔는지 실제
+        # inference까지 실행한다. import 성공만 보면 모델 파일 누락을 못 잡는다.
+        flat = work / "한글 폴더" / "평면 배경.png"
+        pixels = np.full((64, 96, 4), [210, 150, 90, 255], np.uint8)
+        pixels[12:52, 48, :3] = [70, 35, 20]
+        Image.fromarray(pixels, "RGBA").save(flat)
+        response = engine.call("open_psd", path=str(flat))
+        check("평면 PNG 열기", "result" in response, response.get("error"))
+        flat_session = response["result"]["sessionId"]
+        flat_out = work / "한글 폴더" / "평면 배경_LINE.png"
+        response = engine.call(
+            "export_image_line",
+            sessionId=flat_session,
+            outputPath=str(flat_out),
+            outputFormat="png",
+            imageLine={
+                "enabled": True,
+                "version": 1,
+                "darkThreshold": 254,
+                "boundaryThreshold": 32,
+                "minLength": 8,
+                "width": 1,
+            },
+            lineColor="#3d3d3d",
+        )
+        check("동결 ONNX 평면 라인 추출", "result" in response, response.get("error"))
+        check("평면 라인 산출 파일 존재", flat_out.is_file(), str(flat_out))
 
         # 윈도우 MAX_PATH(260자)를 넘는 경로. `\\?\` 접두사가 없으면 여기서 죽는다.
         # 이 맥에서는 확인할 수 없고 Windows 러너에서만 진짜로 검증된다.

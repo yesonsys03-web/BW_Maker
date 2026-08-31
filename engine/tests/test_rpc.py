@@ -134,8 +134,9 @@ def test_image_line_preview_and_export_share_mask_hash_over_rpc(tmp_path):
         assert Image.open(preview["pngPath"]).mode == "RGBA"
         arr = np.array(Image.open(out).convert("RGBA"))
         assert arr.shape == (18, 20, 4)
-        assert arr[0, 0, 3] == 0
-        assert arr[..., 3].max() > 0
+        assert arr[0, 0].tolist() == [255, 255, 255, 255]
+        assert (arr[..., 3] == 255).all()
+        assert (arr[..., :3] < 255).any()
     finally:
         eng.close()
 

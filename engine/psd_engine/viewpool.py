@@ -261,10 +261,10 @@ def child_main(stdin=None):
     자식·같은 플래그를 쓴다: 둘 다 "판을 열고, 몫을 굽고, 디스크 캐시에 넣는"
     일이라 프로세스 모양이 같고, 진입점 분기(entry.main)를 하나 더 늘리지 않는다.
     """
-    from psd_tools import PSDImage
     from psd_tools.constants import ColorMode
 
     from .edges import EDGE_DEFAULTS, plan_overlays
+    from .session import open_document
     from .tree import build_tree
 
     # stdin을 **UTF-8로 못박아** 읽는다. 부모는 잡을 UTF-8 바이트로 써 보내는데
@@ -282,7 +282,7 @@ def child_main(stdin=None):
         return 0
     job = json.loads(raw)
     path = job["path"]
-    psd = PSDImage.open(path)
+    psd = open_document(path)
     if psd.color_mode != ColorMode.RGB:
         raise ValueError(f"unsupported color mode: {psd.color_mode!r} (RGB only)")
     built = build_tree(psd)

@@ -3,10 +3,30 @@ import itertools
 import os
 from collections import OrderedDict
 
+from PIL import Image
 from psd_tools import PSDImage
+from psd_tools.api.layers import PixelLayer
 from psd_tools.constants import ColorMode
 
 from .tree import build_tree
+
+
+FLATTENED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+
+def is_flattened_image_path(path):
+    return os.path.splitext(str(path))[1].lower() in FLATTENED_IMAGE_EXTENSIONS
+
+
+def open_document(path):
+    if is_flattened_image_path(path):
+        with Image.open(path) as image:
+            rgba = image.convert("RGBA")
+            psd = PSDImage.new("RGB", rgba.size, color=(255, 255, 255))
+            PixelLayer.frompil(
+                rgba, psd, name="Flattened image", top=0, left=0)
+            return psd
+    return PSDImage.open(path)
 
 
 class SessionStore:
@@ -69,7 +89,7 @@ class SessionStore:
             if s["path"] == path and s["mtime"] == mtime:
                 self._sessions.move_to_end(sid)
                 return sid
-        psd = PSDImage.open(path)
+        psd = open_document(path)
         if psd.color_mode != ColorMode.RGB:
             raise ValueError(f"unsupported color mode: {psd.color_mode!r} (RGB only)")
         # 심도는 묻지 않는다. 8비트만 받던 시절이 있었는데, 실제 납품 폴더에 16비트가
@@ -84,6 +104,7 @@ class SessionStore:
             "psd": psd,
             "path": path,
             "mtime": mtime,
+            "flattened_image": is_flattened_image_path(path),
             "tree": built["tree"],
             "nodes_by_id": built["nodes_by_id"],
             "layers_by_id": built["layers_by_id"],

@@ -445,7 +445,7 @@ export async function pathsExist(paths: string[]): Promise<boolean[]> {
 }
 
 export interface PsdScan {
-  /** Sorted, de-duplicated absolute paths of the .psd files that were found. */
+  /** Sorted, de-duplicated absolute paths of supported artwork files. */
   files: string[];
   /** True when the walk gave up early on a file-count or depth cap. */
   truncated: boolean;
@@ -454,8 +454,8 @@ export interface PsdScan {
 }
 
 /**
- * Expands a mixed list of paths into .psd files: folders are walked
- * recursively, .psd files pass straight through, everything else is dropped.
+ * Expands mixed paths into PSD/PSB/PNG/JPEG files: folders are walked
+ * recursively and unsupported files are dropped.
  * The folder button and drag & drop share it, so dropping a folder, a pile of
  * files, or both at once all follow one rule.
  *

@@ -225,7 +225,7 @@ export function FilePanel({
   }, [files]);
 
   // Folder picking and dropping funnel through here: collect_psd_files walks
-  // folders recursively, passes .psd files through, and drops the rest, so a
+  // folders recursively, passes layered and flattened artwork through, so a
   // folder, a pile of files, or both at once need no separate handling.
   const addPaths = useCallback(
     async (paths: string[]) => {
@@ -285,7 +285,10 @@ export function FilePanel({
     try {
       const selection = await open({
         multiple: true,
-        filters: [{ name: "Photoshop", extensions: ["psd", "psb"] }],
+        filters: [{
+          name: "Artwork",
+          extensions: ["psd", "psb", "png", "jpg", "jpeg"],
+        }],
       });
       if (!selection) return;
       const paths = Array.isArray(selection) ? selection : [selection];
@@ -295,7 +298,7 @@ export function FilePanel({
     }
   }
 
-  // Picking a folder pulls in every .psd beneath it, sub-folders included —
+  // Picking a folder pulls in every supported artwork file beneath it —
   // work that arrives split one folder per cut goes in with a single pick.
   async function handleBrowseFolder() {
     try {
