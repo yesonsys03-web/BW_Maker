@@ -111,6 +111,56 @@ def _document_rgba(session):
     return np.array(img.convert("RGBA"), dtype=np.uint8)
 
 
+def _artwork_rgba(session):
+    """Render the authored ART root without sibling field-guide groups."""
+    psd = session["psd"]
+    art = next((
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) == "art"
+        )
+    ), None)
+    if art is None:
+        return _document_rgba(session)
+    has_visible_field_guides = any(
+        layer is not art
+        and layer.is_group()
+        and layer.is_visible()
+        and "fieldguide" in _object_key(layer.name)
+        for layer in psd
+    )
+    if not has_visible_field_guides:
+        # With no sibling guide system, the embedded composite is the ART
+        # render Photoshop authored and is dramatically cheaper for multi-GB
+        # colour keys than recompositing every ART descendant.
+        return _document_rgba(session)
+    try:
+        rendered = art.composite(force=True, color=1.0, alpha=0.0)
+    except ImportError:
+        # Optional vector renderers are not required for ordinary extraction.
+        # The embedded full-document composite remains authoritative when an
+        # ART group contains a shape psd-tools cannot render locally.
+        return _document_rgba(session)
+    if rendered is None:
+        return _document_rgba(session)
+    local = np.array(rendered.convert("RGBA"), dtype=np.uint8)
+    out = np.zeros((psd.height, psd.width, 4), dtype=np.uint8)
+    left, top, right, bottom = art.bbox
+    clip_left = max(0, left)
+    clip_top = max(0, top)
+    clip_right = min(psd.width, right)
+    clip_bottom = min(psd.height, bottom)
+    if clip_right <= clip_left or clip_bottom <= clip_top:
+        return out
+    out[clip_top:clip_bottom, clip_left:clip_right] = local[
+        clip_top - top:clip_bottom - top,
+        clip_left - left:clip_right - left,
+    ]
+    return out
+
+
 def _flattened_signal_red(rgb):
     return (
         (rgb[..., 0] >= 160)
@@ -133,6 +183,12 @@ def _flattened_annotation_zone(rgb):
     for _ in range(2):
         expanded = expanded.filter(ImageFilter.MaxFilter(11))
     return np.array(expanded) > 0
+
+
+def _suppress_flattened_red_annotations(rgb):
+    """Suppress sparse review marks, but never red-dominant authored artwork."""
+    red_fraction = float(np.mean(_flattened_signal_red(rgb)))
+    return 0.0 < red_fraction <= 0.05
 
 
 def _flattened_line_session():
@@ -177,13 +233,25 @@ def _run_flattened_line_models(rgb):
 
 def _flattened_model_alpha(rgba):
     rgb = rgba[..., :3]
-    signal_red = _flattened_signal_red(rgb)
+    # Difference/reference renders are sometimes stored as sparse marks on a
+    # fully opaque black canvas. Feeding that canvas to the drawing model
+    # turns the background itself into one enormous line. Handle only the
+    # unambiguous case (virtually the whole image is near-black); ordinary
+    # night artwork must keep its authored polarity.
+    if float(np.mean(np.max(rgb, axis=2) <= 8)) >= 0.9:
+        alpha = np.max(rgb, axis=2).astype(np.uint16)
+        alpha = np.minimum(alpha * 8, 255).astype(np.uint8)
+        alpha[alpha < 6] = 0
+        return np.ascontiguousarray(alpha)
+    suppress_red = _suppress_flattened_red_annotations(rgb)
+    signal_red = _flattened_signal_red(rgb) if suppress_red else None
     cleaned_rgb = rgb.copy()
-    median_rgb = np.array(
-        Image.fromarray(rgb, "RGB").filter(ImageFilter.MedianFilter(7)),
-        dtype=np.uint8,
-    )
-    cleaned_rgb[signal_red] = median_rgb[signal_red]
+    if suppress_red:
+        median_rgb = np.array(
+            Image.fromarray(rgb, "RGB").filter(ImageFilter.MedianFilter(7)),
+            dtype=np.uint8,
+        )
+        cleaned_rgb[signal_red] = median_rgb[signal_red]
     height, width = rgb.shape[:2]
     scale = min(1.0, 1536 / max(width, height))
     model_width = max(8, round(width * scale / 8) * 8)
@@ -202,7 +270,8 @@ def _flattened_model_alpha(rgba):
         )
 
     alpha[alpha < 6] = 0
-    alpha[_flattened_annotation_zone(rgb)] = 0
+    if suppress_red:
+        alpha[_flattened_annotation_zone(rgb)] = 0
     return np.ascontiguousarray(alpha)
 
 
@@ -1014,6 +1083,27 @@ def _remove_solid_ink_interiors(alpha):
     return out
 
 
+def _remove_large_solid_interiors(alpha):
+    """Hollow broad fills while leaving normal authored stroke widths alone."""
+    core = alpha >= 8
+    # At production sizes a genuine line remains narrower than this even when
+    # antialiased. Large pasted silhouettes and opaque "lines" layers do not.
+    # Keeping a 15px shell preserves their visible boundary instead of
+    # deleting the object outright.
+    deep_interior = np.array(
+        Image.fromarray(
+            core.astype(np.uint8) * 255,
+            "L",
+        ).filter(ImageFilter.MinFilter(31)),
+        dtype=np.uint8,
+    ) >= 128
+    if not np.any(deep_interior):
+        return alpha
+    out = alpha.copy()
+    out[deep_interior] = 0
+    return out
+
+
 def _remove_mixed_line_fill_interiors(alpha):
     """Remove embedded fills without changing normal authored strokes."""
     core = alpha >= 8
@@ -1351,6 +1441,18 @@ def _named_line_alpha(session):
         if background_visible is not None:
             _keep_visible_outline(edges, layer, background_visible)
         _composite_layer_alpha(out, layer, edges)
+
+    cleaned = _remove_large_solid_interiors(out)
+    removed = int(np.count_nonzero(out >= 8)) - int(
+        np.count_nonzero(cleaned >= 8))
+    if removed >= round(out.size * 0.08):
+        # Some production PSDs contain pasted/opaque layers named "line".
+        # Their alpha is a filled silhouette or white-backed plate, not ink.
+        # The rendered composite is authoritative in that case and uses the
+        # same model as its flattened PNG counterpart.
+        out = _flattened_model_alpha(_document_rgba(session))
+    else:
+        out = cleaned
 
     for layer in character_layers:
         image = layer.topil()
@@ -1840,6 +1942,17 @@ def extract_image_line(session, image_line):
                 opts["minLength"],
             )
         np.maximum(mask_u8, residual, out=mask_u8)
+        artwork_rgba = _artwork_rgba(session)
+        artwork_edges = _missing_colour_edges(
+            artwork_rgba,
+            mask_u8,
+            opts["minLength"],
+        )
+        if _suppress_flattened_red_annotations(artwork_rgba[..., :3]):
+            artwork_edges[
+                _flattened_annotation_zone(artwork_rgba[..., :3])
+            ] = 0
+        np.maximum(mask_u8, artwork_edges, out=mask_u8)
         mask_u8 = np.ascontiguousarray(mask_u8)
         finished = time.perf_counter()
         algorithm_rss_end = _max_rss_bytes()
@@ -1854,7 +1967,8 @@ def extract_image_line(session, image_line):
             "suppressionUnionSeconds": 0.0,
             "totalSeconds": finished - started,
             "peakTrackedArrayBytes": int(
-                mask_u8.nbytes + residual.nbytes),
+                mask_u8.nbytes + residual.nbytes
+                + artwork_rgba.nbytes + artwork_edges.nbytes),
             "algorithmPeakRssDeltaBytes": (
                 max(0, algorithm_rss_end - algorithm_rss_start)
                 if (
@@ -1883,6 +1997,14 @@ def extract_image_line(session, image_line):
     composite_done = time.perf_counter()
     if session.get("flattened_image"):
         mask_u8 = _flattened_model_alpha(rgba)
+        missing_edges = _missing_colour_edges(
+            rgba,
+            mask_u8,
+            opts["minLength"],
+        )
+        if _suppress_flattened_red_annotations(rgba[..., :3]):
+            missing_edges[_flattened_annotation_zone(rgba[..., :3])] = 0
+        np.maximum(mask_u8, missing_edges, out=mask_u8)
         finished = time.perf_counter()
         algorithm_rss_end = _max_rss_bytes()
         result = (
@@ -1895,7 +2017,8 @@ def extract_image_line(session, image_line):
             "boundaryExtractionSeconds": finished - composite_done,
             "suppressionUnionSeconds": 0.0,
             "totalSeconds": finished - started,
-            "peakTrackedArrayBytes": int(rgba.nbytes + mask_u8.nbytes),
+            "peakTrackedArrayBytes": int(
+                rgba.nbytes + mask_u8.nbytes + missing_edges.nbytes),
             "algorithmPeakRssDeltaBytes": (
                 max(0, algorithm_rss_end - algorithm_rss_start)
                 if (

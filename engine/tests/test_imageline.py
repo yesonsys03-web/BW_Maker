@@ -613,6 +613,41 @@ def test_colour_shapes_are_scoped_to_top_level_art_group(tmp_path):
     assert mask[20, 4] == 0
 
 
+def test_artwork_render_falls_back_when_optional_shape_renderer_is_missing(
+        tmp_path, monkeypatch):
+    from pytoshop.user import nested_layers
+
+    pixels = np.zeros((20, 30, 4), dtype=np.uint8)
+    pixels[5:15, 8:22, :] = [90, 120, 180, 255]
+    path = tmp_path / "vector-art.psd"
+    write_psd(path, [
+        nested_layers.Group(name="*ART", layers=[
+            _rgba_layer("shape", pixels),
+        ]),
+        nested_layers.Group(name="*FIELDGUIDES", layers=[
+            _rgba_layer("frame", pixels),
+        ]),
+    ], width=30, height=20)
+    session = _session(path)
+    art = next(layer for layer in session["psd"] if layer.name == "*ART")
+    expected = np.full((20, 30, 4), [12, 34, 56, 255], dtype=np.uint8)
+
+    def missing_renderer(*args, **kwargs):
+        raise ImportError("aggdraw")
+
+    monkeypatch.setattr(
+        type(art),
+        "composite",
+        missing_renderer,
+    )
+    monkeypatch.setattr(
+        imageline,
+        "_document_rgba",
+        lambda _: expected,
+    )
+    assert imageline._artwork_rgba(session) is expected
+
+
 def test_clean_style_sign_and_wall_pattern_get_outlines(tmp_path):
     from pytoshop.user import nested_layers
 
@@ -654,9 +689,17 @@ def test_flattened_png_uses_the_line_model_and_exposes_one_layer(
     assert session["tree"][0]["name"] == "Flattened image"
     expected = np.zeros((30, 40), dtype=np.uint8)
     expected[8:22, 10] = 201
+    missing = np.zeros((30, 40), dtype=np.uint8)
+    missing[2, 2] = 177
     monkeypatch.setattr(
         imageline, "_flattened_model_alpha", lambda _: expected.copy())
+    monkeypatch.setattr(
+        imageline,
+        "_missing_colour_edges",
+        lambda rgba, line_alpha, min_length: missing.copy(),
+    )
     mask, _ = extract_image_line(session, OPTS)
+    expected[2, 2] = 177
     assert np.array_equal(mask, expected)
 
 
@@ -667,6 +710,38 @@ def test_flattened_review_guide_mask_rejects_red_but_not_brown_ink():
     zone = imageline._flattened_annotation_zone(rgb)
     assert zone[20, 55]
     assert not zone[20, 10]
+
+
+def test_red_dominant_artwork_is_not_mistaken_for_sparse_review_marks():
+    sparse = np.full((40, 70, 3), [220, 160, 100], dtype=np.uint8)
+    sparse[5:35, 55] = [255, 0, 0]
+    authored = np.full((40, 70, 3), [230, 20, 35], dtype=np.uint8)
+    assert imageline._suppress_flattened_red_annotations(sparse)
+    assert not imageline._suppress_flattened_red_annotations(authored)
+
+
+def test_flattened_model_extracts_sparse_marks_on_black_canvas(monkeypatch):
+    rgba = np.zeros((32, 40, 4), dtype=np.uint8)
+    rgba[..., 3] = 255
+    rgba[12:20, 18:22, :3] = 32
+
+    def model(rgb):
+        raise AssertionError("sparse difference images must bypass the model")
+
+    monkeypatch.setattr(imageline, "_run_flattened_line_models", model)
+    alpha = imageline._flattened_model_alpha(rgba)
+    assert alpha[0, 0] == 0
+    assert alpha[15, 20] == 255
+
+
+def test_large_solid_interiors_are_hollowed_without_erasing_thin_lines():
+    alpha = np.zeros((80, 100), dtype=np.uint8)
+    alpha[10:15, 5:95] = 255
+    alpha[20:75, 20:80] = 255
+    cleaned = imageline._remove_large_solid_interiors(alpha)
+    assert cleaned[12, 50] == 255
+    assert cleaned[22, 50] == 255
+    assert cleaned[47, 50] == 0
 
 
 def test_dark_lines_survive_but_large_dark_fills_are_rejected(tmp_path):
