@@ -339,6 +339,55 @@ def test_prepare_returns_the_tree_and_the_preset_match(fixture_psd):
     assert "matchedLayerIds" in r and "skippedLayers" in r and "operations" in r
 
 
+def test_prepare_runs_image_line_extraction_before_the_file_is_clicked(
+        fixture_psd, tmp_path, monkeypatch):
+    from PIL import Image
+    import psd_engine.imageline as imageline
+
+    called = []
+
+    def render(session, out_dir, max_size, image_line, line_color=None):
+        path = tmp_path / "prepared-image-line.png"
+        Image.new("RGBA", (8, 8), (0, 0, 0, 0)).save(path)
+        called.append({
+            "path": session["path"],
+            "maxSize": max_size,
+            "imageLine": image_line,
+            "lineColor": line_color,
+        })
+        return str(path), "prepared-mask"
+
+    monkeypatch.setattr(imageline, "render_image_line_preview", render)
+    image_line = {
+        "enabled": True,
+        "version": 1,
+        "darkThreshold": 254,
+        "boundaryThreshold": 32,
+        "minLength": 8,
+        "width": 1,
+    }
+    preset = {
+        **_PREPARE_PRESET,
+        "lineColor": "#3d3d3d",
+        "imageLine": image_line,
+    }
+    events = _run([json.dumps(
+        {"path": str(fixture_psd),
+         "prepare": {"preset": preset, "maxSize": 256}}
+    ) + "\n"])
+    result = [e for e in events if e["event"] == "file"][0]["result"]
+
+    assert called == [{
+        "path": str(fixture_psd),
+        "maxSize": 256,
+        "imageLine": image_line,
+        "lineColor": "#3d3d3d",
+    }]
+    assert result["pngPath"].endswith("prepared-image-line.png")
+    assert result["imageLineMaskHash"] == "prepared-mask"
+    assert result["documentView"] is False
+
+
 def test_prepare_reports_a_failure_without_killing_the_worker(tmp_path):
     missing = tmp_path / "gone.psd"
     events = _run([json.dumps(

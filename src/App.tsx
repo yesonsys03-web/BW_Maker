@@ -886,8 +886,16 @@ function AppShell() {
       // 해제한 잎이 남아 있는 그림이 그 키에 눌러앉는다 — 아무 잎이나 토글할
       // 때마다 그 잎이 나타났다 사라졌다 한다(2026-08-20 필드가이드 신고).
       // 무세션 검출 그물이 곧 같은 목록을 ops에 세우므로 화면이 만들 키와도 같다.
-      const includedIds = preparedIncludedIds(r.tree, r.matchedLayerIds, preset, r.strokeFeatures);
-      const { previewHiddenIds } = buildInitialOpsState(r.tree);
+      // color_to_line은 예외다. 워커가 레이어 매칭 그림이 아니라 문서 전체의
+      // imageLine 추출물을 구웠으므로 화면과 똑같이 모든 픽셀 잎, 숨김/솔로 없음,
+      // imageLine 설정을 키에 넣는다. 이 분기가 없으면 PNG는 만들어져도 다른 키에
+      // 저장되어 파일을 클릭할 때마다 다시 추출한다.
+      const imageLineEnabled = preset.imageLine?.enabled === true;
+      const includedIds = imageLineEnabled
+        ? pixelLeafIds(r.tree)
+        : preparedIncludedIds(r.tree, r.matchedLayerIds, preset, r.strokeFeatures);
+      const { previewHiddenIds: initialHiddenIds } = buildInitialOpsState(r.tree);
+      const previewHiddenIds = imageLineEnabled ? [] : initialHiddenIds;
       const spec = previewRenderSpec(
         { path, mtime: r.mtime },
         r.tree,
@@ -897,7 +905,8 @@ function AppShell() {
         preset.lineColor,
         r.matchedLayerIds,    // 리듀서가 matchedIdsByPath에 넣는 바로 그 값
         preset.edgeLines,
-        []                    // 색 경계선 수동 지정
+        [],                   // 색 경계선 수동 지정
+        imageLineEnabled ? preset.imageLine : null
       );
       if (!spec.key) return;
       // 예전에는 여기서 "워커가 그린 그림이 화면과 같은가"를 한 번 더 봤다.

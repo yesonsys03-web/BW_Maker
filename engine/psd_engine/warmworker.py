@@ -418,10 +418,9 @@ def prepare_file(path, job, max_size, out):
             "pngPath": None,
             "documentView": False,
         }
-        # 무슨 그림을 구울지는 _preset_preview_args 하나가 정한다 — 전체 캐시가
-        # 쓰는 바로 그 함수다. 여기서 따로 계산하면 키를 만드는 곳이 네 번째로
-        # 늘고, rpc.py의 _preview_key_material이 경고하는 "세 곳" 문제가
-        # 여섯 쌍이 된다.
+        # 일반 프리셋에서 무슨 그림을 구울지는 _preset_preview_args 하나가
+        # 정한다 — 전체 캐시가 쓰는 바로 그 함수다. color_to_line만은 레이어
+        # 합성이 아니라 imageline 추출이므로 아래 전용 분기로 간다.
         #
         # 스윕이 재둔 특징이 디스크에 있으면(같은 폴더 재로드) 결과에 실어
         # 보내고 미리보기도 검출 지정 포함으로 굽는다 — 앱이 지정을 복원해
@@ -429,24 +428,40 @@ def prepare_file(path, job, max_size, out):
         from . import tilecache
         feats = tilecache.load_strokes(str(path), mtime)
         result["strokeFeatures"] = feats
-        args = _preset_preview_args(tree, preset, feats=feats,
-                                    drawn_lines=job.get("drawnLines"))
-        # documentView는 args가 None인 두 이유(매칭 0장 / 매칭이 초기 화면과
-        # 같음) 중 어느 쪽인지를 프런트에 알린다. 같은 원시 함수를 쓰므로 새
-        # 판단이 아니다.
-        visible = _pixel_leaf_ids(tree, set(matched))
-        initial = _pixel_leaf_ids(tree, initial=True)
-        result["documentView"] = bool(visible) and set(visible) == set(initial)
-        if args is not None:
-            session = {"psd": psd, "path": str(path), "mtime": mtime,
-                       "flattened_image": is_flattened_image_path(path),
-                       "tree": tree, "layers_by_id": built["layers_by_id"]}
-            result["pngPath"] = render_preview_cached(
-                session, str(_prepare_png_dir()), args["visible"], max_size,
-                line_color=args["lineColor"],
-                line_color_ids=args["lineColorIds"],
-                edge_lines=args["edgeLines"],
-                included_ids=args["included"])
+        session = {"psd": psd, "path": str(path), "mtime": mtime,
+                   "flattened_image": is_flattened_image_path(path),
+                   "tree": tree, "layers_by_id": built["layers_by_id"]}
+        image_line = preset.get("imageLine") or {}
+        if image_line.get("enabled"):
+            # color_to_line은 레이어 매칭 미리보기가 아니다. 폴더 준비 워커가
+            # 여기서 추출까지 끝내야 목록의 모든 파일이 클릭 전에 처리된다.
+            from .imageline import render_image_line_preview
+
+            png_path, mask_hash = render_image_line_preview(
+                session,
+                str(_prepare_png_dir()),
+                max_size,
+                image_line,
+                line_color=preset.get("lineColor"),
+            )
+            result["pngPath"] = png_path
+            result["imageLineMaskHash"] = mask_hash
+        else:
+            args = _preset_preview_args(tree, preset, feats=feats,
+                                        drawn_lines=job.get("drawnLines"))
+            # documentView는 args가 None인 두 이유(매칭 0장 / 매칭이 초기 화면과
+            # 같음) 중 어느 쪽인지를 프런트에 알린다. 같은 원시 함수를 쓰므로 새
+            # 판단이 아니다.
+            visible = _pixel_leaf_ids(tree, set(matched))
+            initial = _pixel_leaf_ids(tree, initial=True)
+            result["documentView"] = bool(visible) and set(visible) == set(initial)
+            if args is not None:
+                result["pngPath"] = render_preview_cached(
+                    session, str(_prepare_png_dir()), args["visible"], max_size,
+                    line_color=args["lineColor"],
+                    line_color_ids=args["lineColorIds"],
+                    edge_lines=args["edgeLines"],
+                    included_ids=args["included"])
         _emit({"event": "file", "path": path, "ok": True, "result": result}, out)
     except Exception as e:  # noqa: BLE001 — 항목별 기록 정책(warm_file과 같다)
         _emit({"event": "file", "path": path, "ok": False,

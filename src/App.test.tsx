@@ -357,7 +357,7 @@ test("resume picks the remaining files back up", async () => {
   await finishOpen(1, 2);
   await waitFor(() => expect(screen.getByText(/중지됨/)).toBeTruthy());
 
-  click(screen.getByRole("button", { name: "재개" }));
+  click(await waitFor(() => screen.getByRole("button", { name: "재개" })));
   await waitFor(() => expect(opens).toHaveLength(3));
 });
 
@@ -1965,6 +1965,51 @@ test("raising the worker count spreads file preparation across processes", async
   await waitFor(() => expect(screen.queryAllByText("열림").length).toBeGreaterThanOrEqual(2));
   // 그리고 남은 한 장이 빈 워커에 이어 나간다(당겨 가기).
   await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(3));
+});
+
+test("color_to_line preparation extracts and caches every loaded file before click", async () => {
+  const finish = captureWorkerLines(12, [0, 1]);
+  vi.mocked(loadPresets).mockResolvedValueOnce([COLOR_TO_LINE_PRESET]);
+  engine.applyPreset.mockResolvedValue({ matchedLayerIds: [], operations: [] });
+  render(<App />);
+  await waitFor(() => expect(screen.getByText(COLOR_TO_LINE_PRESET.name)).toBeTruthy());
+  await new Promise((r) => setTimeout(r, 20));
+  setWorkers(2);
+  await addFilesForPrepare();
+
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(2));
+  const first = engine.warmWorkerSend.mock.calls[0] as [number, { path: string }];
+  const second = engine.warmWorkerSend.mock.calls[1] as [number, { path: string }];
+  for (const call of [first, second]) {
+    const preset = (call[1] as {
+      prepare?: { preset?: typeof COLOR_TO_LINE_PRESET };
+    }).prepare?.preset;
+    expect(preset?.imageLine?.enabled).toBe(true);
+  }
+  finish(first, preparedResult([], "/tmp/color-line-1.png"));
+  finish(second, preparedResult([], "/tmp/color-line-2.png"));
+
+  await waitFor(() => expect(engine.warmWorkerSend.mock.calls.length).toBe(3));
+  const third = engine.warmWorkerSend.mock.calls[2] as [number, { path: string }];
+  finish(third, preparedResult([], "/tmp/color-line-3.png"));
+  await waitFor(() => {
+    const loaded = new Set(engine.loadPngDataUrl.mock.calls.map((c) => c[0]));
+    expect(loaded).toEqual(new Set([
+      "/tmp/color-line-1.png",
+      "/tmp/color-line-2.png",
+      "/tmp/color-line-3.png",
+    ]));
+  });
+
+  // 두 번째 파일은 이미 color_to_line 키로 캐시에 있어야 한다. 세션을 붙인 뒤에도
+  // 클릭 시점에 다시 추출하면 준비 워커가 다른 키로 저장했다는 뜻이다.
+  engine.renderImageLinePreview.mockClear();
+  const openIndex = opens.length;
+  click(fileRow(nameOf(second[1].path)));
+  await waitFor(() => expect(opens.length).toBeGreaterThan(openIndex));
+  await finishOpen(openIndex, 42);
+  await new Promise((r) => setTimeout(r, 30));
+  expect(engine.renderImageLinePreview).not.toHaveBeenCalled();
 });
 
 test("with one worker file preparation stays on the current sequential path", async () => {
