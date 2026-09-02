@@ -6,7 +6,7 @@ import re
 import sys
 import time
 import warnings
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from importlib.resources import files
 
 import numpy as np
@@ -42,13 +42,6 @@ _FLATTENED_LINE_SESSIONS = None
 _AUTHORED_ALPHA_LUT = np.array([
     round(232 * value / 255) for value in range(256)
 ], dtype=np.uint8)
-# Every extraction path has different source confidence/opacity. Delivery is
-# binary so every retained line pixel has exactly the selected line colour.
-_UNIFORM_LINE_ALPHA_LUT = np.array([
-    255 if value >= 32 else 0 for value in range(256)
-], dtype=np.uint8)
-
-
 def _max_rss_bytes():
     if _resource is None:
         return None
@@ -1052,25 +1045,27 @@ def _thin_colour_edges(rgba, include_alpha=True, threshold=12):
         min_length=8,
         count_area=False,
     )
-    return np.array(
+    core = np.array(
         Image.fromarray(
             edge.astype(np.uint8) * 255,
             "L",
         ).filter(ImageFilter.MaxFilter(3)),
         dtype=np.uint8,
     )
+    antialiased = np.array(
+        Image.fromarray(core, "L").filter(
+            ImageFilter.GaussianBlur(0.85)
+        ),
+        dtype=np.uint8,
+    )
+    antialiased[core > 0] = 255
+    return antialiased
 
 
 def _remove_solid_ink_interiors(alpha):
     """Keep strokes and filled-shape boundaries, but remove colour interiors."""
     core = alpha >= 8
-    eroded = np.array(
-        Image.fromarray(
-            core.astype(np.uint8) * 255,
-            "L",
-        ).filter(ImageFilter.MinFilter(15)),
-        dtype=np.uint8,
-    ) >= 128
+    eroded = _rank_filter(core, 15, maximum=False)
     shell = core & ~eroded
     out = np.array(
         Image.fromarray(
@@ -1083,37 +1078,55 @@ def _remove_solid_ink_interiors(alpha):
     return out
 
 
-def _remove_large_solid_interiors(alpha):
+def _remove_large_solid_interiors(
+        alpha, filter_size=31, thin_outline=False):
     """Hollow broad fills while leaving normal authored stroke widths alone."""
     core = alpha >= 8
     # At production sizes a genuine line remains narrower than this even when
     # antialiased. Large pasted silhouettes and opaque "lines" layers do not.
-    # Keeping a 15px shell preserves their visible boundary instead of
-    # deleting the object outright.
-    deep_interior = np.array(
-        Image.fromarray(
-            core.astype(np.uint8) * 255,
-            "L",
-        ).filter(ImageFilter.MinFilter(31)),
-        dtype=np.uint8,
-    ) >= 128
+    # Keeping a shell preserves their visible boundary instead of deleting the
+    # object outright.
+    deep_interior = _rank_filter(core, filter_size, maximum=False)
     if not np.any(deep_interior):
         return alpha
     out = alpha.copy()
-    out[deep_interior] = 0
+    if thin_outline:
+        # Erosion proves that a region is paint. Remove only pixels deeper than
+        # the authored line width, near that proof. This leaves source line
+        # alpha untouched and cannot thicken unrelated thin strokes.
+        paint_support = _rank_filter(
+            deep_interior,
+            filter_size * 2 + 1,
+            maximum=True,
+        )
+        paint_interior = (
+            _rank_filter(core, 7, maximum=False)
+            & paint_support
+        )
+        out[paint_interior] = 0
+        # Only the newly cut inner edge needs antialiasing. Blurring the whole
+        # layer would alter authored strokes, so blend the filtered alpha in a
+        # one-pixel band around the removed paint and nowhere else.
+        inner_edge_band = (
+            _rank_filter(paint_interior, 3, maximum=True)
+            & ~_rank_filter(paint_interior, 3, maximum=False)
+        )
+        smoothed = np.array(
+            Image.fromarray(out, "L").filter(
+                ImageFilter.GaussianBlur(0.85)
+            ),
+            dtype=np.uint8,
+        )
+        out[inner_edge_band] = smoothed[inner_edge_band]
+    else:
+        out[deep_interior] = 0
     return out
 
 
 def _remove_mixed_line_fill_interiors(alpha):
     """Remove embedded fills without changing normal authored strokes."""
     core = alpha >= 8
-    eroded = np.array(
-        Image.fromarray(
-            core.astype(np.uint8) * 255,
-            "L",
-        ).filter(ImageFilter.MinFilter(7)),
-        dtype=np.uint8,
-    ) >= 128
+    eroded = _rank_filter(core, 7, maximum=False)
     shell = core & ~eroded
     out = np.array(
         Image.fromarray(
@@ -1152,25 +1165,12 @@ def _rendered_edge_support(rgba):
             x1 = min(width, x0 + tile_size)
             ex0, ex1 = max(0, x0 - overlap), min(width, x1 + overlap)
             tile = rgba[ey0:ey1, ex0:ex1, :3]
-            sharp = np.zeros(tile.shape[:2], dtype=np.uint8)
-            for channel in range(3):
-                image = Image.fromarray(tile[..., channel], "L")
-                high = np.array(
-                    image.filter(ImageFilter.MaxFilter(3)), dtype=np.uint8)
-                low = np.array(
-                    image.filter(ImageFilter.MinFilter(3)), dtype=np.uint8)
-                np.maximum(sharp, high - low, out=sharp)
-            expanded_image = Image.fromarray(
-                (sharp >= 6).astype(np.uint8) * 255,
-                "L",
-            )
+            high = _rank_filter(tile, 3, maximum=True)
+            low = _rank_filter(tile, 3, maximum=False)
+            sharp = np.max(high - low, axis=2)
+            expanded = sharp >= 6
             for _ in range(3):
-                expanded_image = expanded_image.filter(
-                    ImageFilter.MaxFilter(5))
-            expanded = np.array(
-                expanded_image,
-                dtype=np.uint8,
-            ) > 0
+                expanded = _rank_filter(expanded, 5, maximum=True)
             support[y0:y1, x0:x1] = expanded[
                 y0 - ey0:y1 - ey0,
                 x0 - ex0:x1 - ex0,
@@ -1191,25 +1191,10 @@ def _visible_colour_edge_support(rgba):
             x1 = min(width, x0 + tile_size)
             ex0, ex1 = max(0, x0 - overlap), min(width, x1 + overlap)
             tile = rgba[ey0:ey1, ex0:ex1]
-            sharp = np.zeros(tile.shape[:2], dtype=np.uint8)
-            for channel in range(3):
-                image = Image.fromarray(tile[..., channel], "L")
-                high = np.array(
-                    image.filter(ImageFilter.MaxFilter(3)),
-                    dtype=np.uint8,
-                )
-                low = np.array(
-                    image.filter(ImageFilter.MinFilter(3)),
-                    dtype=np.uint8,
-                )
-                np.maximum(sharp, high - low, out=sharp)
-            expanded = np.array(
-                Image.fromarray(
-                    (sharp >= 2).astype(np.uint8) * 255,
-                    "L",
-                ).filter(ImageFilter.MaxFilter(3)),
-                dtype=np.uint8,
-            ) > 0
+            high = _rank_filter(tile[..., :3], 3, maximum=True)
+            low = _rank_filter(tile[..., :3], 3, maximum=False)
+            sharp = np.max(high - low, axis=2)
+            expanded = _rank_filter(sharp >= 2, 3, maximum=True)
             support[y0:y1, x0:x1] = expanded[
                 y0 - ey0:y1 - ey0,
                 x0 - ex0:x1 - ex0,
@@ -1222,13 +1207,7 @@ def _retain_visible_edge_runs(edges, visible_support, bridge=4):
     candidate = edges >= 8
     keep = candidate & visible_support
     for _ in range(bridge):
-        expanded = np.array(
-            Image.fromarray(
-                keep.astype(np.uint8) * 255,
-                "L",
-            ).filter(ImageFilter.MaxFilter(3)),
-            dtype=np.uint8,
-        ) > 0
+        expanded = _rank_filter(keep, 3, maximum=True)
         keep |= candidate & expanded
     return np.where(keep, edges, 0).astype(np.uint8)
 
@@ -1261,6 +1240,31 @@ def _keep_visible_outline(outline, layer, edge_support):
         ]
     outline[~visible] = 0
     return outline
+
+
+def _is_character_fill_line_layer(layer, psd):
+    """Recognize character ink paired with fills without relying on filenames."""
+    branch = layer
+    parent = layer.parent
+    while parent is not None and parent is not psd:
+        if (
+            parent.is_group()
+            and _object_key(parent.name) in {"turn", "turnaround"}
+        ):
+            return True
+        if (
+            _is_named_line_layer(branch.name)
+            and any(
+                sibling is not branch
+                and sibling.is_visible()
+                and _is_colour_group_name(sibling.name)
+                for sibling in parent
+            )
+        ):
+            return True
+        branch = parent
+        parent = parent.parent
+    return False
 
 
 def _named_line_alpha(session):
@@ -1386,7 +1390,13 @@ def _named_line_alpha(session):
         if content_key in seen_candidate_content:
             continue
         seen_candidate_content.add(content_key)
-        if _inside_mixed_line_container(layer):
+        if _is_character_fill_line_layer(layer, psd):
+            alpha = _remove_large_solid_interiors(
+                alpha,
+                filter_size=11,
+                thin_outline=True,
+            )
+        elif _inside_mixed_line_container(layer):
             alpha = _remove_mixed_line_fill_interiors(alpha)
         alpha = _remove_horizontal_guides(alpha, psd.width)
         if id(layer) in outline_only_ids:
@@ -1486,33 +1496,113 @@ def _remove_short_components(mask, min_length, count_area=True):
     if min_length <= 1:
         return mask
     h, w = mask.shape
-    labels = np.zeros((h, w), dtype=np.int32)
-    keep_labels = [False]
-    next_label = 0
-    for y0, x0 in zip(*np.nonzero(mask)):
-        if labels[y0, x0]:
-            continue
-        next_label += 1
-        q = deque([(int(y0), int(x0))])
-        labels[y0, x0] = next_label
-        area = 0
-        min_y = max_y = int(y0)
-        min_x = max_x = int(x0)
-        while q:
-            y, x = q.pop()
-            area += 1
-            min_y = min(min_y, y); max_y = max(max_y, y)
-            min_x = min(min_x, x); max_x = max(max_x, x)
-            for ny in range(max(0, y - 1), min(h, y + 2)):
-                for nx in range(max(0, x - 1), min(w, x + 2)):
-                    if mask[ny, nx] and not labels[ny, nx]:
-                        labels[ny, nx] = next_label
-                        q.append((ny, nx))
+    runs = []
+    parent = []
+
+    def find(label):
+        root = label
+        while parent[root] != root:
+            root = parent[root]
+        while parent[label] != label:
+            next_label = parent[label]
+            parent[label] = root
+            label = next_label
+        return root
+
+    previous = []
+    for y in range(h):
+        row = np.asarray(mask[y], dtype=bool)
+        padded = np.empty(w + 2, dtype=np.int8)
+        padded[0] = padded[-1] = 0
+        padded[1:-1] = row
+        transitions = np.diff(padded)
+        starts = np.flatnonzero(transitions == 1)
+        ends = np.flatnonzero(transitions == -1) - 1
+        current = []
+        previous_start = 0
+        for start, end in zip(starts.tolist(), ends.tolist()):
+            label = len(runs)
+            runs.append((y, start, end))
+            parent.append(label)
+            while (
+                previous_start < len(previous)
+                and runs[previous[previous_start]][2] < start - 1
+            ):
+                previous_start += 1
+            overlap = previous_start
+            while (
+                overlap < len(previous)
+                and runs[previous[overlap]][1] <= end + 1
+            ):
+                other_root = find(previous[overlap])
+                root = find(label)
+                if root != other_root:
+                    parent[other_root] = root
+                overlap += 1
+            current.append(label)
+        previous = current
+
+    if not runs:
+        return np.zeros_like(mask, dtype=bool)
+
+    stats = {}
+    for label, (y, start, end) in enumerate(runs):
+        root = find(label)
+        area, min_y, max_y, min_x, max_x = stats.get(
+            root,
+            (0, y, y, start, end),
+        )
+        stats[root] = (
+            area + end - start + 1,
+            min(min_y, y),
+            max(max_y, y),
+            min(min_x, start),
+            max(max_x, end),
+        )
+
+    keep = {}
+    for root, (area, min_y, max_y, min_x, max_x) in stats.items():
         extent = max(max_y - min_y + 1, max_x - min_x + 1)
-        keep_labels.append(
-            max(extent, area) >= min_length if count_area
-            else extent >= min_length)
-    return np.asarray(keep_labels, dtype=bool)[labels]
+        keep[root] = (
+            max(extent, area) >= min_length
+            if count_area
+            else extent >= min_length
+        )
+
+    out = np.zeros_like(mask, dtype=bool)
+    for label, (y, start, end) in enumerate(runs):
+        if keep[find(label)]:
+            out[y, start:end + 1] = True
+    return out
+
+
+def _rank_filter(array, size, maximum):
+    """Apply an exact square rank filter without Pillow's quadratic kernel."""
+    radius = size // 2
+    if array.dtype == np.bool_:
+        reduce = np.any if maximum else np.all
+    else:
+        reduce = np.max if maximum else np.min
+    horizontal_pad = [(0, 0)] * array.ndim
+    horizontal_pad[1] = (radius, radius)
+    horizontal = reduce(
+        np.lib.stride_tricks.sliding_window_view(
+            np.pad(array, horizontal_pad, mode="edge"),
+            size,
+            axis=1,
+        ),
+        axis=-1,
+    )
+    vertical_pad = [(0, 0)] * array.ndim
+    vertical_pad[0] = (radius, radius)
+    return reduce(
+        np.lib.stride_tricks.sliding_window_view(
+            np.pad(horizontal, vertical_pad, mode="edge"),
+            size,
+            axis=0,
+        ),
+        axis=-1,
+    )
 
 
 def _missing_colour_edges(rgba, line_alpha, min_length):
@@ -1552,14 +1642,12 @@ def _missing_colour_edges(rgba, line_alpha, min_length):
             # Colour-change detection can follow broad illumination gradients.
             # A real painted silhouette changes abruptly within 3px; a radial
             # glow does not.
-            sharp_range = np.zeros(overlay.shape, dtype=np.int16)
-            for channel in range(3):
-                image = Image.fromarray(tile[..., channel], "L")
-                high = np.array(
-                    image.filter(ImageFilter.MaxFilter(3)), dtype=np.int16)
-                low = np.array(
-                    image.filter(ImageFilter.MinFilter(3)), dtype=np.int16)
-                np.maximum(sharp_range, high - low, out=sharp_range)
+            high = _rank_filter(tile[..., :3], 3, maximum=True)
+            low = _rank_filter(tile[..., :3], 3, maximum=False)
+            sharp_range = np.max(
+                high.astype(np.int16) - low.astype(np.int16),
+                axis=2,
+            )
             edge = np.where(
                 sharp_range >= 12, overlay, 0).astype(np.uint8)
             change_core = edge >= 64
@@ -1569,29 +1657,22 @@ def _missing_colour_edges(rgba, line_alpha, min_length):
                 region_options,
             )[..., 3]
             region_core = (region_overlay >= 64) & (sharp_range >= 12)
-            change_support = np.array(
-                Image.fromarray(
-                    change_core.astype(np.uint8) * 255,
-                    "L",
-                ).filter(ImageFilter.MaxFilter(21))
-            ) > 0
+            change_support = _rank_filter(
+                change_core,
+                21,
+                maximum=True,
+            )
             change_core |= region_core & change_support
-            solid_core = np.array(
-                Image.fromarray(
-                    change_core.astype(np.uint8) * 255,
-                    "L",
-                )
-                .filter(ImageFilter.MaxFilter(5))
-                .filter(ImageFilter.MinFilter(5))
-            ) > 0
-            protected_line = np.array(
-                Image.fromarray(
-                    (
-                        line_alpha[ey0:ey1, ex0:ex1] >= 128
-                    ).astype(np.uint8) * 255,
-                    "L",
-                ).filter(ImageFilter.MaxFilter(7))
-            ) > 0
+            solid_core = _rank_filter(
+                _rank_filter(change_core, 5, maximum=True),
+                5,
+                maximum=False,
+            )
+            protected_line = _rank_filter(
+                line_alpha[ey0:ey1, ex0:ex1] >= 128,
+                7,
+                maximum=True,
+            )
             solid_core &= ~protected_line
             edge = np.array(
                 Image.fromarray(
@@ -2145,24 +2226,20 @@ def image_line_profile(session, image_line):
     return dict(profile) if profile is not None else None
 
 
-def mask_to_rgba(mask, line_color, preserve_antialias=False):
+def mask_to_rgba(mask, line_color):
     rgb = parse_line_color(line_color)
     out = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
     out[..., 0], out[..., 1], out[..., 2] = rgb
-    if preserve_antialias:
-        out[..., 3] = np.where(mask >= 64, 255, mask).astype(np.uint8)
-    else:
-        out[..., 3] = _UNIFORM_LINE_ALPHA_LUT[mask]
+    # RGB stays at the selected line value; the source mask carries coverage.
+    # Promoting 64..254 alpha to opaque destroys authored antialiasing and
+    # turns diagonals into visible pixel stairs at production resolution.
+    out[..., 3] = mask
     return out
 
 
 def render_image_line_preview(session, out_dir, max_size, image_line, line_color=None):
     mask, mask_hash = extract_image_line(session, image_line)
-    rgba = mask_to_rgba(
-        mask,
-        line_color,
-        preserve_antialias=_uses_explicit_turn_line_system(session["psd"]),
-    )
+    rgba = mask_to_rgba(mask, line_color)
     img = Image.fromarray(rgba, "RGBA")
     img.thumbnail((int(max_size), int(max_size)))
     os.makedirs(out_dir, exist_ok=True)
@@ -2180,11 +2257,7 @@ def export_image_line(session, output_path, output_format, image_line, line_colo
     if os.path.exists(long_path(output_path)) and not overwrite:
         raise FileExistsError(f"output already exists: {output_path}")
     mask, mask_hash = extract_image_line(session, image_line)
-    rgba = mask_to_rgba(
-        mask,
-        line_color,
-        preserve_antialias=_uses_explicit_turn_line_system(session["psd"]),
-    )
+    rgba = mask_to_rgba(mask, line_color)
     export_mask = rgba[..., 3]
     expected_pixels = rgba
     if output_format == "png":

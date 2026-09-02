@@ -452,8 +452,10 @@ def test_flattened_cel_graphic_boundaries_have_fixed_width():
     rgba = np.full((40, 60, 4), [220, 50, 80, 255], dtype=np.uint8)
     rgba[:, 30:, :3] = [45, 30, 55]
     edges = imageline._thin_colour_edges(rgba)
-    columns = np.flatnonzero(edges[20] > 0)
-    assert columns.tolist() == [28, 29, 30]
+    core_columns = np.flatnonzero(edges[20] == 255)
+    assert core_columns.tolist() == [28, 29, 30]
+    assert 0 < edges[20, 27] < 255
+    assert 0 < edges[20, 31] < 255
     assert edges[20, 10] == 0
     assert edges[20, 45] == 0
 
@@ -720,6 +722,71 @@ def test_red_dominant_artwork_is_not_mistaken_for_sparse_review_marks():
     assert not imageline._suppress_flattened_red_annotations(authored)
 
 
+@pytest.mark.parametrize("size", [3, 5, 7, 21])
+@pytest.mark.parametrize("maximum", [False, True])
+def test_fast_rank_filter_matches_pillow(size, maximum):
+    rng = np.random.default_rng(42)
+    source = rng.integers(0, 256, size=(37, 43), dtype=np.uint8)
+    pillow_filter = (
+        ImageFilter.MaxFilter(size)
+        if maximum
+        else ImageFilter.MinFilter(size)
+    )
+    expected = np.array(
+        Image.fromarray(source, "L").filter(pillow_filter),
+        dtype=np.uint8,
+    )
+    actual = imageline._rank_filter(source, size, maximum)
+    assert np.array_equal(actual, expected)
+    boolean = source >= 128
+    expected_boolean = np.array(
+        Image.fromarray(boolean.astype(np.uint8) * 255, "L").filter(
+            pillow_filter
+        ),
+        dtype=np.uint8,
+    ) > 0
+    actual_boolean = imageline._rank_filter(boolean, size, maximum)
+    assert np.array_equal(actual_boolean, expected_boolean)
+
+
+@pytest.mark.parametrize("count_area", [False, True])
+def test_run_component_filter_matches_pixel_flood_fill(count_area):
+    rng = np.random.default_rng(17)
+    mask = rng.random((41, 53)) < 0.18
+    labels = np.zeros(mask.shape, dtype=np.int32)
+    keep = [False]
+    next_label = 0
+    for y0, x0 in zip(*np.nonzero(mask)):
+        if labels[y0, x0]:
+            continue
+        next_label += 1
+        labels[y0, x0] = next_label
+        stack = [(int(y0), int(x0))]
+        points = []
+        while stack:
+            y, x = stack.pop()
+            points.append((y, x))
+            for ny in range(max(0, y - 1), min(mask.shape[0], y + 2)):
+                for nx in range(max(0, x - 1), min(mask.shape[1], x + 2)):
+                    if mask[ny, nx] and not labels[ny, nx]:
+                        labels[ny, nx] = next_label
+                        stack.append((ny, nx))
+        ys, xs = zip(*points)
+        extent = max(max(ys) - min(ys) + 1, max(xs) - min(xs) + 1)
+        keep.append(
+            max(extent, len(points)) >= 9
+            if count_area
+            else extent >= 9
+        )
+    expected = np.asarray(keep, dtype=bool)[labels]
+    actual = imageline._remove_short_components(
+        mask,
+        9,
+        count_area=count_area,
+    )
+    assert np.array_equal(actual, expected)
+
+
 def test_flattened_model_extracts_sparse_marks_on_black_canvas(monkeypatch):
     rgba = np.zeros((32, 40, 4), dtype=np.uint8)
     rgba[..., 3] = 255
@@ -742,6 +809,78 @@ def test_large_solid_interiors_are_hollowed_without_erasing_thin_lines():
     assert cleaned[12, 50] == 255
     assert cleaned[22, 50] == 255
     assert cleaned[47, 50] == 0
+
+
+def test_turnaround_solid_parts_use_a_narrower_hollowing_threshold():
+    alpha = np.zeros((40, 50), dtype=np.uint8)
+    alpha[10:30, 10:40] = 255
+    alpha[33:38, 5:45] = 173
+    background_cleaned = imageline._remove_large_solid_interiors(alpha)
+    turnaround_cleaned = imageline._remove_large_solid_interiors(
+        alpha,
+        filter_size=11,
+        thin_outline=True,
+    )
+    assert background_cleaned[20, 25] == 255
+    assert turnaround_cleaned[20, 25] == 0
+    assert turnaround_cleaned[11, 25] > 0
+    assert np.count_nonzero(turnaround_cleaned[20, :40] >= 64) <= 8
+    assert np.any(
+        (turnaround_cleaned[20] > 0)
+        & (turnaround_cleaned[20] < 255)
+    )
+    assert (turnaround_cleaned[33:38, 5:45] == 173).all()
+    assert turnaround_cleaned[32, 25] == 0
+    assert turnaround_cleaned[38, 25] == 0
+
+
+def test_turnaround_line_layers_outline_solid_parts_and_keep_thin_strokes(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    line = np.zeros((60, 70, 4), dtype=np.uint8)
+    line[10:42, 10:34] = [20, 20, 20, 255]
+    line[8:54, 55:58] = [20, 20, 20, 255]
+    path = tmp_path / "turn-solid-parts.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURN", layers=[
+            nested_layers.Group(name="POSE", layers=[
+                nested_layers.Group(name="LINES", layers=[
+                    _rgba_layer("LINE", line),
+                ]),
+            ]),
+        ]),
+    ], width=70, height=60)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[25, 22] == 0
+    assert mask[11, 22] > 0
+    assert mask[30, 56] > 0
+
+
+def test_paired_character_colour_and_line_groups_outline_solid_parts(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    line = np.zeros((50, 60, 4), dtype=np.uint8)
+    line[10:40, 12:38] = [20, 20, 20, 255]
+    fill = np.zeros((50, 60, 4), dtype=np.uint8)
+    fill[8:42, 10:40] = [220, 40, 90, 255]
+    path = tmp_path / "design-solid-parts.psd"
+    write_psd(path, [
+        nested_layers.Group(name="DESIGN", layers=[
+            nested_layers.Group(name="POSE", layers=[
+                nested_layers.Group(name="COLOURS", layers=[
+                    _rgba_layer("body colour", fill),
+                ]),
+                nested_layers.Group(name="LINES", layers=[
+                    _rgba_layer("LINE", line),
+                ]),
+            ]),
+        ]),
+    ], width=60, height=50)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[25, 25] == 0
+    assert mask[11, 25] > 0
 
 
 def test_dark_lines_survive_but_large_dark_fills_are_rejected(tmp_path):
@@ -879,23 +1018,16 @@ def test_gray_source_stroke_is_filled_solid_instead_of_exported_as_two_edges(tmp
     assert np.ptp(mask[6, 5:19]) <= 1
     assert 0 < mask[4, 10] < mask[6, 10]
     rendered = mask_to_rgba(mask, "#3d3d3d")
-    assert rendered[6, 10].tolist() == [61, 61, 61, 255]
+    assert rendered[6, 10].tolist() == [
+        61, 61, 61, int(mask[6, 10]),
+    ]
 
 
-def test_rendered_line_density_is_binary_and_uniform():
+def test_rendered_line_keeps_uniform_rgb_and_antialiased_alpha():
     mask = np.array([[0, 16, 64, 173, 255]], dtype=np.uint8)
     rendered = mask_to_rgba(mask, "#3d3d3d")
-    assert rendered[0, :, 3].tolist() == [0, 0, 255, 255, 255]
-
-
-def test_explicit_source_line_rendering_preserves_antialias_fringe():
-    mask = np.array([[0, 16, 64, 173, 255]], dtype=np.uint8)
-    rendered = mask_to_rgba(
-        mask,
-        "#3d3d3d",
-        preserve_antialias=True,
-    )
-    assert rendered[0, :, 3].tolist() == [0, 16, 255, 255, 255]
+    assert (rendered[0, :, :3] == [61, 61, 61]).all()
+    assert rendered[0, :, 3].tolist() == [0, 16, 64, 173, 255]
 
 
 def test_opaque_authored_lines_and_component_lines_are_extracted(tmp_path):
@@ -1146,6 +1278,9 @@ def test_psd_export_has_transparent_line_over_white_background(tmp_path):
     assert layers[1].name == "Background"
     assert line[0, 0, 3] == 0
     assert line[..., 3].max() > 0
+    fringe = (line[..., 3] > 0) & (line[..., 3] < 255)
+    assert fringe.any()
+    assert (line[line[..., 3] > 0, :3] == [0, 255, 0]).all()
     assert (background == 255).all()
     assert composite[0, 0].tolist() == [255, 255, 255, 255]
 
