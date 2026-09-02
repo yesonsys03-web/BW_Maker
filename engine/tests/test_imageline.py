@@ -857,6 +857,44 @@ def test_turnaround_line_layers_outline_solid_parts_and_keep_thin_strokes(
     assert mask[30, 56] > 0
 
 
+def test_turnaround_line_layers_keep_only_edges_visible_in_embedded_preview(
+        tmp_path, monkeypatch):
+    from pytoshop.user import nested_layers
+
+    line = np.zeros((40, 60, 4), dtype=np.uint8)
+    line[5:35, 9:12] = [20, 20, 20, 255]
+    line[5:35, 39:42] = [20, 20, 20, 255]
+    path = tmp_path / "covered-turn-lines.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURN", layers=[
+            nested_layers.Group(name="POSE", layers=[
+                nested_layers.Group(name="LINES", layers=[
+                    _rgba_layer("LINE", line),
+                ]),
+            ]),
+        ]),
+    ], width=60, height=40)
+    support = np.zeros((40, 60), dtype=bool)
+    support[:, 7:14] = True
+    monkeypatch.setattr(
+        imageline,
+        "_visible_colour_edge_support",
+        lambda rgba: support,
+    )
+    preview = np.zeros((40, 60, 4), dtype=np.uint8)
+    preview[0, 0] = [255, 255, 255, 255]
+    monkeypatch.setattr(
+        imageline,
+        "_embedded_preview_rgba",
+        lambda session: preview,
+    )
+    result = imageline._named_line_alpha(_session(path))
+    assert result is not None
+    mask = result[0]
+    assert mask[20, 10] > 0
+    assert mask[20, 40] == 0
+
+
 def test_paired_character_colour_and_line_groups_outline_solid_parts(
         tmp_path):
     from pytoshop.user import nested_layers

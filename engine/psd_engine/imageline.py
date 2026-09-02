@@ -69,6 +69,15 @@ def parse_line_color(line_color):
     return _parse_line_color(line_color) or (0, 0, 0)
 
 
+def _embedded_preview_rgba(session):
+    """Read Photoshop's final preview, rejecting generated solid placeholders."""
+    embedded = session["psd"].composite(force=False)
+    if embedded is None:
+        return None
+    rgba = np.array(embedded.convert("RGBA"), dtype=np.uint8)
+    return rgba if np.any(rgba != rgba[0, 0]) else None
+
+
 def _document_rgba(session):
     if session.get("flattened_image") and session.get("path"):
         with Image.open(session["path"]) as image:
@@ -78,11 +87,9 @@ def _document_rgba(session):
     # avoids decoding the entire layer stack. Generated test PSDs can contain
     # a placeholder solid-black composite, so only that degenerate case needs
     # the forced layer compositor.
-    embedded = psd.composite(force=False)
-    if embedded is not None:
-        embedded_rgba = np.array(embedded.convert("RGBA"), dtype=np.uint8)
-        if np.any(embedded_rgba != embedded_rgba[0, 0]):
-            return embedded_rgba
+    embedded_rgba = _embedded_preview_rgba(session)
+    if embedded_rgba is not None:
+        return embedded_rgba
     try:
         img = psd.composite(force=True, color=1.0, alpha=0.0)
     except ImportError as exc:
@@ -98,7 +105,7 @@ def _document_rgba(session):
             RuntimeWarning,
             stacklevel=2,
         )
-        img = embedded
+        img = psd.composite(force=False)
         if img is None:
             raise
     return np.array(img.convert("RGBA"), dtype=np.uint8)
@@ -1355,6 +1362,10 @@ def _named_line_alpha(session):
     ]
     simplified_layers = _prop_background_plates(psd)
     character_layers = _reference_character_layers(psd)
+    character_fill_ids = {
+        id(layer) for layer in candidates
+        if _is_character_fill_line_layer(layer, psd)
+    }
     if (
         not candidates
         and not silhouette_layers
@@ -1365,13 +1376,19 @@ def _named_line_alpha(session):
         return None
 
     edge_support = None
-    if silhouette_layers or simplified_layers:
-        embedded = psd.composite(force=False)
-        if embedded is not None:
-            embedded_rgba = np.array(
-                embedded.convert("RGBA"), dtype=np.uint8)
-            if np.any(embedded_rgba != embedded_rgba[0, 0]):
+    character_edge_support = None
+    if silhouette_layers or simplified_layers or character_fill_ids:
+        embedded_rgba = _embedded_preview_rgba(session)
+        if embedded_rgba is not None:
+            if silhouette_layers or simplified_layers:
                 edge_support = _rendered_edge_support(embedded_rgba)
+            if character_fill_ids:
+                # Character alternatives can be only a few pixels apart. The
+                # broad support used for coarse silhouettes would let covered
+                # hair and finger variants leak through beside a visible edge.
+                character_edge_support = _visible_colour_edge_support(
+                    embedded_rgba
+                )
 
     # Decode only the selected layer bounds. A whole-document compositor made
     # a 1.1 GB PSB peak above 3 GB even though its 26 Line layers occupy a
@@ -1390,11 +1407,19 @@ def _named_line_alpha(session):
         if content_key in seen_candidate_content:
             continue
         seen_candidate_content.add(content_key)
-        if _is_character_fill_line_layer(layer, psd):
+        if id(layer) in character_fill_ids:
             alpha = _remove_large_solid_interiors(
                 alpha,
                 filter_size=11,
                 thin_outline=True,
+            )
+            # A visible LINE layer can still be covered by visible colour
+            # artwork above it. Keep only ink that contributes to Photoshop's
+            # embedded final preview.
+            _keep_visible_outline(
+                alpha,
+                layer,
+                character_edge_support,
             )
         elif _inside_mixed_line_container(layer):
             alpha = _remove_mixed_line_fill_interiors(alpha)
@@ -1489,6 +1514,7 @@ def _named_line_alpha(session):
         len(simplified_layers),
         len(character_layers),
         len(graphic_layers),
+        character_edge_support,
     )
 
 
@@ -1857,13 +1883,15 @@ def _composite_residual_alpha(session, line_alpha, min_length):
     }
 
 
-def _turn_colour_boundary_alpha(session, line_alpha):
+def _turn_colour_boundary_alpha(
+        session, line_alpha, visible_support=None):
     """Add clean internal fill boundaries without altering authored lines."""
     psd = session["psd"]
     out = np.zeros(line_alpha.shape, dtype=np.uint8)
     source_support = line_alpha >= 8
-    visible_support = _visible_colour_edge_support(
-        _document_rgba(session))
+    if visible_support is None:
+        visible_support = _visible_colour_edge_support(
+            _document_rgba(session))
     seen = set()
     for root in psd:
         if (
@@ -2003,10 +2031,15 @@ def extract_image_line(session, image_line):
             simplified_background_count,
             flattened_character_count,
             flattened_graphic_count,
+            character_edge_support,
         ) = named_lines
         residual_started = time.perf_counter()
         if _uses_explicit_turn_line_system(session["psd"]):
-            residual = _turn_colour_boundary_alpha(session, mask_u8)
+            residual = _turn_colour_boundary_alpha(
+                session,
+                mask_u8,
+                visible_support=character_edge_support,
+            )
             residual_profile = {
                 "compositeEdgeCandidatePixels": int(
                     np.count_nonzero(residual >= 32)),

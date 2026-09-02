@@ -170,8 +170,11 @@ export interface PreviewFileId {
  *
  * 33 (2026-08-28): FL102에서 오브젝트 그룹과 같은 이름의 컬러 잉크 레이어를
  * 추가 인식하고, LINE 그룹 안의 채색 면은 라인에서 제외한다.
+ *
+ * 34 (2026-09-02): 캐릭터 LINE 레이어 중 Photoshop 최종 프리뷰에서 색상
+ * 레이어에 가려진 머리·손 변형 라인을 제외한다.
  */
-export const PREVIEW_PICTURE_VERSION = 33;
+export const PREVIEW_PICTURE_VERSION = 34;
 
 export function previewCacheKey(
   file: PreviewFileId,
