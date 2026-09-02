@@ -176,8 +176,14 @@ export interface PreviewFileId {
  *
  * 37 (2026-09-02): 단독 POSE의 tone/sketch 구조에서는 원본 sketch 알파를
  * 그대로 사용하고 보조 레퍼런스·프레임·채색 경계 합성을 제외한다.
+ *
+ * 38 (2026-09-02): 불투명 DRAWINGS, DESIGN 스케치, 컬러 PROPS 라인,
+ * 무광 PHONE 인터페이스를 기존 문서와 격리된 스타일 프로필로 처리한다.
+ *
+ * 39 (2026-09-02): PHONE 스타일에서 별도 TEMPLATE에 배치된 정면 뷰도
+ * 포함하되 두 뷰 모두 GLOWING 레이어와 효과는 제외한다.
  */
-export const PREVIEW_PICTURE_VERSION = 37;
+export const PREVIEW_PICTURE_VERSION = 39;
 
 export function previewCacheKey(
   file: PreviewFileId,

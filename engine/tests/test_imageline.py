@@ -927,11 +927,136 @@ def test_standalone_pose_keeps_authored_sketch_and_ignores_reference_art(
     result = imageline._named_line_alpha(_session(path))
     assert result is not None
     mask = result[0]
-    assert result[-1] is True
+    assert result[-1] == "authoredPoseOnly"
     assert mask[20, 13] == 255
     assert mask[20, 30] == 0
     assert mask[20, 50] == 0
     assert mask[36, 8] == 255
+
+
+def test_sketch_design_keeps_authored_marks_without_paper_or_references(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    paper = np.full((40, 60, 4), [255, 255, 255, 255], dtype=np.uint8)
+    marks = np.zeros((40, 60, 4), dtype=np.uint8)
+    marks[8:32, 20:23] = [210, 35, 55, 180]
+    reference = np.zeros((40, 60, 4), dtype=np.uint8)
+    reference[8:32, 40:43] = [10, 10, 10, 255]
+    path = tmp_path / "sketch-design.psd"
+    write_psd(path, [
+        nested_layers.Group(name="EXTRA REFS", layers=[
+            _rgba_layer("reference", reference),
+        ]),
+        nested_layers.Group(name="DESIGN", layers=[
+            nested_layers.Group(name="pages", layers=[
+                _rgba_layer("paper", paper),
+                _rgba_layer("pencil marks", marks),
+            ]),
+        ]),
+    ], width=60, height=40)
+    result = imageline._isolated_style_alpha(_session(path)["psd"])
+    assert result is not None
+    mask, _, mode = result
+    assert mode == "sketchDesign"
+    assert mask[20, 21] == 180
+    assert mask[20, 30] == 0
+    assert mask[20, 41] == 0
+
+
+def test_coloured_prop_preserves_line_alpha_and_only_outlines_fills(tmp_path):
+    from pytoshop.user import nested_layers
+
+    fill = np.zeros((40, 60, 4), dtype=np.uint8)
+    fill[8:32, 20:45] = [245, 180, 30, 255]
+    line = np.zeros((40, 60, 4), dtype=np.uint8)
+    line[5:35, 10:13] = [160, 20, 10, 190]
+    path = tmp_path / "coloured-prop.psd"
+    write_psd(path, [
+        nested_layers.Group(name="PROPS", layers=[
+            nested_layers.Group(name="object", layers=[
+                nested_layers.Group(name="colours", layers=[
+                    _rgba_layer("fill", fill),
+                ]),
+                nested_layers.Group(name="lines", layers=[
+                    _rgba_layer("red ink", line),
+                ]),
+            ]),
+        ]),
+    ], width=60, height=40)
+    result = imageline._isolated_style_alpha(_session(path)["psd"])
+    assert result is not None
+    mask, _, mode = result
+    assert mode == "colouredProp"
+    assert mask[20, 11] == 190
+    assert mask[8, 30] > 0
+    assert mask[20, 30] == 0
+
+
+def test_phone_interface_ignores_glow_but_keeps_authored_shapes(tmp_path):
+    from pytoshop.user import nested_layers
+
+    base = np.zeros((40, 80, 4), dtype=np.uint8)
+    base[5:35, 5:30] = [180, 180, 220, 255]
+    icon = np.zeros((40, 80, 4), dtype=np.uint8)
+    icon[10:16, 12:18] = [255, 255, 255, 255]
+    glow = np.zeros((40, 80, 4), dtype=np.uint8)
+    glow[10:16, 34:40] = [255, 255, 255, 255]
+    line = np.zeros((40, 80, 4), dtype=np.uint8)
+    line[7:33, 7:10] = [10, 10, 10, 200]
+    secondary_base = np.zeros((40, 80, 4), dtype=np.uint8)
+    secondary_base[5:35, 45:75] = [180, 180, 220, 255]
+    secondary_icon = np.zeros((40, 80, 4), dtype=np.uint8)
+    secondary_icon[10:16, 55:61] = [255, 255, 255, 255]
+    path = tmp_path / "phone.psd"
+    write_psd(path, [
+        nested_layers.Group(name="PHONE FRONT", layers=[
+            nested_layers.Group(name="03 BASE", layers=[
+                _rgba_layer("MAIN FILL", base),
+            ]),
+            nested_layers.Group(name="02 CONTENTS", layers=[
+                _rgba_layer("ICON", icon),
+                _rgba_layer("GLOWING ICON", glow),
+            ]),
+            nested_layers.Group(name="01 LINE", layers=[
+                _rgba_layer("LINES", line),
+            ]),
+        ]),
+        nested_layers.Group(name="TEMPLATE", layers=[
+            nested_layers.Group(name="02 BASE", layers=[
+                _rgba_layer("BASE", secondary_base),
+            ]),
+            nested_layers.Group(name="01 CONTENTS", layers=[
+                _rgba_layer("ICON", secondary_icon),
+            ]),
+        ]),
+    ], width=80, height=40)
+    result = imageline._isolated_style_alpha(_session(path)["psd"])
+    assert result is not None
+    mask, _, mode = result
+    assert mode == "phoneInterfaceNoGlow"
+    assert mask[20, 8] == 200
+    assert mask[10, 14] > 0
+    assert mask[12, 36] == 0
+    assert mask[20, 43:49].max() > 0
+    assert mask[8:13, 55:61].max() > 0
+
+
+def test_drawing_panel_style_fills_only_dark_stroke_interiors():
+    mask = np.zeros((30, 50), dtype=np.uint8)
+    mask[5:25, 10] = 255
+    mask[5:25, 14] = 255
+    mask[5:25, 35] = 255
+    rgba = np.full((30, 50, 4), 255, dtype=np.uint8)
+    rgba[5:25, 10:15, :3] = 20
+    rgba[5:25, 35:40, :3] = 20
+    result = imageline._fill_drawing_panel_strokes(
+        mask,
+        rgba,
+        [(0, 0, 25, 30)],
+    )
+    assert result[15, 12] == 255
+    assert result[15, 37] == 0
 
 
 def test_paired_character_colour_and_line_groups_outline_solid_parts(

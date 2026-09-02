@@ -849,6 +849,267 @@ def _compositing_notice_layers(psd):
     return candidates
 
 
+def _compose_authored_alpha(psd, layers):
+    out = np.zeros((psd.height, psd.width), dtype=np.uint8)
+    for layer in layers:
+        image = layer.topil()
+        if image is None:
+            continue
+        alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+        _composite_layer_alpha(out, layer, alpha)
+    return out
+
+
+def _sketch_design_alpha(psd):
+    """Preserve sparse coloured pencil layers from a primary DESIGN page."""
+    roots = [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) == "design"
+        )
+    ]
+    if len(roots) != 1:
+        return None
+    page_groups = [
+        layer for layer in roots[0].descendants()
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) == "page"
+        )
+    ]
+    if not page_groups:
+        return None
+    selected = []
+    found_paper = False
+    for group in page_groups:
+        for layer in group:
+            if (
+                layer.is_group()
+                or not layer.is_visible()
+                or layer.bbox == (0, 0, 0, 0)
+            ):
+                continue
+            image = layer.topil()
+            if image is None:
+                continue
+            rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+            occupied = rgba[..., 3] >= 8
+            occupancy = float(np.mean(occupied))
+            if not occupied.any():
+                continue
+            pixels = rgba[..., :3][occupied]
+            neutral = float(np.mean(
+                pixels.max(axis=1) - pixels.min(axis=1) <= 5))
+            mean = float(np.mean(pixels))
+            if occupancy >= 0.50 and neutral >= 0.85 and mean >= 240:
+                found_paper = True
+                continue
+            if (
+                occupancy <= 0.35
+                and not (neutral >= 0.85 and mean >= 235)
+            ):
+                selected.append(layer)
+    if not found_paper or not selected:
+        return None
+    return _compose_authored_alpha(psd, selected), len(selected)
+
+
+def _coloured_prop_alpha(psd):
+    """Preserve coloured authored ink and outline fills in a PROPS object."""
+    roots = [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) == "prop"
+        )
+    ]
+    if len(roots) != 1:
+        return None
+    objects = []
+    for group in roots[0]:
+        if not group.is_group() or not group.is_visible():
+            continue
+        child_groups = [
+            child for child in group
+            if child.is_group() and child.is_visible()
+        ]
+        if (
+            any(_is_named_line_layer(child.name) for child in child_groups)
+            and any(_is_colour_group_name(child.name) for child in child_groups)
+        ):
+            objects.append(group)
+    if len(objects) != 1:
+        return None
+    line_layers = []
+    colour_layers = []
+    coloured_line = False
+    for layer in objects[0].descendants():
+        if (
+            layer.is_group()
+            or not layer.is_visible()
+            or layer.clipping
+            or layer.bbox == (0, 0, 0, 0)
+        ):
+            continue
+        in_line = _is_named_line_layer(layer.name)
+        in_colour = False
+        parent = layer.parent
+        while parent is not None and parent is not psd:
+            if parent.is_group():
+                in_line = in_line or _is_named_line_layer(parent.name)
+                in_colour = in_colour or _is_colour_group_name(parent.name)
+            parent = parent.parent
+        image = layer.topil()
+        if image is None:
+            continue
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+        occupied = rgba[..., 3] >= 8
+        if in_line:
+            line_layers.append((layer, rgba[..., 3]))
+            if occupied.any():
+                pixels = rgba[..., :3][occupied]
+                coloured_line = coloured_line or bool(np.mean(
+                    pixels.max(axis=1) - pixels.min(axis=1) > 5) >= 0.50)
+        elif in_colour:
+            colour_layers.append((layer, rgba[..., 3]))
+    if not coloured_line or not line_layers or not colour_layers:
+        return None
+    out = np.zeros((psd.height, psd.width), dtype=np.uint8)
+    for layer, alpha in line_layers:
+        _composite_layer_alpha(out, layer, alpha)
+    for layer, alpha in colour_layers:
+        _composite_layer_alpha(out, layer, _shape_outline_alpha(alpha))
+    return out, len(line_layers) + len(colour_layers)
+
+
+def _phone_interface_alpha(psd):
+    """Extract authored phone views while ignoring rendered glow effects."""
+    primary_roots = []
+    secondary_roots = []
+    for layer in psd:
+        if not layer.is_group() or not layer.is_visible():
+            continue
+        child_keys = {
+            _object_key(child.name)
+            for child in layer
+            if child.is_group() and child.is_visible()
+        }
+        has_base = any(key.endswith("base") for key in child_keys)
+        has_contents = any(key.endswith("content") for key in child_keys)
+        has_lines = any(key.endswith("line") for key in child_keys)
+        if (
+            "phone" in set(re.findall(r"[^\W_]+", layer.name.casefold()))
+            and has_base
+            and has_contents
+            and has_lines
+        ):
+            primary_roots.append(layer)
+        elif (
+            has_base
+            and has_contents
+        ):
+            secondary_roots.append(layer)
+    if len(primary_roots) != 1:
+        return None
+    roots = [*primary_roots, *secondary_roots]
+    out = np.zeros((psd.height, psd.width), dtype=np.uint8)
+    count = 0
+    for root in roots:
+        for layer in root.descendants():
+            if (
+                layer.is_group()
+                or not layer.is_visible()
+                or layer.clipping
+                or layer.bbox == (0, 0, 0, 0)
+                or "glowing" in layer.name.casefold()
+            ):
+                continue
+            image = layer.topil()
+            if image is None:
+                continue
+            alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+            in_line = _is_named_line_layer(layer.name)
+            parent = layer.parent
+            while parent is not None and parent is not psd:
+                if parent.is_group():
+                    in_line = in_line or _is_named_line_layer(parent.name)
+                parent = parent.parent
+            _composite_layer_alpha(
+                out,
+                layer,
+                alpha if in_line else _shape_outline_alpha(alpha),
+            )
+            count += 1
+    return (out, count) if count else None
+
+
+def _isolated_style_alpha(psd):
+    for mode, extractor in (
+        ("sketchDesign", _sketch_design_alpha),
+        ("colouredProp", _coloured_prop_alpha),
+        ("phoneInterfaceNoGlow", _phone_interface_alpha),
+    ):
+        result = extractor(psd)
+        if result is not None:
+            mask, count = result
+            return mask, count, mode
+    return None
+
+
+def _drawing_panel_boxes(psd):
+    roots = [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) == "drawing"
+        )
+    ]
+    if len(roots) != 1:
+        return []
+    leaves = [
+        layer for layer in roots[0]
+        if (
+            not layer.is_group()
+            and layer.is_visible()
+            and layer.bbox != (0, 0, 0, 0)
+        )
+    ]
+    if len(leaves) < 2:
+        return []
+    for layer in leaves:
+        image = layer.topil()
+        if image is None:
+            return []
+        alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+        if float(np.mean(alpha >= 247)) < 0.95:
+            return []
+    return [layer.bbox for layer in leaves]
+
+
+def _fill_drawing_panel_strokes(mask, rgba, boxes):
+    if not boxes:
+        return mask
+    support = _rank_filter(mask >= 16, 9, maximum=True)
+    rgb = rgba[..., :3].astype(np.uint16)
+    luminance = (
+        rgb[..., 0] * 77 + rgb[..., 1] * 150 + rgb[..., 2] * 29
+    ) >> 8
+    zone = np.zeros(mask.shape, dtype=bool)
+    for left, top, right, bottom in boxes:
+        zone[
+            max(0, top):min(mask.shape[0], bottom),
+            max(0, left):min(mask.shape[1], right),
+        ] = True
+    out = mask.copy()
+    out[(luminance <= 115) & support & zone] = 255
+    return out
+
+
 def _nested_art_line_layers(psd):
     """Find low-opacity coloured drawing strokes inside a nested ART group."""
     candidates = []
@@ -1350,6 +1611,18 @@ def _is_character_fill_line_layer(layer, psd):
 def _named_line_alpha(session):
     """Composite explicit visible Line layers, independent of their RGB ink."""
     psd = session["psd"]
+    isolated = _isolated_style_alpha(psd)
+    if isolated is not None:
+        mask, count, mode = isolated
+        return (
+            np.ascontiguousarray(mask),
+            count,
+            0,
+            0,
+            0,
+            0,
+            mode,
+        )
     candidates = []
 
     def walk(nodes, line_group=False, ancestors_visible=True):
@@ -1601,7 +1874,7 @@ def _named_line_alpha(session):
         len(simplified_layers),
         len(character_layers),
         len(graphic_layers),
-        bool(standalone_pose_layers),
+        "authoredPoseOnly" if standalone_pose_layers else None,
     )
 
 
@@ -2116,17 +2389,17 @@ def extract_image_line(session, image_line):
             simplified_background_count,
             flattened_character_count,
             flattened_graphic_count,
-            standalone_pose_only,
+            exclusive_mode,
         ) = named_lines
         residual_started = time.perf_counter()
-        if standalone_pose_only:
+        if exclusive_mode is not None:
             residual = np.zeros_like(mask_u8)
             residual_profile = {
                 "compositeEdgeCandidatePixels": 0,
                 "compositeResidualPixels": 0,
                 "compositeEdgeCoverageBefore": 1.0,
                 "compositeEdgeCoverageAfter": 1.0,
-                "compositeResidualMode": "authoredPoseOnly",
+                "compositeResidualMode": exclusive_mode,
             }
         elif _uses_explicit_turn_line_system(session["psd"]):
             residual = _turn_colour_boundary_alpha(session, mask_u8)
@@ -2146,7 +2419,7 @@ def extract_image_line(session, image_line):
                 opts["minLength"],
             )
         np.maximum(mask_u8, residual, out=mask_u8)
-        if not standalone_pose_only:
+        if exclusive_mode is None:
             artwork_rgba = _artwork_rgba(session)
             artwork_edges = _missing_colour_edges(
                 artwork_rgba,
@@ -2166,7 +2439,7 @@ def extract_image_line(session, image_line):
             hashlib.sha256(mask_u8.tobytes()).hexdigest(),
         )
         peak_tracked_array_bytes = mask_u8.nbytes + residual.nbytes
-        if not standalone_pose_only:
+        if exclusive_mode is None:
             peak_tracked_array_bytes += (
                 artwork_rgba.nbytes + artwork_edges.nbytes
             )
@@ -2201,6 +2474,7 @@ def extract_image_line(session, image_line):
                 _PROFILE_CACHE.pop(evicted, None)
         return result
 
+    drawing_panel_boxes = _drawing_panel_boxes(session["psd"])
     rgba = _document_rgba(session)
     composite_done = time.perf_counter()
     if session.get("flattened_image"):
@@ -2307,7 +2581,11 @@ def extract_image_line(session, image_line):
         + eroded_mask.nbytes + weighted_mask.nbytes + missing_edges.nbytes
         + replacement_zone.nbytes
     )
-    mask_u8 = weighted_mask
+    mask_u8 = _fill_drawing_panel_strokes(
+        weighted_mask,
+        rgba,
+        drawing_panel_boxes,
+    )
     boundary_done = time.perf_counter()
     mask_u8[~alpha] = 0
     mask_u8 = np.ascontiguousarray(mask_u8)
@@ -2327,6 +2605,9 @@ def extract_image_line(session, image_line):
             max(0, algorithm_rss_end - algorithm_rss_start)
             if algorithm_rss_start is not None and algorithm_rss_end is not None
             else None
+        ),
+        "specialLineStyle": (
+            "filledDrawingPanels" if drawing_panel_boxes else None
         ),
     }
     if cache_key is not None:
