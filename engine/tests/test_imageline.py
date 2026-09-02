@@ -857,42 +857,81 @@ def test_turnaround_line_layers_outline_solid_parts_and_keep_thin_strokes(
     assert mask[30, 56] > 0
 
 
-def test_turnaround_line_layers_keep_only_edges_visible_in_embedded_preview(
-        tmp_path, monkeypatch):
+def test_clipped_line_layer_does_not_add_coverage_outside_its_base(tmp_path):
     from pytoshop.user import nested_layers
 
-    line = np.zeros((40, 60, 4), dtype=np.uint8)
-    line[5:35, 9:12] = [20, 20, 20, 255]
-    line[5:35, 39:42] = [20, 20, 20, 255]
-    path = tmp_path / "covered-turn-lines.psd"
+    base = np.zeros((40, 60, 4), dtype=np.uint8)
+    base[5:35, 9:12] = [20, 20, 20, 255]
+    clipped = np.zeros((40, 60, 4), dtype=np.uint8)
+    clipped[5:35, 39:42] = [220, 20, 40, 255]
+    path = tmp_path / "clipped-line.psd"
     write_psd(path, [
         nested_layers.Group(name="TURN", layers=[
             nested_layers.Group(name="POSE", layers=[
-                nested_layers.Group(name="LINES", layers=[
-                    _rgba_layer("LINE", line),
+                nested_layers.Group(name="LINE", layers=[
+                    _rgba_layer("BASE LINE", base),
+                    _rgba_layer("CLIPPED LINE", clipped),
                 ]),
             ]),
         ]),
     ], width=60, height=40)
-    support = np.zeros((40, 60), dtype=bool)
-    support[:, 7:14] = True
-    monkeypatch.setattr(
-        imageline,
-        "_visible_colour_edge_support",
-        lambda rgba: support,
+    session = _session(path)
+    clipped_layer = next(
+        layer for layer in session["psd"].descendants()
+        if not layer.is_group() and layer.name == "CLIPPED LINE"
     )
-    preview = np.zeros((40, 60, 4), dtype=np.uint8)
-    preview[0, 0] = [255, 255, 255, 255]
-    monkeypatch.setattr(
-        imageline,
-        "_embedded_preview_rgba",
-        lambda session: preview,
-    )
-    result = imageline._named_line_alpha(_session(path))
+    clipped_layer.clipping = True
+    result = imageline._named_line_alpha(session)
     assert result is not None
     mask = result[0]
     assert mask[20, 10] > 0
     assert mask[20, 40] == 0
+
+
+def test_standalone_pose_keeps_authored_sketch_and_ignores_reference_art(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    main_sketch = np.zeros((40, 60, 4), dtype=np.uint8)
+    main_sketch[5:30, 9:18] = [10, 10, 10, 255]
+    tone = np.zeros((40, 60, 4), dtype=np.uint8)
+    tone[3:32, 5:24] = [160, 160, 160, 255]
+    reference_sketch = np.zeros((40, 60, 4), dtype=np.uint8)
+    reference_sketch[5:30, 29:32] = [10, 10, 10, 255]
+    border = np.zeros((40, 60, 4), dtype=np.uint8)
+    border[:, 49:52] = [10, 10, 10, 255]
+    note = np.zeros((40, 60, 4), dtype=np.uint8)
+    note[35:38, 4:14] = [10, 10, 10, 255]
+    path = tmp_path / "standalone-pose.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("border", border),
+            _rgba_layer(
+                "** invisible lines affected by compo **",
+                note,
+            ),
+        ]),
+        nested_layers.Group(name="EXTRA REFS", layers=[
+            nested_layers.Group(name="POSE", layers=[
+                _rgba_layer("tone", tone),
+                _rgba_layer("sketch", reference_sketch),
+            ]),
+        ]),
+        nested_layers.Group(name="SPECIAL POSE", layers=[
+            nested_layers.Group(name="POSE", layers=[
+                _rgba_layer("tone", tone),
+                _rgba_layer("sketch", main_sketch),
+            ]),
+        ]),
+    ], width=60, height=40)
+    result = imageline._named_line_alpha(_session(path))
+    assert result is not None
+    mask = result[0]
+    assert result[-1] is True
+    assert mask[20, 13] == 255
+    assert mask[20, 30] == 0
+    assert mask[20, 50] == 0
+    assert mask[36, 8] == 255
 
 
 def test_paired_character_colour_and_line_groups_outline_solid_parts(

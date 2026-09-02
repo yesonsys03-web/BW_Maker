@@ -171,10 +171,13 @@ export interface PreviewFileId {
  * 33 (2026-08-28): FL102에서 오브젝트 그룹과 같은 이름의 컬러 잉크 레이어를
  * 추가 인식하고, LINE 그룹 안의 채색 면은 라인에서 제외한다.
  *
- * 34 (2026-09-02): 캐릭터 LINE 레이어 중 Photoshop 최종 프리뷰에서 색상
- * 레이어에 가려진 머리·손 변형 라인을 제외한다.
+ * 36 (2026-09-02): 클리핑 레이어의 원시 알파가 최종 프리뷰에 없는 얼굴·머리·손
+ * 변형을 추가하지 않도록, 선 커버리지는 클리핑 베이스에서만 가져온다.
+ *
+ * 37 (2026-09-02): 단독 POSE의 tone/sketch 구조에서는 원본 sketch 알파를
+ * 그대로 사용하고 보조 레퍼런스·프레임·채색 경계 합성을 제외한다.
  */
-export const PREVIEW_PICTURE_VERSION = 34;
+export const PREVIEW_PICTURE_VERSION = 37;
 
 export function previewCacheKey(
   file: PreviewFileId,

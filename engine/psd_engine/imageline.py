@@ -69,15 +69,6 @@ def parse_line_color(line_color):
     return _parse_line_color(line_color) or (0, 0, 0)
 
 
-def _embedded_preview_rgba(session):
-    """Read Photoshop's final preview, rejecting generated solid placeholders."""
-    embedded = session["psd"].composite(force=False)
-    if embedded is None:
-        return None
-    rgba = np.array(embedded.convert("RGBA"), dtype=np.uint8)
-    return rgba if np.any(rgba != rgba[0, 0]) else None
-
-
 def _document_rgba(session):
     if session.get("flattened_image") and session.get("path"):
         with Image.open(session["path"]) as image:
@@ -87,9 +78,11 @@ def _document_rgba(session):
     # avoids decoding the entire layer stack. Generated test PSDs can contain
     # a placeholder solid-black composite, so only that degenerate case needs
     # the forced layer compositor.
-    embedded_rgba = _embedded_preview_rgba(session)
-    if embedded_rgba is not None:
-        return embedded_rgba
+    embedded = psd.composite(force=False)
+    if embedded is not None:
+        embedded_rgba = np.array(embedded.convert("RGBA"), dtype=np.uint8)
+        if np.any(embedded_rgba != embedded_rgba[0, 0]):
+            return embedded_rgba
     try:
         img = psd.composite(force=True, color=1.0, alpha=0.0)
     except ImportError as exc:
@@ -105,7 +98,7 @@ def _document_rgba(session):
             RuntimeWarning,
             stacklevel=2,
         )
-        img = psd.composite(force=False)
+        img = embedded
         if img is None:
             raise
     return np.array(img.convert("RGBA"), dtype=np.uint8)
@@ -776,6 +769,86 @@ def _paired_reference_line_layers(psd):
     return candidates
 
 
+def _standalone_pose_line_layers(psd):
+    """Find authored sketch ink paired with tone inside a primary pose group."""
+    candidates = []
+    roots = [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and "pose" in set(re.findall(
+                r"[^\W_]+", layer.name.casefold()))
+            and not (
+                set(re.findall(r"[^\W_]+", layer.name.casefold()))
+                & {"extra", "ref", "refs"}
+            )
+        )
+    ]
+    for root in roots:
+        groups = [root, *[
+            layer for layer in root.descendants()
+            if layer.is_group() and layer.is_visible()
+        ]]
+        for group in groups:
+            leaves = [
+                layer for layer in group
+                if (
+                    not layer.is_group()
+                    and layer.is_visible()
+                    and layer.bbox != (0, 0, 0, 0)
+                )
+            ]
+            sketches = [
+                layer for layer in leaves
+                if "sketch" in set(re.findall(
+                    r"[^\W_]+", layer.name.casefold()))
+            ]
+            if not sketches:
+                continue
+            for layer in sketches:
+                image = layer.topil()
+                if image is None:
+                    continue
+                alpha = np.array(
+                    image.convert("RGBA"), dtype=np.uint8)[..., 3]
+                occupancy = float(np.mean(alpha >= 8))
+                if not 0.005 <= occupancy <= 0.25:
+                    continue
+                if any(
+                    other is not layer
+                    and other.width * other.height >= (
+                        layer.width * layer.height * 0.25
+                    )
+                    for other in leaves
+                ):
+                    candidates.append(layer)
+    return candidates
+
+
+def _compositing_notice_layers(psd):
+    """Keep the delivery note attached to a standalone authored pose."""
+    candidates = []
+    for group in psd:
+        if (
+            not group.is_group()
+            or not group.is_visible()
+            or _object_key(group.name) != "template"
+        ):
+            continue
+        for layer in group:
+            words = set(re.findall(r"[^\W_]+", layer.name.casefold()))
+            if (
+                not layer.is_group()
+                and layer.is_visible()
+                and {"invisible", "lines"} <= words
+                and any(word.startswith("compo") for word in words)
+                and layer.bbox != (0, 0, 0, 0)
+            ):
+                candidates.append(layer)
+    return candidates
+
+
 def _nested_art_line_layers(psd):
     """Find low-opacity coloured drawing strokes inside a nested ART group."""
     candidates = []
@@ -1320,6 +1393,16 @@ def _named_line_alpha(session):
         if id(layer) not in candidate_ids:
             candidates.append(layer)
             candidate_ids.add(id(layer))
+    standalone_pose_layers = _standalone_pose_line_layers(psd)
+    for layer in standalone_pose_layers:
+        if id(layer) not in candidate_ids:
+            candidates.append(layer)
+            candidate_ids.add(id(layer))
+    if standalone_pose_layers:
+        for layer in _compositing_notice_layers(psd):
+            if id(layer) not in candidate_ids:
+                candidates.append(layer)
+                candidate_ids.add(id(layer))
     outline_only_ids = set()
     for layer in _paired_reference_line_layers(psd):
         outline_only_ids.add(id(layer))
@@ -1336,6 +1419,28 @@ def _named_line_alpha(session):
             if id(layer) not in candidate_ids:
                 candidates.append(layer)
                 candidate_ids.add(id(layer))
+    # A clipped layer only recolours the opaque pixels of its base layer; it
+    # cannot add visible coverage. Extracting its raw alpha separately exposes
+    # alternate face, hair, and hand drawings that Photoshop correctly clips
+    # out of the final preview. The unclipped base already carries the exact
+    # authored line alpha and thickness.
+    candidates = [
+        layer for layer in candidates
+        if not layer.clipping
+    ]
+    candidate_ids = {id(layer) for layer in candidates}
+    outline_only_ids &= candidate_ids
+    if standalone_pose_layers:
+        candidates = [
+            *standalone_pose_layers,
+            *_compositing_notice_layers(psd),
+        ]
+        candidates = [
+            layer for layer in candidates
+            if not layer.clipping
+        ]
+        candidate_ids = {id(layer) for layer in candidates}
+        outline_only_ids = set()
     silhouette_layers = _style_silhouette_layers(
         psd,
         include_all=_is_fl102_document(session),
@@ -1362,10 +1467,6 @@ def _named_line_alpha(session):
     ]
     simplified_layers = _prop_background_plates(psd)
     character_layers = _reference_character_layers(psd)
-    character_fill_ids = {
-        id(layer) for layer in candidates
-        if _is_character_fill_line_layer(layer, psd)
-    }
     if (
         not candidates
         and not silhouette_layers
@@ -1376,19 +1477,13 @@ def _named_line_alpha(session):
         return None
 
     edge_support = None
-    character_edge_support = None
-    if silhouette_layers or simplified_layers or character_fill_ids:
-        embedded_rgba = _embedded_preview_rgba(session)
-        if embedded_rgba is not None:
-            if silhouette_layers or simplified_layers:
+    if silhouette_layers or simplified_layers:
+        embedded = psd.composite(force=False)
+        if embedded is not None:
+            embedded_rgba = np.array(
+                embedded.convert("RGBA"), dtype=np.uint8)
+            if np.any(embedded_rgba != embedded_rgba[0, 0]):
                 edge_support = _rendered_edge_support(embedded_rgba)
-            if character_fill_ids:
-                # Character alternatives can be only a few pixels apart. The
-                # broad support used for coarse silhouettes would let covered
-                # hair and finger variants leak through beside a visible edge.
-                character_edge_support = _visible_colour_edge_support(
-                    embedded_rgba
-                )
 
     # Decode only the selected layer bounds. A whole-document compositor made
     # a 1.1 GB PSB peak above 3 GB even though its 26 Line layers occupy a
@@ -1407,19 +1502,11 @@ def _named_line_alpha(session):
         if content_key in seen_candidate_content:
             continue
         seen_candidate_content.add(content_key)
-        if id(layer) in character_fill_ids:
+        if _is_character_fill_line_layer(layer, psd):
             alpha = _remove_large_solid_interiors(
                 alpha,
                 filter_size=11,
                 thin_outline=True,
-            )
-            # A visible LINE layer can still be covered by visible colour
-            # artwork above it. Keep only ink that contributes to Photoshop's
-            # embedded final preview.
-            _keep_visible_outline(
-                alpha,
-                layer,
-                character_edge_support,
             )
         elif _inside_mixed_line_container(layer):
             alpha = _remove_mixed_line_fill_interiors(alpha)
@@ -1514,7 +1601,7 @@ def _named_line_alpha(session):
         len(simplified_layers),
         len(character_layers),
         len(graphic_layers),
-        character_edge_support,
+        bool(standalone_pose_layers),
     )
 
 
@@ -1883,15 +1970,13 @@ def _composite_residual_alpha(session, line_alpha, min_length):
     }
 
 
-def _turn_colour_boundary_alpha(
-        session, line_alpha, visible_support=None):
+def _turn_colour_boundary_alpha(session, line_alpha):
     """Add clean internal fill boundaries without altering authored lines."""
     psd = session["psd"]
     out = np.zeros(line_alpha.shape, dtype=np.uint8)
     source_support = line_alpha >= 8
-    if visible_support is None:
-        visible_support = _visible_colour_edge_support(
-            _document_rgba(session))
+    visible_support = _visible_colour_edge_support(
+        _document_rgba(session))
     seen = set()
     for root in psd:
         if (
@@ -2031,15 +2116,20 @@ def extract_image_line(session, image_line):
             simplified_background_count,
             flattened_character_count,
             flattened_graphic_count,
-            character_edge_support,
+            standalone_pose_only,
         ) = named_lines
         residual_started = time.perf_counter()
-        if _uses_explicit_turn_line_system(session["psd"]):
-            residual = _turn_colour_boundary_alpha(
-                session,
-                mask_u8,
-                visible_support=character_edge_support,
-            )
+        if standalone_pose_only:
+            residual = np.zeros_like(mask_u8)
+            residual_profile = {
+                "compositeEdgeCandidatePixels": 0,
+                "compositeResidualPixels": 0,
+                "compositeEdgeCoverageBefore": 1.0,
+                "compositeEdgeCoverageAfter": 1.0,
+                "compositeResidualMode": "authoredPoseOnly",
+            }
+        elif _uses_explicit_turn_line_system(session["psd"]):
+            residual = _turn_colour_boundary_alpha(session, mask_u8)
             residual_profile = {
                 "compositeEdgeCandidatePixels": int(
                     np.count_nonzero(residual >= 32)),
@@ -2056,17 +2146,18 @@ def extract_image_line(session, image_line):
                 opts["minLength"],
             )
         np.maximum(mask_u8, residual, out=mask_u8)
-        artwork_rgba = _artwork_rgba(session)
-        artwork_edges = _missing_colour_edges(
-            artwork_rgba,
-            mask_u8,
-            opts["minLength"],
-        )
-        if _suppress_flattened_red_annotations(artwork_rgba[..., :3]):
-            artwork_edges[
-                _flattened_annotation_zone(artwork_rgba[..., :3])
-            ] = 0
-        np.maximum(mask_u8, artwork_edges, out=mask_u8)
+        if not standalone_pose_only:
+            artwork_rgba = _artwork_rgba(session)
+            artwork_edges = _missing_colour_edges(
+                artwork_rgba,
+                mask_u8,
+                opts["minLength"],
+            )
+            if _suppress_flattened_red_annotations(artwork_rgba[..., :3]):
+                artwork_edges[
+                    _flattened_annotation_zone(artwork_rgba[..., :3])
+                ] = 0
+            np.maximum(mask_u8, artwork_edges, out=mask_u8)
         mask_u8 = np.ascontiguousarray(mask_u8)
         finished = time.perf_counter()
         algorithm_rss_end = _max_rss_bytes()
@@ -2074,15 +2165,18 @@ def extract_image_line(session, image_line):
             mask_u8,
             hashlib.sha256(mask_u8.tobytes()).hexdigest(),
         )
+        peak_tracked_array_bytes = mask_u8.nbytes + residual.nbytes
+        if not standalone_pose_only:
+            peak_tracked_array_bytes += (
+                artwork_rgba.nbytes + artwork_edges.nbytes
+            )
         profile = {
             "compositeSeconds": finished - started,
             "darkExtractionSeconds": 0.0,
             "boundaryExtractionSeconds": finished - residual_started,
             "suppressionUnionSeconds": 0.0,
             "totalSeconds": finished - started,
-            "peakTrackedArrayBytes": int(
-                mask_u8.nbytes + residual.nbytes
-                + artwork_rgba.nbytes + artwork_edges.nbytes),
+            "peakTrackedArrayBytes": int(peak_tracked_array_bytes),
             "algorithmPeakRssDeltaBytes": (
                 max(0, algorithm_rss_end - algorithm_rss_start)
                 if (
