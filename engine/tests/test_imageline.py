@@ -1033,6 +1033,97 @@ def test_coloured_prop_preserves_line_alpha_and_only_outlines_fills(tmp_path):
     assert mask[20, 30] == 0
 
 
+def test_numbered_crowd_silhouettes_export_only_their_outlines(tmp_path):
+    from pytoshop.user import nested_layers
+
+    mg = np.zeros((60, 100, 4), dtype=np.uint8)
+    mg[10:50, 10:35] = [80, 80, 80, 255]
+    fg = np.zeros((60, 100, 4), dtype=np.uint8)
+    fg[8:52, 60:90] = [120, 120, 120, 255]
+    template = np.zeros((60, 100, 4), dtype=np.uint8)
+    template[:, 48:51] = [20, 20, 20, 255]
+    path = tmp_path / "crowd-silhouettes.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("frame", template),
+        ]),
+        nested_layers.Group(name="CROWD", layers=[
+            nested_layers.Group(name="MG", layers=[
+                _rgba_layer("05", mg),
+            ]),
+            nested_layers.Group(name="FG", layers=[
+                _rgba_layer("01", fg),
+            ]),
+        ]),
+    ], width=100, height=60)
+    result = imageline._named_line_alpha(_session(path))
+    assert result is not None
+    mask = result[0]
+    assert result[-1] == "crowdSilhouettes"
+    assert mask[30, 20] == 0
+    assert mask[30, 10] > 0
+    assert mask[30, 75] == 0
+    assert mask[30, 89] > 0
+    assert mask[:, 49].max() == 0
+
+
+def test_crowd_silhouette_hides_lower_outlines_behind_upper_figures(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    upper = np.zeros((50, 80, 4), dtype=np.uint8)
+    upper[5:45, 10:50] = [80, 80, 80, 255]
+    lower = np.zeros((50, 80, 4), dtype=np.uint8)
+    lower[10:40, 30:70] = [120, 120, 120, 255]
+    path = tmp_path / "overlapping-crowd.psd"
+    write_psd(path, [
+        nested_layers.Group(name="CROWD", layers=[
+            nested_layers.Group(name="MG", layers=[
+                _rgba_layer("05", upper),
+                _rgba_layer("04", lower),
+            ]),
+        ]),
+    ], width=80, height=50)
+    mask = imageline._crowd_silhouette_alpha(_session(path)["psd"])[0]
+    assert mask[25, 10] > 0
+    assert mask[25, 49] > 0
+    assert mask[25, 30] == 0
+    assert mask[25, 69] > 0
+
+
+def test_crowd_mode_keeps_visible_background_and_foreground_lines(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    crowd = np.zeros((60, 100, 4), dtype=np.uint8)
+    crowd[15:45, 30:40] = [80, 80, 80, 255]
+    wall = np.zeros((60, 100, 4), dtype=np.uint8)
+    wall[29:32, 5:95] = [20, 20, 20, 255]
+    neon = np.zeros((60, 100, 4), dtype=np.uint8)
+    neon[5:20, 80:83] = [240, 240, 240, 255]
+    fence = np.zeros((60, 100, 4), dtype=np.uint8)
+    fence[5:55, 45:56] = [120, 120, 120, 255]
+    path = tmp_path / "crowd-with-environment.psd"
+    write_psd(path, [
+        _rgba_layer("FENCE", fence),
+        nested_layers.Group(name="CROWD", layers=[
+            nested_layers.Group(name="MG", layers=[
+                _rgba_layer("01", crowd),
+            ]),
+        ]),
+        nested_layers.Group(name="LAYOUT", layers=[
+            _rgba_layer("NEON", neon),
+            _rgba_layer("wall line", wall),
+        ]),
+    ], width=100, height=60)
+    mask = imageline._crowd_silhouette_alpha(_session(path)["psd"])[0]
+    assert mask[30, 10] > 0
+    assert mask[30, 35] == 0
+    assert mask[30, 45] > 0
+    assert mask[30, 50] == 0
+    assert mask[10, 81] > 0
+
+
 def test_multiple_prop_objects_are_kept_and_template_lines_are_excluded(
         tmp_path):
     from pytoshop.user import nested_layers

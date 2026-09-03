@@ -1271,6 +1271,185 @@ def _coloured_prop_alpha(psd):
     return out, len(line_layers) + len(colour_layers)
 
 
+def _crowd_silhouette_alpha(psd):
+    """Trace numbered MG/FG crowd silhouettes without layout/reference art."""
+    roots = [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) == "crowd"
+        )
+    ]
+    if len(roots) != 1:
+        return None
+    depth_groups = [
+        layer for layer in roots[0]
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) in {"mg", "fg"}
+        )
+    ]
+    if not depth_groups:
+        return None
+    silhouettes = [
+        layer
+        for group in depth_groups
+        for layer in group
+        if (
+            not layer.is_group()
+            and layer.is_visible()
+            and not layer.clipping
+            and layer.bbox != (0, 0, 0, 0)
+            and re.fullmatch(r"\d+", layer.name.strip())
+        )
+    ]
+    if not silhouettes:
+        return None
+
+    out = np.zeros((psd.height, psd.width), dtype=np.uint8)
+    occlusion = np.zeros((psd.height, psd.width), dtype=bool)
+    # PSD children are stored back-to-front. Walk them in reverse so the
+    # occlusion mask follows the same front-to-back order as the composite
+    # preview (FG over MG, and higher-numbered stack entries underneath).
+    for layer in reversed(silhouettes):
+        image = layer.topil()
+        if image is None:
+            continue
+        alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+        outline = _shape_outline_alpha(alpha)
+        left, top, _, _ = layer.bbox
+        src_x = max(0, -left)
+        src_y = max(0, -top)
+        dst_x = max(0, left)
+        dst_y = max(0, top)
+        width = min(alpha.shape[1] - src_x, psd.width - dst_x)
+        height = min(alpha.shape[0] - src_y, psd.height - dst_y)
+        if width <= 0 or height <= 0:
+            continue
+        blocked = np.array(
+            Image.fromarray(
+                occlusion[
+                    dst_y:dst_y + height,
+                    dst_x:dst_x + width,
+                ].astype(np.uint8) * 255,
+                "L",
+            ).filter(ImageFilter.MaxFilter(3)),
+            dtype=np.uint8,
+        ) > 0
+        local_outline = outline[
+            src_y:src_y + height,
+            src_x:src_x + width,
+        ].copy()
+        local_outline[blocked] = 0
+        local_alpha = np.zeros_like(alpha)
+        local_alpha[
+            src_y:src_y + height,
+            src_x:src_x + width,
+        ] = local_outline
+        _composite_layer_alpha(out, layer, local_alpha)
+        occlusion[
+            dst_y:dst_y + height,
+            dst_x:dst_x + width,
+        ] |= (
+            alpha[
+                src_y:src_y + height,
+                src_x:src_x + width,
+            ] >= 8
+        )
+
+    background = np.zeros_like(out)
+    background_count = 0
+    layout_roots = [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) == "layout"
+        )
+    ]
+    if len(layout_roots) == 1:
+        for layer in layout_roots[0].descendants():
+            if (
+                layer.is_group()
+                or not layer.is_visible()
+                or layer.clipping
+                or layer.bbox == (0, 0, 0, 0)
+                or not (
+                    _is_named_line_layer(layer.name)
+                    or _object_key(layer.name) in {"neon", "pupil"}
+                )
+            ):
+                continue
+            image = layer.topil()
+            if image is None:
+                continue
+            alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+            opacity = int(layer.opacity)
+            parent = layer.parent
+            while parent is not None and parent is not psd:
+                opacity = (opacity * int(parent.opacity) + 127) // 255
+                parent = parent.parent
+            if opacity < 255:
+                alpha = (
+                    (
+                        alpha.astype(np.uint16) * opacity
+                        + 127
+                    ) // 255
+                ).astype(np.uint8)
+            _composite_layer_alpha(background, layer, alpha)
+            background_count += 1
+    background[occlusion] = 0
+
+    combined = (
+        out.astype(np.uint16)
+        + (
+            background.astype(np.uint16)
+            * (255 - out.astype(np.uint16))
+            + 127
+        ) // 255
+    ).astype(np.uint8)
+
+    foreground = np.zeros_like(out)
+    foreground_coverage = np.zeros_like(out)
+    foreground_count = 0
+    for layer in psd:
+        if (
+            layer.is_group()
+            or not layer.is_visible()
+            or layer.clipping
+            or layer.bbox == (0, 0, 0, 0)
+            or _object_key(layer.name) != "fence"
+        ):
+            continue
+        image = layer.topil()
+        if image is None:
+            continue
+        alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+        _composite_layer_alpha(
+            foreground_coverage,
+            layer,
+            np.where(alpha >= 8, 255, 0).astype(np.uint8),
+        )
+        _composite_layer_alpha(
+            foreground,
+            layer,
+            _shape_outline_alpha(alpha),
+        )
+        foreground_count += 1
+    combined[foreground_coverage > 0] = 0
+    combined = (
+        foreground.astype(np.uint16)
+        + (
+            combined.astype(np.uint16)
+            * (255 - foreground.astype(np.uint16))
+            + 127
+        ) // 255
+    ).astype(np.uint8)
+    return combined, len(silhouettes) + background_count + foreground_count
+
+
 def _phone_interface_alpha(psd):
     """Extract authored phone views while ignoring rendered glow effects."""
     primary_roots = []
@@ -1334,6 +1513,7 @@ def _phone_interface_alpha(psd):
 
 def _isolated_style_alpha(psd):
     for mode, extractor in (
+        ("crowdSilhouettes", _crowd_silhouette_alpha),
         ("sketchDesign", _sketch_design_alpha),
         ("colouredProp", _coloured_prop_alpha),
         ("phoneInterfaceNoGlow", _phone_interface_alpha),

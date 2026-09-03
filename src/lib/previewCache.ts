@@ -206,8 +206,26 @@ export interface PreviewFileId {
  *
  * 47 (2026-09-03): 플랫 Color/Colour PSD도 검증된 기존 색 경계 추출과
  * 제작 라인 농도(알파 상한 232)를 그대로 사용한다.
+ *
+ * 48 (2026-09-03): 최상위 CROWD 아래 MG/FG의 번호 레이어는 실루엣
+ * 외곽선만 추출하고 레이아웃·레퍼런스·채움은 제외한다.
+ *
+ * 49 (2026-09-03): CROWD 실루엣은 PSD 앞뒤 순서를 적용해 앞 캐릭터에
+ * 가려진 뒤 캐릭터의 외곽선을 출력하지 않는다.
+ *
+ * 50 (2026-09-03): CROWD의 PSD 저장 순서(뒤→앞)를 프리뷰 합성 순서와
+ * 동일하게 뒤집어 FG/MG 캐릭터의 실제 겹침 순서를 맞춘다.
+ *
+ * 51 (2026-09-03): CROWD 모드에서도 LAYOUT의 보이는 배경 라인과 최상위
+ * FENCE 외곽선을 원본 앞뒤 순서대로 포함하고 가려진 배경선만 제거한다.
+ *
+ * 52 (2026-09-03): 전경 FENCE의 채워진 영역 뒤에 가려진 군중·배경 라인을
+ * 지운 뒤 펜스 외곽선만 앞에 합성한다.
+ *
+ * 53 (2026-09-03): LAYOUT의 NEON 선화와 pupils도 보이는 배경 라인으로
+ * 포함하되 NEON fill은 제외하고 기존 가림 처리를 적용한다.
  */
-export const PREVIEW_PICTURE_VERSION = 47;
+export const PREVIEW_PICTURE_VERSION = 53;
 
 export function previewCacheKey(
   file: PreviewFileId,
