@@ -615,24 +615,25 @@ def test_colour_shapes_are_scoped_to_top_level_art_group(tmp_path):
     assert mask[20, 4] == 0
 
 
-def test_artwork_render_falls_back_when_optional_shape_renderer_is_missing(
+def test_artwork_render_keeps_raw_art_when_optional_renderer_is_missing(
         tmp_path, monkeypatch):
     from pytoshop.user import nested_layers
 
     pixels = np.zeros((20, 30, 4), dtype=np.uint8)
     pixels[5:15, 8:22, :] = [90, 120, 180, 255]
+    guide = np.zeros((20, 30, 4), dtype=np.uint8)
+    guide[2:18, 3, :] = [20, 20, 20, 255]
     path = tmp_path / "vector-art.psd"
     write_psd(path, [
         nested_layers.Group(name="*ART", layers=[
             _rgba_layer("shape", pixels),
         ]),
         nested_layers.Group(name="*FIELDGUIDES", layers=[
-            _rgba_layer("frame", pixels),
+            _rgba_layer("frame", guide),
         ]),
     ], width=30, height=20)
     session = _session(path)
     art = next(layer for layer in session["psd"] if layer.name == "*ART")
-    expected = np.full((20, 30, 4), [12, 34, 56, 255], dtype=np.uint8)
 
     def missing_renderer(*args, **kwargs):
         raise ImportError("aggdraw")
@@ -642,12 +643,9 @@ def test_artwork_render_falls_back_when_optional_shape_renderer_is_missing(
         "composite",
         missing_renderer,
     )
-    monkeypatch.setattr(
-        imageline,
-        "_document_rgba",
-        lambda _: expected,
-    )
-    assert imageline._artwork_rgba(session) is expected
+    rendered = imageline._artwork_rgba(session)
+    assert (rendered[10, 10] == [90, 120, 180, 255]).all()
+    assert rendered[:, 3, 3].max() == 0
 
 
 def test_clean_style_sign_and_wall_pattern_get_outlines(tmp_path):
@@ -691,18 +689,28 @@ def test_flattened_png_uses_the_line_model_and_exposes_one_layer(
     assert session["tree"][0]["name"] == "Flattened image"
     expected = np.zeros((30, 40), dtype=np.uint8)
     expected[8:22, 10] = 201
-    missing = np.zeros((30, 40), dtype=np.uint8)
-    missing[2, 2] = 177
     monkeypatch.setattr(
         imageline, "_flattened_model_alpha", lambda _: expected.copy())
     monkeypatch.setattr(
         imageline,
         "_missing_colour_edges",
-        lambda rgba, line_alpha, min_length: missing.copy(),
+        lambda *_args, **_kwargs: pytest.fail(
+            "flattened model output must not gain fragmented colour edges"),
     )
     mask, _ = extract_image_line(session, OPTS)
-    expected[2, 2] = 177
     assert np.array_equal(mask, expected)
+
+
+def test_flattened_model_alpha_is_strictly_binary():
+    alpha = np.array([
+        [0, 8, 63],
+        [64, 180, 255],
+    ], dtype=np.uint8)
+    cleaned = imageline._binarize_flattened_alpha(alpha)
+    assert np.array_equal(cleaned, np.array([
+        [0, 0, 0],
+        [255, 255, 255],
+    ], dtype=np.uint8))
 
 
 def test_flattened_review_guide_mask_rejects_red_but_not_brown_ink():
@@ -832,6 +840,27 @@ def test_turnaround_solid_parts_use_a_narrower_hollowing_threshold():
     assert (turnaround_cleaned[33:38, 5:45] == 173).all()
     assert turnaround_cleaned[32, 25] == 0
     assert turnaround_cleaned[38, 25] == 0
+
+
+def test_unnamed_turnaround_arm_layer_is_included_as_outline(tmp_path):
+    from pytoshop.user import nested_layers
+
+    line = np.zeros((200, 200, 4), dtype=np.uint8)
+    line[20:180, 85:115] = [20, 20, 20, 255]
+    path = tmp_path / "turn-authored-arm.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURN", layers=[
+            nested_layers.Group(name="POSE", layers=[
+                nested_layers.Group(name="LINES", layers=[
+                    _rgba_layer("Layer 2", line),
+                ]),
+            ]),
+        ]),
+    ], width=200, height=200)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[100, 100] == 0
+    assert mask[100, 86] == 255
+    assert mask[100, 113] == 255
 
 
 def test_turnaround_line_layers_outline_solid_parts_and_keep_thin_strokes(
@@ -964,6 +993,17 @@ def test_sketch_design_keeps_authored_marks_without_paper_or_references(
     assert mask[20, 41] == 0
 
 
+def test_coloured_sketch_does_not_turn_white_face_fill_into_black_line():
+    rgba = np.zeros((20, 30, 4), dtype=np.uint8)
+    rgba[3:17, 5:25] = [255, 255, 255, 255]
+    rgba[3:17, 5:8] = [20, 20, 20, 255]
+    rgba[9:12, 12:15] = [240, 90, 130, 180]
+    alpha = imageline._coloured_sketch_alpha(rgba)
+    assert alpha[10, 20] == 0
+    assert alpha[10, 6] == 255
+    assert alpha[10, 13] == 180
+
+
 def test_coloured_prop_preserves_line_alpha_and_only_outlines_fills(tmp_path):
     from pytoshop.user import nested_layers
 
@@ -991,6 +1031,238 @@ def test_coloured_prop_preserves_line_alpha_and_only_outlines_fills(tmp_path):
     assert mask[20, 11] == 190
     assert mask[8, 30] > 0
     assert mask[20, 30] == 0
+
+
+def test_multiple_prop_objects_are_kept_and_template_lines_are_excluded(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    template = np.zeros((40, 80, 4), dtype=np.uint8)
+    template[5:35, 70, :] = [20, 20, 20, 255]
+
+    def prop_object(name, x):
+        fill = np.zeros((40, 80, 4), dtype=np.uint8)
+        fill[10:30, x:x + 12] = [220, 90, 40, 255]
+        line = np.zeros((40, 80, 4), dtype=np.uint8)
+        line[7:33, x - 3:x] = [130, 45, 20, 190]
+        return nested_layers.Group(name=name, layers=[
+            nested_layers.Group(name="colours", layers=[
+                _rgba_layer("fill", fill),
+            ]),
+            nested_layers.Group(name="lines", layers=[
+                _rgba_layer("ink", line),
+            ]),
+        ])
+
+    path = tmp_path / "multiple-props.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("Line", template),
+        ]),
+        nested_layers.Group(name="PROPS", layers=[
+            prop_object("first", 15),
+            prop_object("second", 45),
+        ]),
+    ], width=80, height=40)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[20, 13] >= 190
+    assert mask[20, 43] >= 190
+    assert mask[:, 70].max() == 0
+
+
+def test_unnamed_drawing_root_is_extracted_without_template_chrome(tmp_path):
+    from pytoshop.user import nested_layers
+
+    template = np.zeros((40, 80, 4), dtype=np.uint8)
+    template[5:35, 70, :] = [20, 20, 20, 255]
+    drawing = np.full((40, 80, 4), [245, 245, 245, 255], dtype=np.uint8)
+    drawing[5:35, 15:18, :3] = 20
+    path = tmp_path / "drawing-root.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("border", template),
+        ]),
+        nested_layers.Group(name="DRAWINGS", layers=[
+            _rgba_layer("Vertical", drawing),
+        ]),
+    ], width=80, height=40)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[20, 16] > 0
+    assert mask[:, 70].max() == 0
+
+
+def test_drawing_psd_and_matching_png_use_the_same_line_model(
+        tmp_path, monkeypatch):
+    from pytoshop.user import nested_layers
+
+    template = np.zeros((40, 80, 4), dtype=np.uint8)
+    template[5:35, 70, :] = [20, 20, 20, 255]
+    drawing = np.zeros((40, 80, 4), dtype=np.uint8)
+    drawing[5:35, 10:30, :] = [245, 245, 245, 255]
+    drawing[8:32, 15:18, :3] = 20
+    psd_path = tmp_path / "paired-drawing.psd"
+    write_psd(psd_path, [
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("border", template),
+        ]),
+        nested_layers.Group(name="DRAWINGS", layers=[
+            _rgba_layer("Vertical", drawing),
+        ]),
+    ], width=80, height=40)
+    psd_session = _session(psd_path)
+    png_path = psd_path.with_suffix(".png")
+    Image.fromarray(_document_rgba(psd_session), "RGBA").save(png_path)
+
+    def line_model(rgba):
+        alpha = np.zeros(rgba.shape[:2], dtype=np.uint8)
+        alpha[np.min(rgba[..., :3], axis=2) < 100] = 201
+        return alpha
+
+    monkeypatch.setattr(imageline, "_flattened_model_alpha", line_model)
+    psd_mask, _ = extract_image_line(psd_session, OPTS)
+    png_mask, _ = extract_image_line(_session(png_path), OPTS)
+    assert np.array_equal(psd_mask, png_mask)
+    assert psd_mask[20, 16] == 201
+    assert psd_mask[:, 70].max() == 0
+    assert imageline.image_line_profile(
+        psd_session, OPTS)["flattenedStructure"] == "sourcePsd"
+
+
+def test_full_canvas_color_layer_uses_existing_extractor_without_template(
+        tmp_path, monkeypatch):
+    from pytoshop.user import nested_layers
+
+    color = np.full((40, 80, 4), [210, 160, 100, 255], dtype=np.uint8)
+    color[5:35, 15:18, :3] = 20
+    template = np.zeros((40, 80, 4), dtype=np.uint8)
+    template[5:35, 70, :] = [20, 20, 20, 255]
+    path = tmp_path / "flattened-color-layer.psd"
+    write_psd(path, [
+        _rgba_layer("Color", color),
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("frame", template),
+        ]),
+    ], width=80, height=40)
+
+    monkeypatch.setattr(
+        imageline,
+        "_flattened_model_alpha",
+        lambda _rgba: pytest.fail(
+            "full-canvas Color PSD must keep the established extractor"),
+    )
+    session = _session(path)
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[20, 16] > 0
+    assert mask[:, 70].max() == 0
+    assert imageline.image_line_profile(
+        session, OPTS)["specialLineStyle"] == "flattenedColourLayer"
+
+
+def test_named_view_roots_are_kept_when_template_has_no_art_root(tmp_path):
+    from pytoshop.user import nested_layers
+
+    template = np.zeros((40, 80, 4), dtype=np.uint8)
+    template[5:35, 70, :] = [20, 20, 20, 255]
+    side = np.zeros((40, 80, 4), dtype=np.uint8)
+    side[5:35, 15, :] = [80, 40, 30, 193]
+    front = np.zeros((40, 80, 4), dtype=np.uint8)
+    front[5:35, 45, :] = [80, 40, 30, 193]
+    path = tmp_path / "named-views.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("Line", template),
+        ]),
+        nested_layers.Group(name="Fillables", layers=[]),
+        nested_layers.Group(name="SIDE 3/4", layers=[
+            _rgba_layer("Line", side),
+        ]),
+        nested_layers.Group(name="SWORD 1", layers=[
+            _rgba_layer("Line", front),
+        ]),
+    ], width=80, height=40)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[20, 15] == 193
+    assert mask[20, 45] == 193
+    assert mask[:, 70].max() == 0
+
+
+def test_annotation_groups_inside_production_roots_are_excluded(tmp_path):
+    from pytoshop.user import nested_layers
+
+    art = np.zeros((40, 80, 4), dtype=np.uint8)
+    art[5:35, 15, :] = [80, 40, 30, 193]
+    label = np.zeros((40, 80, 4), dtype=np.uint8)
+    label[5:35, 55, :] = [20, 20, 20, 255]
+    path = tmp_path / "turnaround-labels.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURNAROUND", layers=[
+            nested_layers.Group(name="CHARACTER", layers=[
+                _rgba_layer("Line", art),
+            ]),
+            nested_layers.Group(name="LABELS", layers=[
+                _rgba_layer("Line", label),
+            ]),
+        ]),
+    ], width=80, height=40)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[20, 15] == 193
+    assert mask[:, 55].max() == 0
+
+
+def test_matching_png_uses_its_psd_sibling_only_as_an_artwork_mask(
+        tmp_path, monkeypatch):
+    from pytoshop.user import nested_layers
+
+    template = np.zeros((40, 80, 4), dtype=np.uint8)
+    template[5:35, 70, :] = [20, 20, 20, 255]
+    line = np.zeros((40, 80, 4), dtype=np.uint8)
+    line[5:35, 15:18, :] = [80, 40, 30, 193]
+    psd_path = tmp_path / "paired.psd"
+    write_psd(psd_path, [
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("Line", template),
+        ]),
+        nested_layers.Group(name="PROPS", layers=[
+            nested_layers.Group(name="lines", layers=[
+                _rgba_layer("ink", line),
+            ]),
+        ]),
+    ], width=80, height=40)
+    psd_session = _session(psd_path)
+    png_path = psd_path.with_suffix(".png")
+    Image.fromarray(_document_rgba(psd_session), "RGBA").save(png_path)
+
+    model = np.zeros((40, 80), dtype=np.uint8)
+    model[5:35, 16] = 201
+    model[5:35, 40] = 177
+    model[5:35, 70] = 201
+    monkeypatch.setattr(
+        imageline, "_flattened_model_alpha", lambda _: model.copy())
+    png_session = _session(png_path)
+    png_mask, _ = extract_image_line(png_session, OPTS)
+    assert png_mask[20, 16] == 201
+    assert png_mask[:, 40].max() == 0
+    assert png_mask[:, 70].max() == 0
+    assert imageline.image_line_profile(
+        png_session, OPTS)["flattenedStructure"] == "matchingSiblingPsd"
+
+
+def test_changed_png_does_not_use_a_stale_psd_sibling(tmp_path):
+    from pytoshop.user import nested_layers
+
+    source = np.full((40, 80, 4), [245, 245, 245, 255], dtype=np.uint8)
+    psd_path = tmp_path / "changed.psd"
+    write_psd(psd_path, [
+        nested_layers.Group(name="PROPS", layers=[
+            _rgba_layer("paint", source),
+        ]),
+    ], width=80, height=40)
+    rendered = _document_rgba(_session(psd_path))
+    rendered[5:15, 5:15, :3] = [255, 0, 0]
+    png_path = psd_path.with_suffix(".png")
+    Image.fromarray(rendered, "RGBA").save(png_path)
+    assert imageline._matching_sibling_psd_session(
+        _session(png_path)) is None
 
 
 def test_phone_interface_ignores_glow_but_keeps_authored_shapes(tmp_path):

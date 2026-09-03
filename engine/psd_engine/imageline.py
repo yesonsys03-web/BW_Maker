@@ -10,7 +10,7 @@ from collections import OrderedDict
 from importlib.resources import files
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageChops, ImageFilter
 
 from .edges import build_overlay
 from .export import _output_version
@@ -105,53 +105,134 @@ def _document_rgba(session):
 
 
 def _artwork_rgba(session):
-    """Render the authored ART root without sibling field-guide groups."""
+    """Render production roots without sibling template/reference chrome."""
     psd = session["psd"]
-    art = next((
+    roots = _production_roots(psd)
+    if not roots:
+        return _document_rgba(session)
+    visible_siblings = [
         layer for layer in psd
         if (
-            layer.is_group()
+            layer not in roots
             and layer.is_visible()
-            and _object_key(layer.name) == "art"
+            and layer.bbox != (0, 0, 0, 0)
         )
-    ), None)
-    if art is None:
-        return _document_rgba(session)
-    has_visible_field_guides = any(
-        layer is not art
-        and layer.is_group()
-        and layer.is_visible()
-        and "fieldguide" in _object_key(layer.name)
-        for layer in psd
-    )
-    if not has_visible_field_guides:
-        # With no sibling guide system, the embedded composite is the ART
-        # render Photoshop authored and is dramatically cheaper for multi-GB
-        # colour keys than recompositing every ART descendant.
-        return _document_rgba(session)
-    try:
-        rendered = art.composite(force=True, color=1.0, alpha=0.0)
-    except ImportError:
-        # Optional vector renderers are not required for ordinary extraction.
-        # The embedded full-document composite remains authoritative when an
-        # ART group contains a shape psd-tools cannot render locally.
-        return _document_rgba(session)
-    if rendered is None:
-        return _document_rgba(session)
-    local = np.array(rendered.convert("RGBA"), dtype=np.uint8)
-    out = np.zeros((psd.height, psd.width, 4), dtype=np.uint8)
-    left, top, right, bottom = art.bbox
-    clip_left = max(0, left)
-    clip_top = max(0, top)
-    clip_right = min(psd.width, right)
-    clip_bottom = min(psd.height, bottom)
-    if clip_right <= clip_left or clip_bottom <= clip_top:
-        return out
-    out[clip_top:clip_bottom, clip_left:clip_right] = local[
-        clip_top - top:clip_bottom - top,
-        clip_left - left:clip_right - left,
     ]
-    return out
+    if len(roots) == 1 and not visible_siblings:
+        return _document_rgba(session)
+
+    canvas = Image.new("RGBA", (psd.width, psd.height))
+    rendered_any = False
+    for root in roots:
+        try:
+            rendered = _render_production_root(root)
+        except (ImportError, NotImplementedError):
+            rendered = None
+        if rendered is None:
+            continue
+        left, top, right, bottom = root.bbox
+        clip_left = max(0, left)
+        clip_top = max(0, top)
+        clip_right = min(psd.width, right)
+        clip_bottom = min(psd.height, bottom)
+        if clip_right <= clip_left or clip_bottom <= clip_top:
+            continue
+        local = rendered.convert("RGBA").crop((
+            clip_left - left,
+            clip_top - top,
+            clip_right - left,
+            clip_bottom - top,
+        ))
+        canvas.alpha_composite(local, (clip_left, clip_top))
+        rendered_any = True
+    if not rendered_any:
+        return _document_rgba(session)
+    return np.array(canvas, dtype=np.uint8)
+
+
+def _flattened_colour_plate_rgba(session):
+    """Return a full-canvas top-level Color plate when it is the artwork."""
+    if session.get("flattened_image"):
+        return None
+    psd = session["psd"]
+    candidates = [
+        layer for layer in psd
+        if (
+            not layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) in {"color", "colour"}
+            and layer.bbox == (0, 0, psd.width, psd.height)
+        )
+    ]
+    if len(candidates) != 1:
+        return None
+    image = candidates[0].topil()
+    if image is None:
+        return None
+    rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+    if float(np.mean(rgba[..., 3] >= 247)) < 0.95:
+        return None
+    return rgba
+
+
+def _matching_sibling_psd_session(session):
+    """Return a PSD sibling only when its rendered pixels match the PNG."""
+    if not session.get("flattened_image") or not session.get("path"):
+        return None
+    source_path = os.fspath(session["path"])
+    if os.path.splitext(source_path)[1].casefold() != ".png":
+        return None
+    stem = os.path.splitext(source_path)[0]
+    psd_path = next((
+        candidate
+        for candidate in (
+            stem + ".psd", stem + ".psb", stem + ".PSD", stem + ".PSB",
+        )
+        if os.path.isfile(candidate)
+    ), None)
+    if psd_path is None:
+        return None
+
+    from .session import open_document
+
+    psd = open_document(psd_path)
+    if (psd.width, psd.height) != (
+        session["psd"].width,
+        session["psd"].height,
+    ):
+        return None
+    sibling = {
+        "psd": psd,
+        "path": psd_path,
+        "mtime": os.path.getmtime(psd_path),
+        "flattened_image": False,
+    }
+    rendered = Image.fromarray(_document_rgba(sibling), "RGBA")
+    with Image.open(source_path) as source:
+        difference = ImageChops.difference(source.convert("RGBA"), rendered)
+        histogram = difference.histogram()
+    pixels = psd.width * psd.height
+    changed = sum(
+        count
+        for channel in range(4)
+        for value, count in enumerate(
+            histogram[channel * 256:(channel + 1) * 256]
+        )
+        if value > 3
+    )
+    absolute_difference = sum(
+        value * count
+        for channel in range(4)
+        for value, count in enumerate(
+            histogram[channel * 256:(channel + 1) * 256]
+        )
+    )
+    if (
+        changed / max(1, pixels * 4) > 0.001
+        or absolute_difference / max(1, pixels * 4) > 0.1
+    ):
+        return None
+    return sibling
 
 
 def _flattened_signal_red(rgb):
@@ -224,6 +305,11 @@ def _run_flattened_line_models(rgb):
     ).astype(np.uint8)
 
 
+def _binarize_flattened_alpha(alpha, threshold=64):
+    """Remove diffuse model responses without simplifying confident detail."""
+    return np.where(alpha >= threshold, 255, 0).astype(np.uint8)
+
+
 def _flattened_model_alpha(rgba):
     rgb = rgba[..., :3]
     # Difference/reference renders are sometimes stored as sparse marks on a
@@ -265,7 +351,7 @@ def _flattened_model_alpha(rgba):
     alpha[alpha < 6] = 0
     if suppress_red:
         alpha[_flattened_annotation_zone(rgb)] = 0
-    return np.ascontiguousarray(alpha)
+    return np.ascontiguousarray(_binarize_flattened_alpha(alpha))
 
 
 def _is_named_line_layer(name):
@@ -458,6 +544,177 @@ def _object_key(name):
     value = re.sub(r"[^a-z0-9]+", "", name.casefold())
     value = re.sub(r"\d+$", "", value)
     return value[:-1] if value.endswith("s") else value
+
+
+_PRODUCTION_ROOT_KEYS = {
+    "art", "artwork", "design", "drawing", "illustration",
+    "prop", "turn", "turnaround",
+}
+_NON_ART_ROOT_KEYS = {
+    "colorpalette", "colourpalette", "extraref", "fieldguide",
+    "fillable", "height", "note", "template",
+}
+_NON_ART_CHILD_KEYS = {
+    "colorpalette", "colourpalette", "extraref", "height",
+    "label", "note", "template",
+}
+
+
+def _production_roots(psd):
+    semantic = [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and layer.bbox != (0, 0, 0, 0)
+            and _object_key(layer.name) in _PRODUCTION_ROOT_KEYS
+        )
+    ]
+    if semantic:
+        return semantic
+    if not any(
+        layer.is_group()
+        and layer.is_visible()
+        and _object_key(layer.name) in _NON_ART_ROOT_KEYS
+        for layer in psd
+    ):
+        return []
+    # Some studio templates name production views after the object or angle
+    # (SWORD 1, SIDE 3/4) instead of ART/PROP. Once known chrome is removed,
+    # the remaining visible top-level groups are the only authored content.
+    return [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and layer.bbox != (0, 0, 0, 0)
+            and _object_key(layer.name) not in _NON_ART_ROOT_KEYS
+        )
+    ]
+
+
+def _inside_roots(layer, roots, psd):
+    current = layer
+    while current is not None and current is not psd:
+        if any(current is root for root in roots):
+            return True
+        parent = current.parent
+        if parent is not None and parent is not psd and parent.is_group():
+            _, selected = _production_children(parent)
+            if not any(current is child for child in selected):
+                return False
+        current = parent
+    return False
+
+
+def _production_children(parent):
+    children = [
+        child for child in parent
+        if child.is_visible() and child.bbox != (0, 0, 0, 0)
+    ]
+    selected = [
+        child for child in children
+        if _object_key(child.name) not in _NON_ART_CHILD_KEYS
+    ]
+    if selected:
+        largest_area = max(
+            (child.width * child.height for child in selected),
+            default=0,
+        )
+        selected = [
+            child for child in selected
+            if not (
+                "copy" in set(re.findall(
+                    r"[^\W_]+", child.name.casefold()))
+                and child.width * child.height < largest_area * 0.02
+            )
+        ]
+    has_line = any(_is_named_line_layer(child.name) for child in selected)
+    has_colour = any(
+        _is_colour_group_name(child.name)
+        or _object_key(child.name) in {"fill", "fillable"}
+        for child in selected
+    )
+    if has_line and has_colour:
+        selected = [
+            child for child in selected
+            if (
+                child.is_group()
+                or _is_named_line_layer(child.name)
+                or _is_colour_group_name(child.name)
+                or _object_key(child.name) in {"fill", "fillable"}
+            )
+        ]
+    return children, selected
+
+
+def _production_root_needs_raw_render(root):
+    children, selected = _production_children(root)
+    if len(children) != len(selected):
+        return True
+    return any(
+        child.is_group() and _production_root_needs_raw_render(child)
+        for child in selected
+    )
+
+
+def _render_production_root(root):
+    """Composite production only, with a raw fallback for optional effects."""
+    _, selected = _production_children(root)
+    if not _production_root_needs_raw_render(root):
+        try:
+            rendered = root.composite()
+        except (ImportError, NotImplementedError):
+            rendered = None
+        if rendered is not None:
+            return rendered
+
+    left, top, right, bottom = root.bbox
+    canvas = Image.new("RGBA", (right - left, bottom - top))
+
+    def draw(nodes, parent_opacity):
+        _, production = _production_children(nodes)
+        for child in reversed(production):
+            opacity = (
+                parent_opacity * int(child.opacity) + 127
+            ) // 255
+            if child.is_group():
+                draw(child, opacity)
+                continue
+            if child.clipping:
+                continue
+            try:
+                rendered = child.topil()
+            except (ImportError, NotImplementedError):
+                rendered = None
+            if rendered is None:
+                continue
+            rgba = np.array(rendered.convert("RGBA"), dtype=np.uint8)
+            if opacity < 255:
+                rgba[..., 3] = (
+                    rgba[..., 3].astype(np.uint16) * opacity + 127
+                ) // 255
+                rendered = Image.fromarray(rgba, "RGBA")
+            child_left, child_top, child_right, child_bottom = child.bbox
+            clip_left = max(left, child_left)
+            clip_top = max(top, child_top)
+            clip_right = min(right, child_right)
+            clip_bottom = min(bottom, child_bottom)
+            if clip_right <= clip_left or clip_bottom <= clip_top:
+                continue
+            local = rendered.crop((
+                clip_left - child_left,
+                clip_top - child_top,
+                clip_right - child_left,
+                clip_bottom - child_top,
+            ))
+            canvas.alpha_composite(
+                local,
+                (clip_left - left, clip_top - top),
+            )
+
+    draw(selected, int(root.opacity))
+    return canvas
 
 
 def _is_colour_group_name(name):
@@ -860,6 +1117,14 @@ def _compose_authored_alpha(psd, layers):
     return out
 
 
+def _coloured_sketch_alpha(rgba):
+    """Use authored coverage except where a coloured sketch paints white."""
+    alpha = rgba[..., 3].copy()
+    white_fill = np.min(rgba[..., :3], axis=2) >= 245
+    alpha[white_fill] = 0
+    return alpha
+
+
 def _sketch_design_alpha(psd):
     """Preserve sparse coloured pencil layers from a primary DESIGN page."""
     roots = [
@@ -911,10 +1176,22 @@ def _sketch_design_alpha(psd):
                 occupancy <= 0.35
                 and not (neutral >= 0.85 and mean >= 235)
             ):
-                selected.append(layer)
+                selected.append((layer, neutral < 0.85))
     if not found_paper or not selected:
         return None
-    return _compose_authored_alpha(psd, selected), len(selected)
+    out = np.zeros((psd.height, psd.width), dtype=np.uint8)
+    for layer, coloured in selected:
+        image = layer.topil()
+        if image is None:
+            continue
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+        alpha = (
+            _coloured_sketch_alpha(rgba)
+            if coloured
+            else rgba[..., 3]
+        )
+        _composite_layer_alpha(out, layer, alpha)
+    return out, len(selected)
 
 
 def _coloured_prop_alpha(psd):
@@ -943,6 +1220,14 @@ def _coloured_prop_alpha(psd):
         ):
             objects.append(group)
     if len(objects) != 1:
+        return None
+    visible_children = [
+        child for child in roots[0]
+        if child.is_visible() and child.bbox != (0, 0, 0, 0)
+    ]
+    if any(child is not objects[0] for child in visible_children):
+        # A partial structural match must not silently drop sibling props.
+        # The root-scoped general path below keeps all production objects.
         return None
     line_layers = []
     colour_layers = []
@@ -1627,8 +1912,17 @@ def _named_line_alpha(session):
 
     def walk(nodes, line_group=False, ancestors_visible=True):
         for layer in nodes:
+            if production_roots and not _inside_roots(
+                layer, production_roots, psd
+            ):
+                continue
             effectively_visible = ancestors_visible and layer.is_visible()
             if layer.is_group():
+                if (
+                    production_roots
+                    and _object_key(layer.name) in _NON_ART_CHILD_KEYS
+                ):
+                    continue
                 next_line_group = (
                     line_group or _is_named_line_layer(layer.name)
                 )
@@ -1649,6 +1943,7 @@ def _named_line_alpha(session):
                     and (
                         _has_sparse_alpha(layer, psd)
                         or _has_authored_line_alpha(layer)
+                        or _is_character_fill_line_layer(layer, psd)
                     )
                     )
                 )
@@ -1656,13 +1951,22 @@ def _named_line_alpha(session):
             ):
                 candidates.append(layer)
 
-    walk(psd)
+    production_roots = _production_roots(psd)
+    walk(production_roots or psd)
     candidate_ids = {id(layer) for layer in candidates}
     for layer in _nested_art_line_layers(psd):
+        if production_roots and not _inside_roots(
+            layer, production_roots, psd
+        ):
+            continue
         if id(layer) not in candidate_ids:
             candidates.append(layer)
             candidate_ids.add(id(layer))
     for layer in _paired_component_line_layers(psd):
+        if production_roots and not _inside_roots(
+            layer, production_roots, psd
+        ):
+            continue
         if id(layer) not in candidate_ids:
             candidates.append(layer)
             candidate_ids.add(id(layer))
@@ -1676,12 +1980,25 @@ def _named_line_alpha(session):
             if id(layer) not in candidate_ids:
                 candidates.append(layer)
                 candidate_ids.add(id(layer))
+    exclusive_production = any(
+        _object_key(root.name) in {"drawing", "illustration", "prop"}
+        for root in production_roots
+    ) or (
+        bool(production_roots)
+        and all(
+            _object_key(root.name) not in {
+                "art", "artwork", "design", "turn", "turnaround",
+            }
+            for root in production_roots
+        )
+    )
     outline_only_ids = set()
-    for layer in _paired_reference_line_layers(psd):
-        outline_only_ids.add(id(layer))
-        if id(layer) not in candidate_ids:
-            candidates.append(layer)
-            candidate_ids.add(id(layer))
+    if not exclusive_production:
+        for layer in _paired_reference_line_layers(psd):
+            outline_only_ids.add(id(layer))
+            if id(layer) not in candidate_ids:
+                candidates.append(layer)
+                candidate_ids.add(id(layer))
     if _uses_clean_style(psd) or _is_fl102_document(session):
         for layer in _sparse_black_line_layers(psd):
             if id(layer) not in candidate_ids:
@@ -1718,6 +2035,11 @@ def _named_line_alpha(session):
         psd,
         include_all=_is_fl102_document(session),
     )
+    if exclusive_production:
+        silhouette_layers = [
+            layer for layer in silhouette_layers
+            if _inside_roots(layer, production_roots, psd)
+        ]
     silhouette_ids = {id(layer) for layer in silhouette_layers}
     for layer in _unpaired_colour_shape_layers(psd, candidate_ids):
         if id(layer) not in silhouette_ids:
@@ -1739,7 +2061,14 @@ def _named_line_alpha(session):
         if id(layer) not in graphic_ids
     ]
     simplified_layers = _prop_background_plates(psd)
-    character_layers = _reference_character_layers(psd)
+    if exclusive_production:
+        simplified_layers = [
+            layer for layer in simplified_layers
+            if _inside_roots(layer, production_roots, psd)
+        ]
+    character_layers = (
+        [] if exclusive_production else _reference_character_layers(psd)
+    )
     if (
         not candidates
         and not silhouette_layers
@@ -1845,7 +2174,7 @@ def _named_line_alpha(session):
         # Their alpha is a filled silhouette or white-backed plate, not ink.
         # The rendered composite is authoritative in that case and uses the
         # same model as its flattened PNG counterpart.
-        out = _flattened_model_alpha(_document_rgba(session))
+        out = _flattened_model_alpha(_artwork_rgba(session))
     else:
         out = cleaned
 
@@ -2086,18 +2415,8 @@ def _missing_colour_edges(rgba, line_alpha, min_length):
 
 def _visible_content_zones(psd):
     """Return visible production roots; template/reference chrome stays out."""
-    semantic_roots = {
-        "art", "artwork", "design", "prop", "turn", "turnaround",
-    }
     zones = []
-    for layer in psd:
-        if (
-            not layer.is_group()
-            or not layer.is_visible()
-            or _object_key(layer.name) not in semantic_roots
-            or layer.bbox == (0, 0, 0, 0)
-        ):
-            continue
+    for layer in _production_roots(psd):
         boundary = next(
             (
                 child for child in layer
@@ -2146,7 +2465,7 @@ def _composite_residual_alpha(session, line_alpha, min_length):
             1 for layer in root.descendants() if not layer.is_group())
         if leaf_count <= 120:
             try:
-                rendered = root.composite()
+                rendered = _render_production_root(root)
             except (ImportError, NotImplementedError):
                 rendered = None
         else:
@@ -2364,6 +2683,42 @@ def _turn_colour_boundary_alpha(session, line_alpha):
     return out
 
 
+def _cache_result(cache_key, result, profile):
+    if cache_key is None:
+        return
+    _MASK_CACHE[cache_key] = result
+    _PROFILE_CACHE[cache_key] = profile
+    _MASK_CACHE.move_to_end(cache_key)
+    while len(_MASK_CACHE) > _MASK_CACHE_LIMIT:
+        evicted, _ = _MASK_CACHE.popitem(last=False)
+        _PROFILE_CACHE.pop(evicted, None)
+
+
+def _structured_model_alpha(session):
+    """Run the flattened model on PSD artwork, composited over white."""
+    artwork = _artwork_rgba(session)
+    alpha = artwork[..., 3].astype(np.uint16)
+    model_rgba = artwork.copy()
+    model_rgba[..., :3] = (
+        (
+            artwork[..., :3].astype(np.uint16) * alpha[..., None]
+            + 255 * (255 - alpha[..., None])
+            + 127
+        ) // 255
+    ).astype(np.uint8)
+    model_rgba[..., 3] = 255
+    mask = _flattened_model_alpha(model_rgba)
+    support = np.array(
+        Image.fromarray(
+            (artwork[..., 3] >= 8).astype(np.uint8) * 255,
+            "L",
+        ).filter(ImageFilter.MaxFilter(9)),
+        dtype=np.uint8,
+    ) > 0
+    mask[~support] = 0
+    return mask, artwork.nbytes + model_rgba.nbytes + support.nbytes
+
+
 def extract_image_line(session, image_line):
     opts = normalize_options(image_line)
     cache_key = None
@@ -2380,6 +2735,8 @@ def extract_image_line(session, image_line):
 
     started = time.perf_counter()
     algorithm_rss_start = _max_rss_bytes()
+    structured_sibling = _matching_sibling_psd_session(session)
+
     named_lines = _named_line_alpha(session)
     if named_lines is not None:
         (
@@ -2465,28 +2822,34 @@ def extract_image_line(session, image_line):
             "flattenedGraphicLayerCount": flattened_graphic_count,
             **residual_profile,
         }
-        if cache_key is not None:
-            _MASK_CACHE[cache_key] = result
-            _PROFILE_CACHE[cache_key] = profile
-            _MASK_CACHE.move_to_end(cache_key)
-            while len(_MASK_CACHE) > _MASK_CACHE_LIMIT:
-                evicted, _ = _MASK_CACHE.popitem(last=False)
-                _PROFILE_CACHE.pop(evicted, None)
+        _cache_result(cache_key, result, profile)
         return result
 
     drawing_panel_boxes = _drawing_panel_boxes(session["psd"])
-    rgba = _document_rgba(session)
-    composite_done = time.perf_counter()
-    if session.get("flattened_image"):
-        mask_u8 = _flattened_model_alpha(rgba)
-        missing_edges = _missing_colour_edges(
-            rgba,
-            mask_u8,
-            opts["minLength"],
+    flattened_colour_plate = _flattened_colour_plate_rgba(session)
+    structured_model = bool(drawing_panel_boxes) or any(
+        _object_key(root.name) in {"drawing", "illustration"}
+        for root in _production_roots(session["psd"])
+    )
+    rgba = (
+        _document_rgba(session)
+        if session.get("flattened_image")
+        else (
+            flattened_colour_plate
+            if flattened_colour_plate is not None
+            else _artwork_rgba(session)
         )
-        if _suppress_flattened_red_annotations(rgba[..., :3]):
-            missing_edges[_flattened_annotation_zone(rgba[..., :3])] = 0
-        np.maximum(mask_u8, missing_edges, out=mask_u8)
+    )
+    composite_done = time.perf_counter()
+    if session.get("flattened_image") or structured_model:
+        structure_bytes = 0
+        if structured_sibling is not None:
+            mask_u8, structure_bytes = _structured_model_alpha(
+                structured_sibling)
+        elif structured_model:
+            mask_u8, structure_bytes = _structured_model_alpha(session)
+        else:
+            mask_u8 = _flattened_model_alpha(rgba)
         finished = time.perf_counter()
         algorithm_rss_end = _max_rss_bytes()
         result = (
@@ -2500,7 +2863,7 @@ def extract_image_line(session, image_line):
             "suppressionUnionSeconds": 0.0,
             "totalSeconds": finished - started,
             "peakTrackedArrayBytes": int(
-                rgba.nbytes + mask_u8.nbytes + missing_edges.nbytes),
+                rgba.nbytes + mask_u8.nbytes + structure_bytes),
             "algorithmPeakRssDeltaBytes": (
                 max(0, algorithm_rss_end - algorithm_rss_start)
                 if (
@@ -2510,14 +2873,13 @@ def extract_image_line(session, image_line):
                 else None
             ),
             "flattenedLineModel": "informative_drawings+line_relifer",
+            "flattenedStructure": (
+                "matchingSiblingPsd"
+                if structured_sibling is not None
+                else "sourcePsd" if structured_model else None
+            ),
         }
-        if cache_key is not None:
-            _MASK_CACHE[cache_key] = result
-            _PROFILE_CACHE[cache_key] = profile
-            _MASK_CACHE.move_to_end(cache_key)
-            while len(_MASK_CACHE) > _MASK_CACHE_LIMIT:
-                evicted, _ = _MASK_CACHE.popitem(last=False)
-                _PROFILE_CACHE.pop(evicted, None)
+        _cache_result(cache_key, result, profile)
         return result
 
     rgb = rgba[..., :3]
@@ -2576,6 +2938,10 @@ def extract_image_line(session, image_line):
             + 2
         ) // 5
     ).astype(np.uint8)
+    weighted_mask = _remove_large_solid_interiors(
+        weighted_mask,
+        thin_outline=True,
+    )
     boundary_peak += (
         mask.nbytes + mask_u8.nbytes + authored_mask.nbytes
         + eroded_mask.nbytes + weighted_mask.nbytes + missing_edges.nbytes
@@ -2607,16 +2973,12 @@ def extract_image_line(session, image_line):
             else None
         ),
         "specialLineStyle": (
-            "filledDrawingPanels" if drawing_panel_boxes else None
+            "flattenedColourLayer"
+            if flattened_colour_plate is not None
+            else "filledDrawingPanels" if drawing_panel_boxes else None
         ),
     }
-    if cache_key is not None:
-        _MASK_CACHE[cache_key] = result
-        _PROFILE_CACHE[cache_key] = profile
-        _MASK_CACHE.move_to_end(cache_key)
-        while len(_MASK_CACHE) > _MASK_CACHE_LIMIT:
-            evicted, _ = _MASK_CACHE.popitem(last=False)
-            _PROFILE_CACHE.pop(evicted, None)
+    _cache_result(cache_key, result, profile)
     return result
 
 
