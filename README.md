@@ -56,12 +56,12 @@ UI에 노출**합니다. 엔진 프로세스가 죽으면 자동 재시작하지
 필요한 것: Node.js, Rust 툴체인, [uv](https://docs.astral.sh/uv/) (Python 3.12+).
 
 ```bash
-npm install
+pnpm install
 cd engine && uv sync && cd ..
-npm run tauri dev
+pnpm run tauri dev
 ```
 
-`npm run tauri dev`는 개발 중에는 엔진을 저장소의 `engine/` 프로젝트에서 `uv run`으로 띄웁니다.
+`pnpm run tauri dev`는 개발 중에는 엔진을 저장소의 `engine/` 프로젝트에서 `uv run`으로 띄웁니다.
 배포 빌드는 동봉된 동결 엔진을 실행합니다 — 아래 "배포 빌드" 참조.
 
 ### 배포 빌드
@@ -72,7 +72,7 @@ npm run tauri dev
 ```bash
 bash scripts/build-engine.sh          # macOS
 pwsh -File scripts/build-engine.ps1   # 윈도우
-npm run tauri build
+pnpm run tauri build
 ```
 
 `build-engine.*`는 동결 직후 `engine/packaging/smoke.py`로 동결본을 실제로 실행해 봅니다(한글 경로
@@ -91,7 +91,7 @@ PSD 열기 → 썸네일 → 한글 경로로 내보내기 + 검증 → 에러 �
 ### 테스트
 
 ```bash
-npm test                        # UI (vitest)
+pnpm test                       # UI (vitest)
 cd engine && uv run pytest      # 엔진 (pytest)
 cd src-tauri && cargo test      # Rust 셸
 ```

@@ -36,12 +36,12 @@ uv pip install --python "${VENV_PY}" ./engine "pyinstaller>=6.21"
 # 있다(yeson_meet이 cv2/pymupdf에서 실측). 그 상태로 동결하면 PyInstaller가
 # 모듈을 못 모아 번들이 조용히 비고, 사용자 PC에서 첫 요청에 죽는다 — 빌드가
 # 성공한 것처럼 보이는 게 최악이라 여기서 멈춘다.
-if ! "${VENV_PY}" -c 'import psd_tools, pytoshop, numpy, PIL'; then
+if ! "${VENV_PY}" -c 'import psd_tools, pytoshop, numpy, PIL, onnxruntime'; then
     echo "build venv import gate failed — 캐시 없이 재설치 후 재검증…" >&2
     uv pip install --python "${VENV_PY}" --reinstall --no-cache ./engine
     "${VENV_PY}" -c 'import psd_tools, pytoshop, numpy, PIL'
 fi
-echo "build venv import gate OK (psd_tools, pytoshop, numpy, PIL)"
+echo "build venv import gate OK (psd_tools, pytoshop, numpy, PIL, onnxruntime)"
 
 echo "Freezing psd_engine (PyInstaller --onedir, console)…"
 # --onedir/--console/--noupx/--name은 spec 파일 안에 있다(스펙이 주어지면

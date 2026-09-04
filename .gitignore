@@ -15,10 +15,19 @@ dist-ssr
 # Rust / Tauri build output
 src-tauri/target/
 
+# engine/.gitignore는 engine/ 아래만 잡는다. scripts/export-baseline.py처럼
+# 루트에서 파이썬을 돌리는 스크립트가 남기는 __pycache__는 여기서 잡아야 한다.
+__pycache__/
+
 # PyInstaller 동결 사이드카 (scripts/build-engine.sh|.ps1). 100MB대 빌드 산출물이라
 # 커밋하지 않는다 — 릴리스 때 각 OS 러너가 네이티브로 다시 만든다.
 src-tauri/binaries/
 target/engine-*
+
+# 에이전트 도구(oh-my-claudecode)가 만드는 상태·로그. 저장소 루트뿐 아니라
+# 명령을 실행한 하위 폴더에도 생기므로 이름으로 잡는다.
+.omc/
+.gjc/
 
 # Editor directories and files
 .vscode/*
@@ -30,3 +39,14 @@ target/engine-*
 *.njsproj
 *.sln
 *.sw?
+
+# scripts/export-baseline.py 가 뜬 픽셀 기준선. 실제 납품 PSD에 딸린 측정 결과라
+# 리포에 넣지 않는다 — 원본이 바뀌면 무효가 되고, 뜨는 데 몇 시간이 걸린다.
+baseline/
+
+# 도움말 스크린샷을 찍는 데모 앱이 만든 예시 판(/tmp)은 저장소에 안 들어간다.
+
+# 사용법 영상 원본 캡처(수백 MB)와 편집 산출물. 원본은 ~/Movies에 남는다.
+*.mov
+video/**/media/
+video/**/out/

@@ -71,6 +71,8 @@ input[type="text"] {
 .app-shell {
   display: grid;
   grid-template-columns: 240px 1fr 320px;
+  /* 마지막 행 높이는 App.tsx가 인라인으로 덮는다(아래 패널 드래그). 여기 값은
+     그 상태가 붙기 전 한 프레임의 기본값이다. */
   grid-template-rows: auto auto 1fr 160px;
   grid-template-areas:
     "presetbar presetbar presetbar"
@@ -92,6 +94,28 @@ input[type="text"] {
   padding: 0.4em 0.75em;
   background: var(--bg-1);
   border-bottom: 1px solid var(--border);
+}
+
+/* 프로젝트 열기·저장. 그리드 행을 새로 만들지 않고 기존 .toolbar(flex 행) 안에
+   들어간다 — .app-shell은 이름 붙인 4행 그리드이고 마지막 행 높이를 App.tsx가
+   인라인으로 덮으므로, 행을 늘리려면 두 곳을 함께 고쳐야 하고 어긋나면 화면이
+   통째로 깨진다. */
+.project-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  /* 내보내기·배치 버튼과 붙어 보이지 않게 왼쪽에 구분선을 둔다. */
+  margin-left: auto;
+  padding-left: 0.75em;
+  border-left: 1px solid var(--border);
+}
+
+.project-bar-name {
+  color: var(--text-dim);
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- preset bar ---------- */
@@ -182,11 +206,30 @@ input[type="text"] {
 
 .file-panel {
   grid-area: files;
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--bg-1);
   border-right: 1px solid var(--border);
+}
+
+/* 파일 패널 폭 조절 손잡이. 오른쪽 모서리에 있어 오른쪽으로 끌수록 넓어진다.
+   레이어 패널·아래 패널의 것과 같은 두께·같은 강조색이다. */
+.file-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -3px;
+  width: 6px;
+  z-index: 20;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.file-resize-handle:hover,
+.file-resize-handle:active {
+  background: var(--accent);
 }
 
 .file-panel-header {
@@ -196,6 +239,26 @@ input[type="text"] {
   padding: 0.6em 0.75em;
   border-bottom: 1px solid var(--border);
   font-weight: 600;
+}
+
+.file-panel-actions {
+  display: flex;
+  gap: 0.35em;
+}
+
+.file-load-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+  padding: 0.5em 0.75em;
+  border-bottom: 1px solid var(--border);
+}
+
+.file-load-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
 }
 
 .file-drop-zone {
@@ -257,6 +320,64 @@ input[type="text"] {
   border-color: var(--accent);
 }
 
+/* 규칙이 라인을 하나도 못 잡은 파일. 한 장씩 열어보지 않고 목록에서 바로
+   가려내라고 있는 표시다.
+
+   .active 뒤에 둔다 — 같은 특정도라 순서로 이긴다. 활성 행에서도 이 표시가
+   남아야 한다: 확인하려고 그 파일을 누른 순간 표시가 사라지면, 방금 무엇을
+   보고 눌렀는지가 화면에서 없어진다. 테두리는 .active 것을 그대로 둔다. */
+.file-list-item.needs-line {
+  background: #33291a;
+}
+
+.file-list-item.needs-line.active {
+  background: #4a3a20;
+  border-color: var(--accent);
+}
+
+.status-badge.status-needs-line {
+  color: #f2c94c;
+  border-color: #7a6a2a;
+}
+
+/* 확인이 필요한 라인(네온 어휘·픽셀 굵기 검출)이 있는 파일 — 트리의 "라인인지
+   확인 필요" 배지와 같은 소식의 파일 단위 표시라 같은 노란 계열을 쓴다. */
+.status-badge.status-line-review {
+  color: #f2c94c;
+  border-color: #7a6a2a;
+}
+
+/* "라인필요" 파일이 있을 때만 나타나는 일괄 지정 막대. 행 배지와 같은
+   노란 계열을 쓴다 — 같은 소식("규칙이 못 잡았다")의 목록 단위 손잡이다. */
+.needs-line-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  background: #33291a;
+  border-bottom: 1px solid #7a6a2a;
+  color: #f2c94c;
+  font-size: 12px;
+}
+
+/* 프로젝트를 저장한 뒤 PSD가 바뀌어 저장된 작업을 버린 파일(설계 4절).
+   .needs-line 뒤에 둔다 — 둘이 겹치면 이쪽이 더 급한 소식이다("규칙이 못 잡았다"는
+   원래 그런 판일 수 있지만, "작업을 버렸다"는 반드시 봐야 한다). */
+.file-list-item.stale {
+  background: #33231a;
+}
+
+.file-list-item.stale.active {
+  background: #4a2f20;
+  border-color: var(--accent);
+}
+
+.status-badge.status-stale {
+  color: #e35d5d;
+  border-color: #6a2f2f;
+}
+
 .file-list-remove {
   flex-shrink: 0;
   background: transparent;
@@ -277,6 +398,16 @@ input[type="text"] {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+
+/* 내보내기에 나갈 장수. 이름과 상태 배지 사이에서 줄바꿈되면 "3 / 장"으로
+   깨지므로 붙여두고, 이름이 먼저 자리를 갖도록 줄어들지 않게만 한다. */
+.file-entry-count {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 0.78em;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
 }
 
 .status-badge {
@@ -335,6 +466,24 @@ input[type="text"] {
 
 .preview-empty {
   color: var(--text-dim);
+}
+
+.preview-empty-note {
+  max-width: 34em;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.preview-empty-note strong {
+  color: #f2c94c; /* 라인필요·라인확인과 같은 노랑 — 같은 손잡이를 가리킨다 */
+  font-weight: 600;
+}
+
+/* 합성 대기 표시. 흰색/검정 어느 배경에서도 읽히는 중간 회색. */
+.preview-compositing-note {
+  position: absolute;
+  color: #8a8a92;
+  font-size: 0.95em;
 }
 
 .preview-viewport {
@@ -671,6 +820,33 @@ input[type="text"] {
   line-height: 1;
 }
 
+.solo-toggle {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  padding: 0 0.2em;
+  color: var(--text-dim);
+  line-height: 1;
+  opacity: 0.6;
+}
+
+/* solo가 걸린 행은 한눈에 띄어야 한다 — 지금 화면이 왜 이 레이어만 보이는지의
+   유일한 단서다. */
+.solo-toggle.solo-on {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.solo-toggle:disabled {
+  opacity: 0.15;
+  cursor: default;
+}
+
+/* .solo-clear에는 margin-left: auto를 주지 않는다. .layer-filter-count가 이미
+   그 값으로 오른쪽 끝에 붙어 있어, 같은 flex 행에 auto margin이 두 개면 남는
+   공간을 반씩 나눠 가져 solo가 켜질 때마다 레이어 수 표시가 오른쪽 끝에서
+   중간으로 밀렸다 돌아온다. 이 버튼은 count 뒤에 그대로 이어 붙는다. */
+
 .eye-toggle.eye-hidden {
   color: var(--text-dim);
   opacity: 0.5;
@@ -839,11 +1015,30 @@ input[type="text"] {
 
 .bottom-strip {
   grid-area: bottom;
+  position: relative;
   border-top: 1px solid var(--border);
   background: var(--bg-1);
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/* 아래 패널 높이 조절 손잡이. 레이어 패널의 것과 같은 두께·같은 강조색이라
+   하나를 찾은 사람은 다른 하나도 찾는다. */
+.bottom-resize-handle {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  z-index: 20;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.bottom-resize-handle:hover,
+.bottom-resize-handle:active {
+  background: var(--accent);
 }
 
 .bottom-tabs {
@@ -876,12 +1071,22 @@ input[type="text"] {
 
 /* ---------- ops history ---------- */
 
+/* 아래 패널 높이를 채우고, 스크롤은 목록만 한다. 예전에는 패널 전체가 굴러가서
+   "마지막 취소"가 위로 사라졌다 — 되돌리려고 스크롤을 올려야 하는 버튼이었다. */
+.ops-history {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
 .ops-history-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0.4em;
   font-weight: 600;
+  flex-shrink: 0;
 }
 
 .ops-history-empty {
@@ -896,6 +1101,9 @@ input[type="text"] {
   flex-direction: column;
   gap: 0.2em;
   font-size: 0.9em;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* ---------- export dialog ---------- */
@@ -1075,6 +1283,10 @@ input[type="text"] {
   display: flex;
   flex-direction: column;
   gap: 0.5em;
+  /* 아래 패널을 끌어 키운 만큼 목록도 함께 늘어나야 한다. 이게 없으면 패널만
+     커지고 안은 그대로라 아래가 통째로 빈다. */
+  height: 100%;
+  min-height: 0;
 }
 
 .batch-panel-row {
@@ -1100,11 +1312,22 @@ input[type="text"] {
   font-size: 0.85em;
 }
 
+/* 진행 문구와 중지/재개 버튼을 한 줄에. 파일 패널 진행바와 같은 배치다. */
+.batch-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+}
+
 .batch-file-list {
   display: flex;
   flex-direction: column;
   gap: 0.15em;
-  max-height: 90px;
+  /* 90px 고정이었다 — 패널을 키워도 목록은 네 줄에서 멈췄다. 남는 높이를
+     목록이 가져가고, 아래에 결과 표가 붙으면 그만큼 양보한다. */
+  flex: 1;
+  min-height: 90px;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1139,8 +1362,14 @@ input[type="text"] {
   border-bottom: 1px solid var(--border);
 }
 
-.batch-row-fail td:first-child {
+.batch-row-failed td:first-child {
   color: var(--danger);
+}
+
+/* 썼는데 검증이 어긋난 줄. 산출물은 있으므로 빨강이 아니다 — 빨강은 "없다"는
+   뜻으로 읽히고, 그러면 멀쩡한 파일을 다시 뽑게 된다. */
+.batch-row-check td:first-child {
+  color: #f2c94c;
 }
 
 .batch-row-detail td {
@@ -1243,6 +1472,34 @@ input[type="text"] {
   white-space: pre-wrap;
 }
 
+/* 카드가 이름을 댄 파일로 가는 버튼. 본문에 적힌 순서 그대로 늘어선다. */
+.error-card-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3em;
+  margin: 0.4em 0 0;
+}
+
+.error-card-file {
+  padding: 0.15em 0.5em;
+  font: inherit;
+  font-size: 0.9em;
+  color: inherit;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  /* 파일명이 길어 카드를 넘기므로 자른다. 전체 경로는 title에 있다. */
+  max-width: 22em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.error-card-file:hover {
+  background: var(--bg-2);
+}
+
 .error-card-traceback {
   margin: 0.4em 0 0;
   max-height: 200px;
@@ -1285,17 +1542,29 @@ input[type="text"] {
   color: var(--text-dim);
 }
 
+/* 행 오른쪽 끝의 배지들을 모아두는 자리. margin-left: auto를 여기 하나에만
+   줘서, 배지가 하나든 둘이든(색 원본 + 병합/이름변경) 한 덩어리로 오른쪽에
+   붙는다 — 각 배지가 저마다 auto margin을 가지면 flexbox가 남는 공간을
+   나눠 가져 배지 사이가 벌어진다. */
+.node-trailing {
+  flex-shrink: 0;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  max-width: 60%;
+  overflow: hidden;
+}
+
 /* 병합/이름변경 결과 배지. 트리는 원본 구조를 보여주므로, 그 행이 내보내기에서
    어떤 이름으로 나가는지를 여기에 붙인다. */
 .node-export-label {
   flex-shrink: 0;
-  margin-left: auto;
   font-size: 0.72em;
   color: var(--text-dim);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 0 0.35em;
-  max-width: 45%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1304,6 +1573,89 @@ input[type="text"] {
 .node-export-label.merged {
   color: #f2c94c;
   border-color: #7a6a2a;
+}
+
+/* 색 경계선 생성의 수동 지정(설계 3.1) 배지. matched(노랑)·merged(금색)와
+   헷갈리면 "이미 내보내기에 포함됐다"고 오해하기 쉬워 다른 색을 쓴다 — 이
+   표시는 체크박스·내보내기 포함 여부와 완전히 무관하다. */
+.node-edge-colour-badge {
+  flex-shrink: 0;
+  font-size: 0.72em;
+  color: #b18cff;
+  border: 1px solid #5a4a7a;
+  border-radius: 4px;
+  padding: 0 0.35em;
+  white-space: nowrap;
+}
+
+.tree-row.edge-colour {
+  box-shadow: inset 2px 0 0 #b18cff;
+}
+
+/* 확인이 필요한 라인 행(네온 어휘·픽셀 굵기 검출) — "규칙이 잡았고 사람이
+   확인해야 한다"는 라인필요 배지와 같은 소식이라 같은 노란 계열을 쓴다. */
+.node-review-badge {
+  flex-shrink: 0;
+  font-size: 0.72em;
+  color: #f2c94c;
+  border: 1px solid #7a6a2a;
+  border-radius: 4px;
+  padding: 0 0.35em;
+  white-space: nowrap;
+}
+
+.tree-row.line-review {
+  box-shadow: inset 2px 0 0 #f2c94c;
+}
+
+/* 행 오른쪽 끝의 라인 지정 버튼.
+ *
+ * 왼쪽 컨트롤 뭉치(체크박스·solo·눈)에서 떨어뜨려 여기 둔다. 그 셋은 눌러도
+ * 미리보기만 바뀌지만 라인 지정은 색 통일 대상을 바꿔 **내보내는 그림이
+ * 달라진다** — 훑으면서 옆 버튼을 잘못 누르는 사고의 값이 다르다.
+ *
+ * margin-left: auto는 이 버튼이 오른쪽 끝으로 가는 힘이다. 다만 .node-trailing이
+ * 이미 같은 auto margin을 갖고 있어, 둘 다 auto면 flexbox가 남는 공간을 반씩
+ * 나눠 가져 배지 뭉치가 행 한가운데로 밀린다(.solo-clear에서 같은 함정을 이미
+ * 밟았다). 앞에 .node-trailing이 있으면 이쪽이 auto를 내려놓고 .tree-row의
+ * gap에 기댄다. */
+.line-toggle {
+  flex-shrink: 0;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 0.4em;
+  font-size: 0.72em;
+  line-height: 1.7;
+  color: var(--text-dim);
+  /* 평소에는 숨는다. 수백 줄을 훑는 것이 이 패널에서 제일 자주 하는 일인데,
+     드물게 쓰는 버튼을 모든 행에 상시로 띄우면 그 비용을 훑기가 낸다.
+     display: none이 아니라 visibility인 것은 자리를 남겨두기 위해서다 —
+     none이면 호버할 때마다 폭이 바뀌어 행이 흔들린다. */
+  visibility: hidden;
+}
+
+.node-trailing ~ .line-toggle {
+  margin-left: 0;
+}
+
+.tree-row:hover .line-toggle {
+  visibility: visible;
+}
+
+/* 이미 지정된 행에서는 늘 보인다. 지금은 지정 여부를 '라인만' 필터로 걸러봐야
+   알 수 있어, 이 버튼이 그 표시를 겸한다. matched(노랑)·merged(금색)·색
+   원본(보라)과 겹치지 않는 색을 쓴다. */
+.line-toggle.line-on {
+  visibility: visible;
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+.line-toggle:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 /* 병합 결과 행. 원본 레이어가 아니라 내보내기 계획의 항목이므로 구분되게 둔다. */

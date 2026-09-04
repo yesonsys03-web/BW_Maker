@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>BW Maker 사용법</title>
+<style>
+  :root {
+    --bg: #1b1d21; --panel: #24272c; --line: #34383f;
+    --text: #e6e8ea; --dim: #a3a9b2; --accent: #5b9dd9; --warn: #d9a15b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.75 -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  }
+  .wrap { display: flex; max-width: 1180px; margin: 0 auto; }
+  nav {
+    position: sticky; top: 0; align-self: flex-start; width: 210px; flex: none;
+    padding: 28px 16px; height: 100vh; overflow-y: auto; border-right: 1px solid var(--line);
+  }
+  nav a { display: block; color: var(--dim); text-decoration: none; padding: 5px 0; font-size: 14px; }
+  nav a:hover { color: var(--accent); }
+  nav .grp { color: #6f757e; font-size: 12px; margin: 16px 0 4px; letter-spacing: .04em; }
+  main { flex: 1; padding: 28px 34px 80px; min-width: 0; }
+  h1 { font-size: 28px; margin: 8px 0 4px; }
+  h2 {
+    font-size: 21px; margin: 44px 0 12px; padding-top: 18px;
+    border-top: 1px solid var(--line);
+  }
+  h3 { font-size: 16px; margin: 26px 0 8px; color: #cfd4da; }
+  p, li { color: #d3d7dc; }
+  .lead { color: var(--dim); font-size: 15px; margin-bottom: 4px; }
+  img.shot {
+    width: 100%; border: 1px solid var(--line); border-radius: 6px;
+    margin: 12px 0 6px; background: #000;
+  }
+  figure { margin: 18px 0; }
+  figcaption { color: var(--dim); font-size: 13px; margin-top: 2px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row figure { flex: 1; min-width: 190px; margin: 8px 0; }
+  .row img { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+  code, kbd {
+    background: #2c3037; border: 1px solid var(--line); border-radius: 4px;
+    padding: 1px 6px; font-size: 13px; font-family: ui-monospace, Menlo, monospace;
+  }
+  .note, .warn {
+    border-left: 3px solid var(--accent); background: var(--panel);
+    padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0;
+  }
+  .warn { border-left-color: var(--warn); }
+  .note b, .warn b { color: #fff; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); color: #fff; font-weight: 600; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  ol, ul { padding-left: 22px; }
+  ol li { margin: 6px 0; }
+  .steps li { margin: 10px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <div class="grp">시작</div>
+  <a href="#what">이 앱이 하는 일</a>
+  <a href="#quick">빠른 시작</a>
+  <div class="grp">기본 작업</div>
+  <a href="#files">1. 파일 열기</a>
+  <a href="#preset">2. 프리셋 적용</a>
+  <a href="#layers">3. 레이어 확인</a>
+  <a href="#export">4. 내보내기</a>
+  <div class="grp">여러 장 한꺼번에</div>
+  <a href="#batch">배치 내보내기</a>
+  <a href="#project">프로젝트 파일</a>
+  <div class="grp">속도</div>
+  <a href="#speed">준비와 캐시</a>
+  <a href="#workers">작업 프로세스 수</a>
+  <div class="grp">참고</div>
+  <a href="#edge">색 경계선이란</a>
+  <a href="#trouble">잘 안 될 때</a>
+</nav>
+
+<main>
+<h1>BW Maker 사용법</h1>
+<p class="lead">채색 PSD에서 <b>라인 레이어만 골라 내보내는</b> 도구입니다. 이 문서의 그림은 모두 예시 파일로 찍은 것입니다.</p>
+
+<h2 id="what">이 앱이 하는 일</h2>
+<p>채색이 끝난 PSD에는 선화·색·그림자가 수십에서 수백 장 섞여 있습니다. 이 앱은 그중 <b>선화만</b> 골라내어 별도의 PSD(또는 PNG·JPG)로 내보냅니다. 고르는 규칙을 <b>프리셋</b>으로 저장해 두면, 다음 파일부터는 클릭 한 번으로 같은 규칙이 적용됩니다.</p>
+<p>선화가 없는 자리 — 예를 들어 머리카락과 얼굴이 <b>색만 다르고 선이 없는</b> 경계 — 에는 <b>색 경계선</b>을 자동으로 그려 넣을 수 있습니다.</p>
+
+<div class="row">
+  <figure><img src="img/concept-1-color.png" alt="채색 원본" /><figcaption>① 채색 원본</figcaption></figure>
+  <figure><img src="img/concept-2-edges.png" alt="색 경계선이 그려진 상태" /><figcaption>② 색 경계선 생성 (머리·얼굴 경계에 선이 생깁니다)</figcaption></figure>
+  <figure><img src="img/concept-3-lines.png" alt="내보낼 선화" /><figcaption>③ 내보낼 선화</figcaption></figure>
+</div>
+<p class="lead">②에서 생긴 선은 채색 위에서는 옅게 보입니다. <a href="#edge" style="color:var(--accent)">선화만 확대한 비교</a>에서 분명히 확인할 수 있습니다.</p>
+
+<h2 id="quick">빠른 시작</h2>
+<ol class="steps">
+  <li>위쪽 <b>프리셋</b>에서 작업에 맞는 것을 고릅니다 — 캐릭터는 <code>CHAR</code>, 배경은 <code>BG</code>, 소품은 <code>PROP</code>.</li>
+  <li>왼쪽 <b>+ 추가</b>(파일) 또는 <b>+ 폴더</b>(폴더 통째로)로 PSD를 넣습니다.</li>
+  <li>파일을 클릭하고 <b>적용</b>을 누릅니다.</li>
+  <li>미리보기를 확인하고 <b>내보내기...</b>를 누릅니다.</li>
+</ol>
+<div class="note">여러 장을 같은 규칙으로 내보낼 때는 3·4번 대신 <b>배치 실행...</b> 하나로 끝납니다. <a href="#batch" style="color:var(--accent)">배치 내보내기</a>를 보세요.</div>
+
+<h2 id="files">1. 파일 열기</h2>
+<p><b>+ 추가</b>는 파일을 골라서, <b>+ 폴더</b>는 폴더 안의 PSD를 하위 폴더까지 모두 넣습니다. 창으로 끌어다 놓아도 됩니다.</p>
+<img class="shot" src="img/02-files-open.png" alt="파일을 추가한 화면" />
+<p>파일 이름 옆의 <b>열림</b> 배지는 그 파일을 읽어 레이어 구조까지 파악했다는 뜻입니다. 오른쪽 <b>레이어 트리</b>에 그 파일의 레이어가 나타납니다.</p>
+
+<h2 id="preset">2. 프리셋 적용</h2>
+<p>프리셋은 <b>어떤 레이어를 라인으로 볼지</b>에 대한 규칙 묶음입니다. 고른 뒤 <b>적용</b>을 누르면 규칙에 맞는 레이어가 체크되고, 미리보기가 내보낼 그림으로 바뀝니다.</p>
+<img class="shot" src="img/03-preset-char.png" alt="CHAR 프리셋을 적용한 화면" />
+<table>
+  <tr><th>프리셋</th><th>쓰는 곳</th><th>색 경계선</th></tr>
+  <tr><td><code>CHAR</code></td><td>캐릭터 판</td><td>켜짐</td></tr>
+  <tr><td><code>BG</code></td><td>배경 판</td><td>꺼짐</td></tr>
+  <tr><td><code>PROP</code></td><td>소품 판</td><td>켜짐 (광택·그라데이션에 맞춘 설정)</td></tr>
+</table>
+<p>규칙을 바꾸려면 <b>편집...</b>을 누릅니다. 고친 내용은 <b>저장</b>으로 덮어쓰거나 <b>다른 이름으로 저장...</b>으로 새 프리셋이 됩니다.</p>
+<div class="warn"><b>배치는 목록의 첫 프리셋으로 돕니다.</b> 프리셋 순서를 바꾸면 배치 결과가 달라질 수 있으니, 배치 전에 어떤 프리셋이 걸려 있는지 확인하세요.</div>
+
+<h2 id="layers">3. 레이어 확인</h2>
+<p>오른쪽 트리에서 <b>전체</b>와 <b>라인만</b> 탭을 오갈 수 있습니다. <b>라인만</b>은 내보낼 레이어만 남겨 보여줍니다 — 최종 확인에 쓰는 화면입니다.</p>
+<img class="shot" src="img/03b-lines-only.png" alt="라인만 보기" />
+<ul>
+  <li><b>체크박스</b> — 내보낼지 여부</li>
+  <li><b>눈 아이콘</b> — 미리보기에 보일지 여부 (내보내기와 무관)</li>
+  <li>프리셋이 못 잡은 레이어는 우클릭해 <b>라인으로 지정</b>할 수 있습니다.</li>
+</ul>
+
+<h2 id="export">4. 내보내기</h2>
+<p><b>내보내기...</b>를 누르면 저장 위치와 형식을 정합니다.</p>
+<img class="shot" src="img/04-export.png" alt="내보내기 대화상자" />
+<ul>
+  <li><b>형식</b> — PSD / PNG / JPG</li>
+  <li><b>레이어별로 분리</b> — 레이어마다 파일 하나씩</li>
+  <li><b>색 통일</b> — 모든 라인을 지정한 한 가지 색으로</li>
+</ul>
+<p>내보낸 뒤에는 결과를 자동으로 <b>검증</b>합니다. 캔버스 크기와 레이어 수, 픽셀이 의도와 맞는지 확인해 이상이 있으면 알려 줍니다.</p>
+
+<h2 id="batch">배치 내보내기</h2>
+<p>목록에 있는 파일을 <b>한 프리셋으로 전부</b> 내보냅니다. 파일을 하나씩 열고 적용할 필요가 없습니다.</p>
+<img class="shot" src="img/05-batch.png" alt="배치 탭" />
+<ol class="steps">
+  <li>위쪽 <b>배치 실행...</b>을 누릅니다.</li>
+  <li>저장 폴더를 고릅니다.</li>
+  <li>아래 <b>배치</b> 탭에서 진행과 결과를 봅니다.</li>
+</ol>
+<p>파일 하나가 실패해도 나머지는 계속 진행되고, 실패한 파일은 이유와 함께 목록에 남습니다.</p>
+
+<h2 id="project">프로젝트 파일</h2>
+<p>지금까지의 작업 — 파일 목록, 레이어 선택, 손으로 지정한 라인, 병합 — 을 <code>.bwproj</code> 파일 하나로 저장합니다. <b>프로젝트 저장</b>으로 저장하고 <b>프로젝트 열기...</b>로 이어서 작업합니다.</p>
+<div class="note">저장한 뒤 포토샵에서 PSD를 고쳤다면, 프로젝트를 열 때 그 파일이 <b>바뀜</b>으로 표시됩니다 — 그 파일만 다시 확인하면 됩니다.</div>
+
+<h2 id="speed">준비와 캐시</h2>
+<p>PSD의 레이어를 화면에 그리려면 압축을 풀어야 합니다. 큰 채색 판은 레이어 하나에 몇 초가 걸리므로, 앱은 이 작업을 <b>미리 해 두고 디스크에 저장</b>합니다. 그래서 <b>같은 파일을 두 번째 열 때는 훨씬 빠릅니다.</b></p>
+
+<h3>파일 하나를 열면</h3>
+<img class="shot" src="img/06-warm-progress.png" alt="나머지 레이어 준비 중 진행바" />
+<p>진행바가 두 단계로 나뉩니다.</p>
+<table>
+  <tr><th>표시</th><th>뜻</th><th>기다려야 하나</th></tr>
+  <tr><td><b>라인 준비 중</b></td><td>선화 레이어를 먼저 준비합니다</td><td><b>예</b> — 끝나면 라인 토글이 즉시 반응합니다</td></tr>
+  <tr><td><b>나머지 레이어 준비 중</b></td><td>색 레이어까지 캐시를 만듭니다</td><td><b>아니오</b> — 그냥 작업하셔도 됩니다</td></tr>
+</table>
+<div class="note">"나머지 레이어 준비 중"은 <b>처음 한 번만</b> 오래 걸립니다. 같은 파일을 다시 열면 디스크에서 읽어 몇 초로 끝납니다.</div>
+
+<h3>폴더를 통째로 열면</h3>
+<p>자동으로 준비되는 것은 <b>지금 보는 파일과 그다음 파일 한 장</b>뿐입니다. 나머지는 <b>전체 캐시</b> 버튼을 눌러야 합니다.</p>
+<img class="shot" src="img/07-full-cache.png" alt="전체 캐시 진행" />
+<p>폴더 작업이라면 <b>폴더를 연 직후 전체 캐시를 켜 두는 것</b>이 가장 빠릅니다. 미리보기 준비와 같은 캐시를 쓰므로 함께 돌아도 문제없습니다.</p>
+<img class="shot" src="img/08-full-cache-done.png" alt="전체 캐시 완료" />
+<div class="note"><b>파일이 한 장뿐이면 전체 캐시는 필요 없습니다.</b> 그 파일은 이미 자동으로 준비됩니다. 다만 같은 파일에서 <b>프리셋을 바꿔 가며</b> 볼 계획이라면, 전체 캐시가 프리셋마다 미리 그림을 만들어 두므로 도움이 됩니다.</div>
+
+<h2 id="workers">작업 프로세스 수</h2>
+<p>파일 패널의 드롭다운입니다. 준비·전체 캐시·배치 내보내기를 <b>몇 개로 나눠서</b> 할지 정합니다.</p>
+<table>
+  <tr><th>설정</th><th>폴더 100장 준비</th><th>비고</th></tr>
+  <tr><td>1</td><td class="num">28.0분</td><td>나누지 않음</td></tr>
+  <tr><td>2 (기본)</td><td class="num">14.6분</td><td></td></tr>
+  <tr><td>4</td><td class="num">8.6분</td><td>CPU·메모리를 그만큼 더 씁니다</td></tr>
+</table>
+<p>코어와 메모리에 여유가 있으면 4를 권합니다. 다른 작업을 함께 한다면 2가 무난합니다.</p>
+
+<h2 id="edge">색 경계선이란</h2>
+<p>채색 판에서 <b>선이 없고 색만 다른</b> 경계에 선을 그려 넣는 기능입니다. 머리카락과 얼굴, 옷과 피부처럼 아티스트가 색으로만 구분한 자리가 대상입니다.</p>
+<div class="row">
+  <figure><img src="img/concept-1-color.png" alt="원본" /><figcaption>원본 — 머리·얼굴 사이에 선이 없습니다</figcaption></figure>
+  <figure><img src="img/concept-2-edges.png" alt="경계선 생성" /><figcaption>생성 후 — 선이 생겼지만 채색 위에서는 옅어 잘 안 보입니다</figcaption></figure>
+</div>
+<p><b>내보낼 선화</b>를 얼굴 부분만 확대해 비교하면 차이가 분명합니다.</p>
+<div class="row">
+  <figure><img src="img/concept-zoom-before.png" alt="색 경계선 끔" /><figcaption>색 경계선 <b>끔</b> — 원본 선화의 윤곽만 남습니다</figcaption></figure>
+  <figure><img src="img/concept-zoom-after.png" alt="색 경계선 켬" /><figcaption>색 경계선 <b>켬</b> — 머리선·눈·목이 생깁니다</figcaption></figure>
+</div>
+<div class="note">생성된 선은 <b>그 경계의 색</b>을 따라갑니다(머리 경계면 머리색 계열). 최종 산출물을 검은 선으로 통일하려면 내보내기의 <b>색 통일</b>을 쓰세요.</div>
+<p>프리셋 <b>편집...</b>의 색 경계선 항목에서 켜고 끌 수 있고, 굵기·문턱값을 조절할 수 있습니다. 이미 선이 그려져 있는 자리에는 덧그리지 않습니다.</p>
+
+<h2 id="trouble">잘 안 될 때</h2>
+
+<h3>"적용"을 눌렀는데 아무 레이어도 안 잡힙니다</h3>
+<p>프리셋의 이름 규칙이 그 파일과 안 맞는 경우입니다. 두 가지 방법이 있습니다.</p>
+<ul>
+  <li>레이어 트리에서 해당 레이어를 우클릭 → <b>라인으로 지정</b></li>
+  <li>파일 패널의 <b>라인 필요</b> 버튼 — 프리셋이 못 잡은 파일 전부에서 그림 레이어를 찾아 한 번에 지정합니다</li>
+</ul>
+
+<h3>미리보기가 비어 있습니다</h3>
+<p>프리셋이 그 파일에서 아무것도 못 잡았거나, 체크된 레이어가 없는 경우입니다. 레이어 트리에서 <b>전체</b> 탭을 눌러 무엇이 체크돼 있는지 확인하세요.</p>
+
+<h3>파일 전환이 느립니다</h3>
+<p>그 파일이 아직 준비되지 않았습니다. <b>전체 캐시</b>를 한 번 돌려 두면 이후로는 빨라집니다.</p>
+
+<h3>내보낸 파일이 열리지 않습니다</h3>
+<p>내보내기 검증에서 이상이 잡혔다면 화면에 이유가 표시됩니다. 그 메시지와 함께 문의해 주세요.</p>
+</main>
+</div>
+</body>
+</html>

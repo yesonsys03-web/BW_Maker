@@ -25,8 +25,14 @@ HERE = os.path.abspath(SPECPATH)  # noqa: F821 — PyInstaller가 spec 네임스
 # psd_tools.compression.rle_impl. 정적 분석이 대체로 따라가긴 하지만 두 패키지
 # 모두 작아서 통째로 넣는 편이 싸고 확실하다. numpy·PIL은 PyInstaller 기본 훅이
 # 처리하므로 여기서 건드리지 않는다.
-hiddenimports = collect_submodules("psd_tools") + collect_submodules("pytoshop")
-datas = collect_data_files("psd_tools") + collect_data_files("pytoshop")
+# psd_engine 자신도 통째로 넣는다. 진입점(engine_main.py → psd_engine.entry)이
+# 실행 모드를 함수 안 임포트로 가르므로(--warm-worker → warmworker, 그 외 → rpc),
+# 정적 분석이 놓치면 그 모드만 사용자 PC에서 죽는다 — 같은 "싸고 확실하다" 판단이다.
+hiddenimports = (collect_submodules("psd_engine")
+                 + collect_submodules("psd_tools") + collect_submodules("pytoshop")
+                 + collect_submodules("onnxruntime"))
+datas = (collect_data_files("psd_engine") + collect_data_files("psd_tools")
+         + collect_data_files("pytoshop"))
 
 a = Analysis(
     [os.path.join(HERE, "engine_main.py")],

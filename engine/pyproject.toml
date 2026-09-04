@@ -9,6 +9,7 @@ dependencies = [
     "pytoshop==1.2.1",
     "six>=1.16",
     "numpy>=2",
+    "onnxruntime==1.23.2",
     "pillow>=12",
 ]
 

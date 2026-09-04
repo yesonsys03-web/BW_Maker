@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS } from "../lib/presets";
-import type { Preset } from "../lib/types";
+import { DEFAULT_EXCLUDE_TOKENS, DEFAULT_LINE_COLOR, DEFAULT_ROLE_TOKENS, outputFormatsForPreset } from "../lib/presets";
+import type { EdgeLines, OutputFormat, Preset } from "../lib/types";
 
 export type PresetDialogMode = "edit" | "saveAs";
 
@@ -57,7 +57,11 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   const [roleTokensText, setRoleTokensText] = useState(
     (preset.roleTokens ?? DEFAULT_ROLE_TOKENS).join(", ")
   );
+  const [excludeTokensText, setExcludeTokensText] = useState(
+    (preset.excludeTokens ?? DEFAULT_EXCLUDE_TOKENS).join(", ")
+  );
   const [naming, setNaming] = useState<Preset["naming"]>(preset.naming);
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>(preset.outputFormat);
   const [outputSuffix, setOutputSuffix] = useState(preset.outputSuffix);
   const [embedPreview, setEmbedPreview] = useState(preset.embedPreview);
   const [splitLayers, setSplitLayers] = useState(preset.splitLayers ?? false);
@@ -65,6 +69,18 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
   // 그대로 남는다. 저장 시점에만 lineColor(문자열 | null)로 합친다.
   const [normalizeColor, setNormalizeColor] = useState(preset.lineColor !== null);
   const [lineColor, setLineColor] = useState(preset.lineColor ?? DEFAULT_LINE_COLOR);
+  // 색 경계선 생성은 켜짐 여부만 이 대화상자에 노출한다. 나머지 다섯 수치는
+  // 실측에서 나온 기본값이라 preset.edgeLines에 그대로 남고, 저장 시 enabled만
+  // 덮어써서 합친다.
+  const [edgeEnabled, setEdgeEnabled] = useState(preset.edgeLines.enabled);
+  // 색 그림을 만드는 방법. 어느 쪽이 옳은지 아직 사람이 판정하는 중이라 노출한다
+  // (types.ts의 EdgeLines.colourMode 참고). 판정이 끝나면 이 컨트롤은 없앤다.
+  const [colourMode, setColourMode] =
+    useState<EdgeLines["colourMode"]>(preset.edgeLines.colourMode);
+  // 색 경계를 찾는 방법. 어느 쪽이 옳은지 아직 사람이 판정하는 중이라 노출한다
+  // (types.ts의 EdgeLines.edgeMode 참고). 판정이 끝나면 이 컨트롤은 없앤다.
+  const [edgeMode, setEdgeMode] =
+    useState<EdgeLines["edgeMode"]>(preset.edgeLines.edgeMode);
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [valueError, setValueError] = useState<string | null>(null);
@@ -107,6 +123,7 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       name: name.trim(),
       include: { type: includeType, value: includeValue, caseSensitive },
       excludeGroupPrefixes: parseGroupPrefixes(excludeGroupPrefixesText),
+      excludeTokens: parseGroupPrefixes(excludeTokensText),
       matchGroups,
       includeHidden,
       merge,
@@ -117,6 +134,9 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
       embedPreview,
       lineColor: normalizeColor ? lineColor : null,
       splitLayers,
+      outputFormat,
+      edgeLines: { ...preset.edgeLines, enabled: edgeEnabled, colourMode, edgeMode },
+      imageLine: preset.imageLine,
     };
   }
 
@@ -197,6 +217,16 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           />
         </label>
 
+        <label className="preset-field">
+          <span>제외 토큰 (쉼표로 구분)</span>
+          <input
+            type="text"
+            value={excludeTokensText}
+            onChange={(e) => setExcludeTokensText(e.currentTarget.value)}
+            placeholder="예: col, colour, color"
+          />
+        </label>
+
         <label className="preset-checkbox">
           <input type="checkbox" checked={matchGroups} onChange={(e) => setMatchGroups(e.currentTarget.checked)} />
           <span>그룹 이름도 매칭 대상에 포함</span>
@@ -234,6 +264,18 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
             </select>
           </label>
         </div>
+
+        <label className="preset-field">
+          <span>출력 포맷</span>
+          <select value={outputFormat} onChange={(e) => setOutputFormat(e.target.value as OutputFormat)}>
+            {outputFormatsForPreset(preset).map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <span className="preset-hint">배치 실행이 이 값을 씁니다. PNG/JPG는 평탄화된 한 장으로 나갑니다.</span>
+        </label>
 
         {merge === "byElement" && (
           <label className="preset-field">
@@ -275,14 +317,16 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           />
         </label>
 
-        <label className="preset-checkbox">
-          <input
-            type="checkbox"
-            checked={embedPreview}
-            onChange={(e) => setEmbedPreview(e.currentTarget.checked)}
-          />
-          <span>미리보기 이미지 포함하여 내보내기</span>
-        </label>
+        {outputFormat === "psd" && (
+          <label className="preset-checkbox">
+            <input
+              type="checkbox"
+              checked={embedPreview}
+              onChange={(e) => setEmbedPreview(e.currentTarget.checked)}
+            />
+            <span>미리보기 이미지 포함하여 내보내기</span>
+          </label>
+        )}
 
         <label className="preset-checkbox">
           <input
@@ -317,9 +361,60 @@ export function PresetDialog({ mode, preset, existingNames, onSave, onCancel }: 
           <code className="preset-color-value">{normalizeColor ? lineColor.toUpperCase() : "원본 유지"}</code>
         </label>
         <p className="preset-hint">
-          내보낼 때 모든 라인 레이어의 색을 한 색으로 덮습니다. 알파는 그대로 두므로 선 가장자리의
-          안티에일리어싱은 보존됩니다. 꺼두면 원본 레이어 색을 그대로 씁니다.
+          내보낼 때 <b>규칙에 걸린 라인 레이어</b>의 색을 한 색으로 덮습니다. 손으로 체크해 넣은
+          레이어(색 레이어 등)는 원본 색 그대로 나갑니다. 알파는 그대로 두므로 선 가장자리의
+          안티에일리어싱은 보존됩니다. 꺼두면 모두 원본 색을 씁니다.
         </p>
+
+        <label className="preset-checkbox">
+          <input
+            type="checkbox"
+            checked={edgeEnabled}
+            onChange={(e) => setEdgeEnabled(e.currentTarget.checked)}
+          />
+          <span>색 경계선 생성 (캐릭터 모델)</span>
+        </label>
+        <p className="preset-hint">
+          색으로만 갈려 있고 선이 없는 경계에 획을 만들어 그 뷰의 라인 레이어에 합칩니다.
+          이미 선이 있는 자리에는 긋지 않습니다. 배경(BG) 파일에는 쓰지 마세요 — 뷰·색 그룹
+          구조가 있는 캐릭터 모델 전용입니다.
+        </p>
+
+        {edgeEnabled && (
+          <>
+            <label className="preset-field">
+              <span>색 그림 만드는 방법</span>
+              <select
+                value={colourMode}
+                onChange={(e) => setColourMode(e.target.value as EdgeLines["colourMode"])}
+              >
+                <option value="composite">정확 — 포토샵 합성 그대로 (기본)</option>
+                <option value="paste">빠름 — 레이어를 겹치기만 (클리핑 무시)</option>
+              </select>
+              <span className="preset-hint">
+                획을 찾으려고 만드는 중간 그림입니다. <b>빠름</b>은 실측에서 한 뷰가
+                145초 → 19초였지만 클리핑 레이어를 지키지 않습니다. 검은 획은 같은
+                뷰에서 1.09% 달랐습니다 — 두 결과를 미리보기로 비교해 보고 고르세요.
+              </span>
+            </label>
+
+            <label className="preset-field">
+              <span>색 경계 찾는 방법</span>
+              <select
+                value={edgeMode}
+                onChange={(e) => setEdgeMode(e.target.value as EdgeLines["edgeMode"])}
+              >
+                <option value="region">영역 — 색 영역을 나눠 경계를 두름 (기본)</option>
+                <option value="change">예전 — 픽셀 색차의 능선</option>
+              </select>
+              <span className="preset-hint">
+                <b>영역</b>이 획의 지글거림을 없앤 방법입니다. 대신 획이 파일에 따라
+                5~91% 더 그어집니다 — 늘어난 자리가 맞는지 미리보기로 확인해 보세요.
+                <b>예전</b>은 되돌아가 비교할 자리로 남겨 둔 것입니다.
+              </span>
+            </label>
+          </>
+        )}
 
         <div className="modal-actions">
           <button type="button" onClick={onCancel}>

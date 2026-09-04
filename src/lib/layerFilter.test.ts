@@ -3,14 +3,18 @@ import {
   applyBulkInclude,
   bulkTogglableIds,
   collapseMergedRows,
+  collapsedSourceIds,
   filterLeaves,
   flattenLeaves,
   isFiltering,
   isLineFallbackActive,
+  splitLineLeafIds,
   suggestMergeName,
   lineLeafIds,
 } from "./layerFilter";
+import { pixelLeafIds } from "./preview";
 import type { TreeNode } from "./types";
+import { countNeonMatches } from "./layerFilter";
 
 function leaf(id: number, name: string, path: string[], kind = "pixel"): TreeNode {
   return {
@@ -81,8 +85,45 @@ test("lineLeafIds falls back to a name-contains-line rule before any preset is a
 });
 
 test("the name fallback is case-insensitive", () => {
-  const mixed = flattenLeaves([leaf(7, "Outline sketch", ["G"])]);
+  const mixed = flattenLeaves([leaf(7, "LINE sketch", ["G"])]);
   expect(lineLeafIds(mixed, [])).toEqual([7]);
+});
+
+// 부분 문자열이 아니라 토큰으로 본다 — 엔진과 같은 규칙이어야 프리셋을 적용하기
+// 전과 후의 목록이 갈라지지 않는다(engine/psd_engine/names.py).
+test("the name fallback does not match line inside another word", () => {
+  const linear = flattenLeaves([leaf(8, "Layer 866 (LINEAR DODGE)", ["G"])]);
+  expect(lineLeafIds(linear, [])).toEqual([]);
+});
+
+test("the name fallback keeps underscore and camel case names", () => {
+  const joined = flattenLeaves([leaf(9, "Wall_Line", ["G"]), leaf(10, "CurtainsLine", ["G"])]);
+  expect(lineLeafIds(joined, [])).toEqual([9, 10]);
+});
+
+// splitLineLeafIds: 워밍업이 라인을 먼저 데우도록 가른다. 색 판은 드로잉 레이어가
+// 백 장 넘어서 전부 데우는 데 몇 분이 걸리는데, 아티스트가 토글하는 것은 라인뿐이다.
+
+test("splitLineLeafIds puts the line leaves first and the rest after", () => {
+  expect(splitLineLeafIds(tree, [])).toEqual({ line: [2, 4], rest: [1, 5] });
+});
+
+test("splitLineLeafIds follows the preset's matches, like the line-only view", () => {
+  expect(splitLineLeafIds(tree, [5])).toEqual({ line: [5], rest: [1, 2, 4] });
+});
+
+test("splitLineLeafIds counts hand-designated leaves as lines", () => {
+  expect(splitLineLeafIds(tree, [5], [1])).toEqual({ line: [1, 5], rest: [2, 4] });
+});
+
+/**
+ * 워밍업 대상은 pixelLeafIds다. 이 분류에서 한 장이라도 새면 그 잎은 어느 단계에도
+ * 안 실려 영영 안 데워지고, 그 잎의 첫 토글만 몇십 초씩 걸리는 채로 남는다.
+ */
+test("the two lists together are exactly the leaves the warmup would have warmed", () => {
+  const { line, rest } = splitLineLeafIds(tree, [5], [1]);
+  expect([...line, ...rest].sort((a, b) => a - b)).toEqual(pixelLeafIds(tree).sort((a, b) => a - b));
+  expect(line.filter((id) => rest.includes(id))).toEqual([]);
 });
 
 test("isLineFallbackActive only reports the fallback in line mode without matches", () => {
@@ -168,6 +209,23 @@ test("a merged row carries its sources and the merge's total source count", () =
   expect(merged.sourceCount).toBe(2);
 });
 
+/**
+ * 트리에서 잎을 빼는 판정(collapsedSourceIds)과 병합 줄을 만드는 판정
+ * (collapseMergedRows)이 갈라지면, 한쪽이 "줄이 대표한다"고 빼는데 다른 쪽은
+ * 줄을 안 만들어 그 레이어가 화면에서 통째로 사라진다. 자동 병합이 라인 한 장인
+ * 요소에도 merge를 내므로 실제로 일어났던 일이다(2026-08-13).
+ */
+test("collapsedSourceIds names exactly the leaves the merged rows swallow", () => {
+  const entries = [entry(-1, [2, 4], "BG"), entry(-2, [5], "TRUNK"), entry(6, [6], null)];
+  const swallowed = collapseMergedRows(leaves, entries)
+    .flatMap((r) => (r.kind === "merged" ? r.leaves.map((l) => l.node.id) : []))
+    .sort((a, b) => a - b);
+
+  expect([...collapsedSourceIds(entries)].sort((a, b) => a - b)).toEqual(swallowed);
+  // 한 장짜리 병합은 접히지 않으므로 여기 없다 — 그 잎은 트리에 제 행으로 남는다.
+  expect(collapsedSourceIds(entries).has(5)).toBe(false);
+});
+
 test("collapseMergedRows leaves plain and renamed entries as their own rows", () => {
   const rows = collapseMergedRows(leaves, [entry(1, [1], "OUTLINE"), entry(2, [2], null)]);
   expect(rows.every((r) => r.kind === "leaf")).toBe(true);
@@ -230,4 +288,45 @@ test("suggestMergeName leaves the box empty for layers with no role suffix at al
 test("suggestMergeName uses the nearest ancestor carrying a token", () => {
   const rows = [at(1, "LINE", ["SET_OL", "CHAIR_UL"])];
   expect(suggestMergeName(rows, TOKENS)).toBe("CHAIR");
+});
+
+test("손으로 지정한 라인은 규칙이 잡은 것과 함께 라인만 목록에 들어온다", () => {
+  // 규칙이 하나도 못 잡는 판(잎이 BG/BORDER/Layer 1 뿐)과, 규칙이 **엉뚱한 것
+  // 하나만** 잡는 판이 실제로 있었다. 뒤쪽이 더 위험하다 — matchedIds가 비어
+  // 있지 않으니, 지정을 "규칙이 실패했을 때만" 쓰게 만들면 가려진다.
+  const leaves = flattenLeaves([
+    { id: 1, name: "BORDER", kind: "pixel", path: ["BORDER"], visible: true },
+    { id: 2, name: "divide lines", kind: "pixel", path: ["divide lines"], visible: true },
+    { id: 3, name: "BG", kind: "pixel", path: ["BG"], visible: true },
+  ] as unknown as TreeNode[]);
+
+  // 프리셋 적용 전(matchedIds 없음)에는 이름 폴백이 그대로 돌고, 지정이 **더해진다**.
+  // 'divide lines'는 폴백에 걸리는 것이 맞다 — 지정이 폴백을 대체하지는 않는다.
+  expect(lineLeafIds(leaves, [], [1])).toEqual([1, 2]);
+  // 규칙이 엉뚱한 것 하나만 잡았을 때 — 여기가 핵심이다. matchedIds가 비어 있지
+  // 않으므로, 지정을 "규칙이 실패했을 때만" 쓰게 만들면 1이 가려진다.
+  expect(lineLeafIds(leaves, [2], [1])).toEqual([1, 2]);
+  // 지정이 없으면 예전 그대로 — 규칙 결과만 보여준다.
+  expect(lineLeafIds(leaves, [2])).toEqual([2]);
+  expect(lineLeafIds(leaves, [3], [])).toEqual([3]);
+});
+
+/**
+ * countNeonMatches는 FilePanel 파일 행의 "네온 N" 배지 수다. 트리의 "라인인지
+ * 확인 필요" 배지(LayerTree, isNeonName)와 같은 판정이어야 목록과 트리가 다른
+ * 수를 말하지 않는다.
+ */
+test("countNeonMatches counts matched neon leaves, own name or ancestry", () => {
+  const t: TreeNode[] = [
+    leaf(1, "NEON red", ["NEON red"]),
+    leaf(2, "Wall_Line", ["Wall_Line"]),
+    // 매칭 안 된 네온 — 프리셋이 안 잡은 것에 배지를 달면 "잡았다"가 거짓이 된다
+    leaf(3, "NEON blue", ["NEON blue"]),
+    // NEON 그룹에 딸려온 자식 — path의 조상 이름으로 센다
+    group(10, "NEON", ["NEON"], [leaf(4, "sign", ["NEON", "sign"])]),
+  ];
+  expect(countNeonMatches(t, [1, 2, 4])).toBe(2);
+  expect(countNeonMatches(t, [2])).toBe(0);
+  expect(countNeonMatches(t, [])).toBe(0);
+  expect(countNeonMatches(t, undefined)).toBe(0);
 });

@@ -1,16 +1,111 @@
-import { useEffect, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { collectPsdFiles } from "../lib/engine";
+import { describeScan } from "../lib/fileScan";
 import { toEngineError } from "../lib/preview";
 import type { EngineError } from "../lib/types";
 import type { FileEntry, FileStatus } from "../state/appStore";
 
+interface LoadBar {
+  done: number;
+  total: number;
+  label: string;
+}
+
 interface FilePanelProps {
   files: FileEntry[];
   activePath: string | null;
+  /** 파일을 여는 큐의 진행 상황. 안 돌고 있으면 null. */
+  loadProgress: LoadBar | null;
+  /**
+   * 미리보기를 미리 만들어 두는 큐의 진행 상황. 여는 작업이 끝난 뒤에 도는
+   * 뒷정리라 진행바는 같은 자리에 쓰되 문구로 구분한다 — 이건 기다릴 필요가
+   * 없고, 도는 중에도 파일을 눌러 작업할 수 있다.
+   */
+  prefetchProgress: LoadBar | null;
+  /**
+   * 잎 타일 워밍업 체인(활성 → 다음 → 나머지 스윕)의 진행. 안 돌면 null.
+   * 이 표시는 장식이 아니라 기능이다 — 배경에서 몇 분씩 도는 일이 화면에
+   * 안 보이면 사용자는 앱이 멈췄다고 보고 아무거나 누르고, 워밍업은 그때마다
+   * 비켜서느라 더 안 끝난다. 중지 버튼은 없다: 이 일은 사람이 뭘 하든 알아서
+   * 비켜서므로 멈출 이유가 없고, 기다릴 필요도 없다.
+   */
+  warmProgress: LoadBar | null;
+  /**
+   * "전체 캐시"가 도는 중인지, 그리고 시작/중지. 폴더 전체의 드로잉 레이어
+   * 캐시는 몇 시간짜리 작업이라 자동으로 돌지 않는다 — 사용자가 여기서 켠다.
+   * 켜 두면 사람이 쓰는 동안은 비켜서며 돌고, 끝나면 App이 완료 팝업을 낸다.
+   */
+  fullCacheRunning: boolean;
+  /**
+   * 파일 준비(작업 프로세스)가 도는 중인가. "전체 캐시"를 누른 시점에 준비가
+   * 아직 파일을 여는 중이면 스윕은 그 준비가 끝날 때까지 기다린다(App.tsx의
+   * 전체 캐시 효과) — 버튼은 그 대기를 "캐시 중지"가 아니라 "파일 준비 후
+   * 시작"으로 정직하게 보여줘야 한다. 누르면 대기도 취소된다(fullCacheRunning과
+   * 같은 onFullCacheStop 경로).
+   *
+   * 선택 프롭이다 — FilePanel.test.tsx는 이 기능과 무관한(라인필요 배지) 것만
+   * 잠그고 있어 손대지 않는다. 안 주면 대기 상태가 아닌 것으로 본다.
+   */
+  preparing?: boolean;
+  onFullCacheStart: () => void;
+  onFullCacheStop: () => void;
+  /** 전체 캐시 워커 수. 1 = 엔진이 짬짬이(기본), 그 이상 = 별도 프로세스 병렬. */
+  cacheWorkers: number;
+  onCacheWorkersChange: (n: number) => void;
+  /**
+   * 중지된 배경 작업이 남아 있을 때 그것이 무엇인지("남은 파일 22개"). 없으면 null.
+   * 진행바와 같은 자리에 재개 버튼을 띄우는 근거다 — 중지를 누른 그 자리에서
+   * 되돌릴 수 있어야 한다. 이게 없으면 다시 시작하는 방법이 "이미 있는 폴더를
+   * 다시 추가한다"뿐인데, 그건 아무도 짐작할 수 없고 보상도 "이미 목록에
+   * 있습니다" 카드 한 장뿐이다.
+   */
+  stopped: string | null;
+  /**
+   * 파일별로 내보내기에 나갈 장수(병합까지 끝난 뒤). splitLayers를 켜두면 그대로
+   * 출력 파일 수다. 아직 프리셋이 안 걸린 파일은 없다.
+   *
+   * 이걸 행에 그냥 다는 것이 요점이다. 예전에는 이상해 보이는 파일만 골라 카드로
+   * 띄웠는데, ErrorPanel에 뜨니 형태가 "뭔가 잘못됐다"였고 정작 나머지 파일의
+   * 장수는 감췄다. 스물넷을 한눈에 훑어 이상한 것을 직접 고르는 편이, 무엇이
+   * 이상한지를 임계값으로 정해두는 것보다 낫다.
+   */
+  entryCounts: Record<string, number>;
+  /**
+   * 파일별 "확인이 필요한 라인" 수 — 네온 어휘 매칭 + 픽셀 굵기 검출의 합.
+   * 트리의 "라인인지 확인 필요" 배지(LayerTree)와 같은 판정을 App이 세서
+   * 내려준다 — 확인할 파일을 고르려고 목록에서 하나씩 클릭해 보게 하면 안
+   * 된다. 키가 없으면 0이다.
+   */
+  reviewCounts: Record<string, number>;
+  /** "라인필요"(내보낼 장수 0) 파일 수. 0이면 후보 지정 막대를 그리지 않는다. */
+  needsLineCount: number;
+  /**
+   * 라인필요 파일 전부에 라인 후보를 일괄 지정한다(lib/suggestLines.ts의 규칙 —
+   * 그림이 아닌 것만 빼고 전부. 군중 판의 실루엣도 납품 대상이다). 파일마다
+   * 열어 손으로 지정하는 것이 오래 걸린다고 지목된 작업이라 목록 단위 버튼으로
+   * 둔다. 결과는 일반 수동 지정과 같아서 트리에서 보이고 낱장으로 해제할 수 있다.
+   */
+  onApplyLineSuggestions: () => void;
+  /**
+   * 프로젝트를 열 때 수정시각이 달라 저장돼 있던 작업을 버린 파일. 조용히 버리면
+   * 아티스트는 자기가 한 지정이 왜 없는지 알 수 없다(설계 4절). 파일은 목록에
+   * 남되 작업 없이 열린다 — 사라지는 것이 아니라 "다시 해야 한다"는 표시다.
+   */
+  staleProjectPaths: string[];
+  /** 오른쪽 모서리의 폭 조절 손잡이. 레이어 패널·아래 패널과 같은 방식이다. */
+  onResizeStart: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizeMove: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizeEnd: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizeReset: () => void;
   onAddFiles: (paths: string[]) => void;
   onSelectFile: (path: string) => void;
   onRemoveFile: (path: string) => void;
+  /** 목록을 통째로 비운다. 폴더를 갈아끼울 때 쓴다. */
+  onClearFiles: () => void;
+  onCancelLoad: () => void;
+  onResume: () => void;
   onError: (title: string, error: EngineError) => void;
 }
 
@@ -27,8 +122,132 @@ function fileName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemoveFile, onError }: FilePanelProps) {
+function ProgressBar({ progress, onCancel }: { progress: LoadBar; onCancel?: () => void }) {
+  return (
+    <div className="file-load-progress">
+      <div className="export-progress-bar">
+        <div
+          className="export-progress-fill"
+          style={{ width: progress.total > 0 ? `${(progress.done / progress.total) * 100}%` : "0%" }}
+        />
+      </div>
+      <div className="file-load-progress-row">
+        <span className="export-progress-label">
+          {progress.label}... {progress.done}/{progress.total}
+        </span>
+        {onCancel ? (
+          <button type="button" onClick={onCancel}>
+            중지
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** 진행바와 같은 자리를 쓰는 "중지됨" 표시. 막대는 없고 재개 버튼만 있다. */
+function StoppedBar({ label, onResume }: { label: string; onResume: () => void }) {
+  return (
+    <div className="file-load-progress">
+      <div className="file-load-progress-row">
+        <span className="export-progress-label">중지됨 — {label}</span>
+        <button type="button" onClick={onResume}>
+          재개
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function FilePanel({
+  files,
+  activePath,
+  loadProgress,
+  prefetchProgress,
+  warmProgress,
+  fullCacheRunning,
+  preparing = false,
+  onFullCacheStart,
+  onFullCacheStop,
+  cacheWorkers,
+  onCacheWorkersChange,
+  stopped,
+  entryCounts,
+  reviewCounts,
+  needsLineCount,
+  onApplyLineSuggestions,
+  staleProjectPaths,
+  onResizeStart,
+  onResizeMove,
+  onResizeEnd,
+  onResizeReset,
+  onAddFiles,
+  onSelectFile,
+  onRemoveFile,
+  onClearFiles,
+  onCancelLoad,
+  onResume,
+  onError,
+}: FilePanelProps) {
   const [isDragOver, setIsDragOver] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const staleSet = useMemo(() => new Set(staleProjectPaths), [staleProjectPaths]);
+
+  // "전체 캐시"는 켜져 있지만(fullCacheRunning) 파일 준비가 아직 작업 프로세스를
+  // 쥐고 있어 스윕이 출발을 미루는 중. App.tsx의 전체 캐시 효과가 preparing을
+  // 보고 기다리는 것과 같은 판정이다.
+  const fullCacheQueued = fullCacheRunning && preparing;
+
+  /**
+   * 사람이 직접 손댄 파일이 있는지. 프리셋 자동 적용만 걸린 파일은 여기 안 든다
+   * (FileEntry.edited 주석 참고) — 폴더를 갈아끼울 때마다 확인창이 뜨면 그 창은
+   * 곧 아무도 안 읽는 창이 된다.
+   */
+  const hasEdits = files.some((f) => f.edited === true);
+
+  function handleClear() {
+    if (hasEdits) {
+      setConfirmClear(true);
+      return;
+    }
+    onClearFiles();
+  }
+
+  // The drag/drop subscription below is registered once and closes over
+  // addPaths, so addPaths must not change identity every time a file lands in
+  // the list — otherwise every add tears down and re-registers the listener.
+  // The current list is read through this ref instead of a dependency.
+  const filesRef = useRef(files);
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  // Folder picking and dropping funnel through here: collect_psd_files walks
+  // folders recursively, passes layered and flattened artwork through, so a
+  // folder, a pile of files, or both at once need no separate handling.
+  const addPaths = useCallback(
+    async (paths: string[]) => {
+      if (paths.length === 0) return;
+      setScanning(true);
+      try {
+        const scan = await collectPsdFiles(paths);
+        const existing = new Set(filesRef.current.map((f) => f.path));
+        const alreadyPresent = scan.files.filter((p) => existing.has(p)).length;
+        if (scan.files.length > 0) onAddFiles(scan.files);
+        // Nothing found, a capped walk, an unreadable folder: the list alone
+        // can't say any of that, so it goes to the error panel.
+        const notice = describeScan(scan, alreadyPresent);
+        if (notice) onError("파일 추가", { message: notice, traceback: "" });
+      } catch (e) {
+        onError("파일 추가 실패", toEngineError(e));
+      } finally {
+        setScanning(false);
+      }
+    },
+    [onAddFiles, onError]
+  );
 
   // Primary drop path: Tauri's webview-level drag/drop event, which carries
   // real filesystem paths regardless of whether the browser's native HTML5
@@ -43,8 +262,7 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
           setIsDragOver(true);
         } else if (payload.type === "drop") {
           setIsDragOver(false);
-          const psdPaths = payload.paths.filter((p) => p.toLowerCase().endsWith(".psd"));
-          if (psdPaths.length > 0) onAddFiles(psdPaths);
+          void addPaths(payload.paths);
         } else {
           setIsDragOver(false);
         }
@@ -61,19 +279,35 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
       cancelled = true;
       unlisten?.();
     };
-  }, [onAddFiles]);
+  }, [addPaths]);
 
   async function handleBrowse() {
     try {
       const selection = await open({
         multiple: true,
-        filters: [{ name: "Photoshop", extensions: ["psd"] }],
+        filters: [{
+          name: "Artwork",
+          extensions: ["psd", "psb", "png", "jpg", "jpeg"],
+        }],
       });
       if (!selection) return;
       const paths = Array.isArray(selection) ? selection : [selection];
       if (paths.length > 0) onAddFiles(paths);
     } catch (e) {
       onError("파일 선택 실패", toEngineError(e));
+    }
+  }
+
+  // Picking a folder pulls in every supported artwork file beneath it —
+  // work that arrives split one folder per cut goes in with a single pick.
+  async function handleBrowseFolder() {
+    try {
+      const selection = await open({ directory: true, multiple: true });
+      if (!selection) return;
+      const dirs = Array.isArray(selection) ? selection : [selection];
+      await addPaths(dirs);
+    } catch (e) {
+      onError("폴더 선택 실패", toEngineError(e));
     }
   }
 
@@ -96,17 +330,99 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
       const withPath = file as File & { path?: string };
       if (withPath.path) paths.push(withPath.path);
     }
-    if (paths.length > 0) onAddFiles(paths);
+    void addPaths(paths);
   }
 
   return (
     <div className="file-panel">
+      <div
+        className="file-resize-handle"
+        role="separator"
+        aria-label="파일 패널 폭 조절"
+        aria-orientation="vertical"
+        onPointerDown={onResizeStart}
+        onPointerMove={onResizeMove}
+        onPointerUp={onResizeEnd}
+        onPointerCancel={onResizeEnd}
+        onDoubleClick={onResizeReset}
+        title="끌어서 폭 조절 (더블클릭으로 초기화)"
+      />
       <div className="file-panel-header">
         <span>파일</span>
-        <button type="button" onClick={() => void handleBrowse()}>
-          + 추가
-        </button>
+        <div className="file-panel-actions">
+          <button type="button" onClick={() => void handleBrowse()} disabled={scanning}>
+            + 추가
+          </button>
+          <button
+            type="button"
+            onClick={handleClear}
+            disabled={files.length === 0}
+            title="목록을 비웁니다 (엔진 세션도 닫습니다)"
+          >
+            비우기
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleBrowseFolder()}
+            disabled={scanning}
+            title="폴더 안의 PSD를 하위 폴더까지 모두 추가합니다"
+          >
+            {scanning ? "읽는 중..." : "+ 폴더"}
+          </button>
+          <button
+            type="button"
+            onClick={fullCacheRunning ? onFullCacheStop : onFullCacheStart}
+            disabled={files.length === 0}
+            title={
+              // fullCacheQueued를 fullCacheRunning보다 먼저 본다 — 켜져 있는데
+              // 준비가 아직 도는 중이면 "멈춘다"가 아니라 "기다리는 중"이 진실이다.
+              fullCacheQueued
+                ? "파일 준비가 끝나면 전체 캐시가 이어서 시작합니다. 지금 누르면 대기도 취소됩니다."
+                : fullCacheRunning
+                  ? "전체 캐시 만들기를 멈춥니다. 이미 쌓인 캐시는 그대로 남습니다."
+                  : "목록의 모든 파일의 드로잉 레이어를 미리 디코드해 디스크에 쌓아 둡니다. 파일 수에 따라 오래 걸릴 수 있고, 작업하는 동안에는 알아서 비켜섭니다."
+            }
+          >
+            {fullCacheQueued ? "파일 준비 후 시작" : fullCacheRunning ? "캐시 중지" : "전체 캐시"}
+          </button>
+          <select
+            value={String(cacheWorkers)}
+            onChange={(e) => onCacheWorkersChange(Number(e.currentTarget.value))}
+            disabled={fullCacheRunning}
+            title="폴더를 열 때의 파일 준비와 전체 캐시, 배치 내보내기를 몇 개의 작업 프로세스로 나눠 돌릴지. 1이면 나누지 않고 엔진 하나가 순서대로 합니다(파일 100장 폴더 실측 28분). 2면 약 절반, 4면 약 1/3로 줄지만 CPU와 메모리를 그만큼 더 씁니다."
+          >
+            {[1, 2, 4, 6].map((n) => (
+              <option key={n} value={n}>
+                {/* 기본 표시는 실제 기본값(App.tsx의 DEFAULT_CACHE_WORKERS)을 따라간다 —
+                    한쪽만 바꾸면 드롭다운이 거짓말을 한다. */}
+                {n === 1 ? "워커 1 (나누지 않음)" : n === 2 ? "워커 2 (기본)" : `워커 ${n}`}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
+      {needsLineCount > 0 && (
+        // "라인필요" 판(대부분 군중 실루엣 판)은 한 장씩 열어 지정하는 것이
+        // 오래 걸린다고 지목된 작업이다. 여기서 한 번에 지정하고, 확인은
+        // 트리에서 한다 — 지정은 낱장으로 해제할 수 있다.
+        <div className="needs-line-bar">
+          <span>라인필요 {needsLineCount}개</span>
+          <button
+            type="button"
+            onClick={onApplyLineSuggestions}
+            title="프리셋이 라인을 못 잡은 파일 전부에서 그림 레이어를 찾아 한 번에 '라인으로 지정'합니다. 참고자료(REFS·BORDERS·LABELS·Paper)와 글자, 발광(glow) 레이어는 빼고 담습니다 — 군중 실루엣 판도 이것으로 내보낼 수 있게 됩니다. 결과는 각 파일의 레이어 트리에서 확인하고 해제할 수 있습니다."
+          >
+            후보 일괄 지정
+          </button>
+        </div>
+      )}
+      {loadProgress ?? prefetchProgress ? (
+        <ProgressBar progress={(loadProgress ?? prefetchProgress)!} onCancel={onCancelLoad} />
+      ) : stopped ? (
+        <StoppedBar label={stopped} onResume={onResume} />
+      ) : warmProgress ? (
+        <ProgressBar progress={warmProgress} />
+      ) : null}
       <div
         className={`file-drop-zone${isDragOver ? " drag-over" : ""}`}
         onDragOver={handleDragOver}
@@ -114,20 +430,65 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
         onDrop={handleDrop}
       >
         {files.length === 0 ? (
-          <p className="file-drop-hint">PSD 파일을 여기로 끌어다 놓거나 위의 + 추가 버튼을 사용하세요.</p>
+          <p className="file-drop-hint">
+            PSD 파일이나 폴더를 여기로 끌어다 놓거나 위의 + 추가 / + 폴더 버튼을 사용하세요.
+          </p>
         ) : (
           <ul className="file-list">
-            {files.map((file) => (
+            {files.map((file) => {
+              // 프리셋 규칙이 라인을 하나도 못 잡은 파일. 아티스트가 손으로
+              // 지정해야 하는 자리이고, 그 자리를 찾느라 한 장씩 열어보는 것이
+              // 오래 걸린다고 지목된 작업이다 — 목록에서 바로 보이게 한다.
+              //
+              // 조건을 "미리보기가 비었나"가 아니라 **내보낼 장수가 0인가**로
+              // 잡는다. 미리보기가 비는 데는 눈을 다 꺼둔 경우도 있는데, 그건
+              // 아티스트가 일부러 한 것이라 "라인필요"라고 말하면 거짓말이 된다.
+              // entryCounts는 프리셋이 걸린 파일만 담으므로(App.tsx의 같은 이름
+              // 주석) 아직 안 걸린 파일에는 이 표시가 붙지 않는다.
+              const needsLine = entryCounts[file.path] === 0;
+              const stale = staleSet.has(file.path);
+              return (
               <li key={file.path} className="file-list-row">
                 <button
                   type="button"
-                  className={`file-list-item${file.path === activePath ? " active" : ""}`}
+                  className={`file-list-item${file.path === activePath ? " active" : ""}${needsLine ? " needs-line" : ""}${stale ? " stale" : ""}`}
                   onClick={() => onSelectFile(file.path)}
                 >
                   <span className="file-name" title={file.path}>
                     {fileName(file.path)}
                   </span>
                   <span className={`status-badge status-${file.status}`}>{STATUS_LABEL[file.status]}</span>
+                  {stale && (
+                    <span
+                      className="status-badge status-stale"
+                      title="프로젝트를 저장한 뒤 이 PSD가 바뀌었습니다. 저장돼 있던 작업은 쓰지 않았습니다."
+                    >
+                      파일이 바뀜
+                    </span>
+                  )}
+                  {needsLine ? (
+                    // "0장"을 대신한다. 둘 다 두면 같은 말을 두 번 하는 셈이다.
+                    <span
+                      className="status-badge status-needs-line"
+                      title="프리셋 규칙이 이 파일에서 라인을 하나도 찾지 못했습니다. 레이어를 우클릭해 '라인으로 지정'하세요."
+                    >
+                      라인필요
+                    </span>
+                  ) : (
+                    entryCounts[file.path] !== undefined && (
+                      <span className="file-entry-count" title="내보내기에 나갈 장수">
+                        {entryCounts[file.path]}장
+                      </span>
+                    )
+                  )}
+                  {(reviewCounts[file.path] ?? 0) > 0 && (
+                    <span
+                      className="status-badge status-line-review"
+                      title="확인이 필요한 라인이 있습니다 — 네온 어휘로 걸렸거나 픽셀 굵기로 검출된 레이어. 레이어 트리에서 '라인인지 확인 필요' 배지가 붙은 행을 보고, 라인이 아니면 체크나 지정을 해제하세요."
+                    >
+                      라인확인 {reviewCounts[file.path]}
+                    </span>
+                  )}
                 </button>
                 <button
                   type="button"
@@ -143,10 +504,43 @@ export function FilePanel({ files, activePath, onAddFiles, onSelectFile, onRemov
                   ×
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </div>
+
+      {confirmClear && (
+        <div
+          className="modal-overlay"
+          onClick={(e) => {
+            e.stopPropagation();
+            setConfirmClear(false);
+          }}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h3>목록을 비울까요?</h3>
+            <p>
+              직접 편집한 파일이 {files.filter((f) => f.edited === true).length}개 있습니다. 비우면 그
+              편집(병합·이름변경 등)은 되돌릴 수 없습니다. 원본 PSD는 그대로입니다.
+            </p>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setConfirmClear(false)}>
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmClear(false);
+                  onClearFiles();
+                }}
+              >
+                비우기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

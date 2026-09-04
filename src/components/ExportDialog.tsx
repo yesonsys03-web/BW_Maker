@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { defaultExportPath, reorderArgs, resolveEntryName } from "../lib/exportFlow";
-import { exportPsd, onEngineEvent } from "../lib/engine";
-import { DEFAULT_LINE_COLOR } from "../lib/presets";
+import { defaultExportPath, outputExtension, reorderArgs, resolveEntryName } from "../lib/exportFlow";
+import { exportImageLine, exportPsd, onEngineEvent } from "../lib/engine";
+import { DEFAULT_LINE_COLOR, outputFormatsForPreset } from "../lib/presets";
 import { toEngineError } from "../lib/preview";
 import { withEvictedSessionRetry } from "../lib/sessionRetry";
 import type { OpsState } from "../lib/opsReducer";
-import type { EngineError, ExportResult, OpenResult, Operation, Preset, TreeNode } from "../lib/types";
+import type { EngineError, ExportResult, OpenResult, Operation, OutputFormat, Preset, TreeNode } from "../lib/types";
 
 interface ExportDialogProps {
   sessionId: number;
@@ -14,6 +14,19 @@ interface ExportDialogProps {
   ops: OpsState;
   tree: TreeNode[] | undefined;
   preset: Preset | undefined;
+  /**
+   * 프리셋 규칙에 걸린 레이어 id(apply_preset의 matchedLayerIds). 색 통일은
+   * 그중 실제로 내보내는 것에만 걸린다 — 아티스트가 손으로 체크해 넣은 색
+   * 레이어는 원본 색으로 나가야 한다(엔진의 assign_line_color 참고).
+   * 아직 프리셋을 적용하지 않았으면 undefined이고, 그때는 예전처럼 전부 건다.
+   */
+  matchedIds: number[] | undefined;
+  /**
+   * 이 파일의 선 그림 검출이 대기·실행 중이면 그 완료 약속(맨 앞으로 당겨진),
+   * 없으면 null — appStore.frontloadDetection. 내보내기 직전에 기다려서 검출
+   * 지정이 빠진 라인판이 나가는 일을 막는다.
+   */
+  onWaitDetection?: () => Promise<void> | null;
   onPushOp: (op: Operation) => void;
   onClose: () => void;
   onSessionRefreshed: (path: string, result: OpenResult) => void;
@@ -46,6 +59,8 @@ export function ExportDialog({
   ops,
   tree,
   preset,
+  matchedIds,
+  onWaitDetection,
   onPushOp,
   onClose,
   onSessionRefreshed,
@@ -59,13 +74,25 @@ export function ExportDialog({
   // switch while already open.
   const [outputSuffix, setOutputSuffix] = useState(preset?.outputSuffix ?? "_LINE");
   const [naming, setNaming] = useState<"pathPrefix" | "original">(preset?.naming ?? "pathPrefix");
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>(preset?.outputFormat ?? "psd");
   const [embedPreview, setEmbedPreview] = useState(preset?.embedPreview ?? true);
   const [splitLayers, setSplitLayers] = useState(preset?.splitLayers ?? false);
   const [normalizeColor, setNormalizeColor] = useState((preset?.lineColor ?? null) !== null);
   const [lineColor, setLineColor] = useState(preset?.lineColor ?? DEFAULT_LINE_COLOR);
   const [exporting, setExporting] = useState(false);
+  const [waitingDetection, setWaitingDetection] = useState(false);
+  // 검출을 기다린 뒤에는 이 렌더의 ops가 낡았을 수 있다(지정이 그 사이 실렸다).
+  // 렌더마다 갱신되는 ref에서 내보내기 직전에 다시 읽는다.
+  const opsRef = useRef(ops);
+  opsRef.current = ops;
+  // 닫기는 취소다 — 검출을 기다리는 동안 닫혔으면 내보내지 않는다.
+  const closedRef = useRef(false);
+  useEffect(() => () => { closedRef.current = true; }, []);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [result, setResult] = useState<ExportResult | null>(null);
+  const imageLine = preset?.imageLine?.enabled ? preset.imageLine : null;
+  const outputFormatOptions = outputFormatsForPreset(preset);
+
 
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
@@ -162,12 +189,33 @@ export function ExportDialog({
 
   async function handleExport() {
     try {
-      const defaultPath = defaultExportPath(srcPath, outputSuffix);
+      if (imageLine && outputFormat === "jpg") {
+        onError("내보내기 실패", { message: "color_to_line 프리셋은 PNG 또는 PSD로만 내보낼 수 있습니다.", traceback: "" });
+        return;
+      }
+      const defaultPath = defaultExportPath(srcPath, outputSuffix, outputFormat);
+      const ext = outputExtension(srcPath, outputFormat);
       const outputPath = await save({
         defaultPath,
-        filters: [{ name: "Photoshop", extensions: ["psd"] }],
+        filters: [{
+          name: outputFormat === "psd" ? "Photoshop" : outputFormat.toUpperCase(),
+          extensions: [ext],
+        }],
       });
       if (!outputPath) return;
+
+      // 이 파일의 선 그림 검출이 아직이면 끝내고 담는다. 검출을 "한가할 때"로
+      // 미루면서, 지정이 실리기 전에 내보내는 창이 넓어졌다 — 여기서 닫는다.
+      const wait = imageLine ? null : onWaitDetection?.();
+      if (wait) {
+        setWaitingDetection(true);
+        try {
+          await wait;
+        } finally {
+          setWaitingDetection(false);
+        }
+        if (closedRef.current) return;
+      }
 
       setExporting(true);
       setProgress(null);
@@ -177,8 +225,14 @@ export function ExportDialog({
         srcPath,
         sessionId,
         (sid) =>
-          exportPsd(sid, ops.includedIds, ops.ops, naming, outputPath, embedPreview, true, true,
-                    normalizeColor ? lineColor : null, splitLayers),
+          // ops.edgeColourIds(수동 지정)를 넘긴다 — PreviewCanvas가 미리보기에
+          // 쓰는 것과 같은 값이어야 한다. 하나라도 다르면 아티스트가 미리보기로
+          // 승인한 그림과 실제 내보낸 파일이 갈린다.
+          imageLine
+            ? exportImageLine(sid, outputPath, outputFormat as "psd" | "png", imageLine, normalizeColor ? lineColor : null, true)
+            : exportPsd(sid, opsRef.current.includedIds, opsRef.current.ops, naming, outputPath, embedPreview, true, true,
+                        normalizeColor ? lineColor : null, splitLayers, outputFormat,
+                        matchedIds ?? null, preset?.edgeLines ?? null, opsRef.current.edgeColourIds),
         (r) => onSessionRefreshed(srcPath, r)
       );
       setResult(res);
@@ -244,24 +298,37 @@ export function ExportDialog({
           })}
         </div>
 
+        <label className="preset-field">
+          <span>출력 포맷</span>
+          <select value={outputFormat} onChange={(e) => setOutputFormat(e.target.value as OutputFormat)}>
+            {outputFormatOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
         <div className="export-field-row">
-          <label className="preset-field">
-            <span>파일명 규칙</span>
-            <div className="export-radio-group">
-              <label>
-                <input
-                  type="radio"
-                  checked={naming === "pathPrefix"}
-                  onChange={() => setNaming("pathPrefix")}
-                />
-                경로 접두사
-              </label>
-              <label>
-                <input type="radio" checked={naming === "original"} onChange={() => setNaming("original")} />
-                원본 이름
-              </label>
-            </div>
-          </label>
+          {!imageLine && (
+            <label className="preset-field">
+              <span>파일명 규칙</span>
+              <div className="export-radio-group">
+                <label>
+                  <input
+                    type="radio"
+                    checked={naming === "pathPrefix"}
+                    onChange={() => setNaming("pathPrefix")}
+                  />
+                  경로 접두사
+                </label>
+                <label>
+                  <input type="radio" checked={naming === "original"} onChange={() => setNaming("original")} />
+                  원본 이름
+                </label>
+              </div>
+            </label>
+          )}
 
           <label className="preset-field preset-field-grow">
             <span>출력 파일명 접미사</span>
@@ -274,19 +341,23 @@ export function ExportDialog({
           </label>
         </div>
 
-        <label className="preset-checkbox">
-          <input type="checkbox" checked={embedPreview} onChange={(e) => setEmbedPreview(e.currentTarget.checked)} />
-          <span>미리보기 이미지 포함하여 내보내기</span>
-        </label>
+        {!imageLine && outputFormat === "psd" && (
+          <label className="preset-checkbox">
+            <input type="checkbox" checked={embedPreview} onChange={(e) => setEmbedPreview(e.currentTarget.checked)} />
+            <span>미리보기 이미지 포함하여 내보내기</span>
+          </label>
+        )}
 
-        <label className="preset-checkbox">
-          <input
-            type="checkbox"
-            checked={splitLayers}
-            onChange={(e) => setSplitLayers(e.currentTarget.checked)}
-          />
-          <span>레이어마다 파일 따로 내보내기</span>
-        </label>
+        {!imageLine && (
+          <label className="preset-checkbox">
+            <input
+              type="checkbox"
+              checked={splitLayers}
+              onChange={(e) => setSplitLayers(e.currentTarget.checked)}
+            />
+            <span>레이어마다 파일 따로 내보내기</span>
+          </label>
+        )}
 
         <label className="preset-checkbox">
           <input
@@ -378,8 +449,8 @@ export function ExportDialog({
           <button type="button" onClick={onClose} disabled={exporting}>
             닫기
           </button>
-          <button type="button" onClick={() => void handleExport()} disabled={exporting || ops.entries.length === 0}>
-            {exporting ? "내보내는 중..." : "내보내기"}
+          <button type="button" onClick={() => void handleExport()} disabled={exporting || waitingDetection || (!imageLine && ops.entries.length === 0)}>
+            {exporting ? "내보내는 중..." : waitingDetection ? "선 그림 검출 확인 중..." : "내보내기"}
           </button>
         </div>
       </div>
