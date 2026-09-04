@@ -1,7 +1,11 @@
 import { DRAWN_LINES_POLICY } from "../lib/detectDrawnLines";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { findConflicts, planBatchOutputs } from "../lib/batch";
+import {
+  findConflicts,
+  planBatchOutputs,
+  type PlannedBatchOutput,
+} from "../lib/batch";
 import {
   batchRun, onEngineEvent, onWarmWorkerExit, onWarmWorkerLine, pathsExist,
   warmWorkerSend, warmWorkersStart, warmWorkersStop,
@@ -96,6 +100,7 @@ interface StoppedRun {
   paths: string[];
   preset: Preset;
   outputDir: string | null;
+  planned: PlannedBatchOutput[];
   /** 시작할 때 사람이 고른 덮어쓰기 여부. 재개가 그것을 바꾸면 안 된다. */
   overwrite: boolean;
 }
@@ -105,6 +110,7 @@ interface PendingRun {
   preset: Preset;
   outputDir: string | null;
   conflicts: string[];
+  planned: PlannedBatchOutput[];
 }
 
 /**
@@ -227,7 +233,10 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
     preset: Preset,
     dir: string | null,
     overwrite: boolean,
-    { append = false }: { append?: boolean } = {}
+    {
+      append = false,
+      planned = planBatchOutputs(paths, dir, preset.outputSuffix, preset.outputFormat),
+    }: { append?: boolean; planned?: PlannedBatchOutput[] } = {}
   ) {
     setRunning(true);
     onRunningChange(true);
@@ -241,6 +250,32 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
     setProgress(null);
     const collected: BatchItemResult[] = append ? [...(results ?? [])] : [];
     const base = collected.length;
+    const plannedByPath = new Map(planned.map((entry) => [entry.path, entry]));
+    const presetFor = (path: string): Preset => {
+      const outputSuffix = plannedByPath.get(path)?.outputSuffix;
+      return outputSuffix === undefined ? preset : { ...preset, outputSuffix };
+    };
+    const remainingPlan = (remaining: string[]) => {
+      const remainingPaths = new Set(remaining);
+      return planned.filter((entry) => remainingPaths.has(entry.path));
+    };
+    const offerLateConflictRetry = (entries: BatchItemResult[]) => {
+      if (overwrite) return;
+      const retryPaths = entries
+        .filter((entry) =>
+          entry.error?.message.startsWith("output already exists:")
+        )
+        .map((entry) => entry.path);
+      if (retryPaths.length === 0) return;
+      const retryPlan = remainingPlan(retryPaths);
+      setPendingRun({
+        paths: retryPaths,
+        preset,
+        outputDir: dir,
+        conflicts: retryPlan.map((entry) => entry.outputPath),
+        planned: retryPlan,
+      });
+    };
     try {
       if (workers > 1) {
         // 워커 모드: 파일들을 워커 프로세스에 나눠 내보낸다. 규칙은 엔진의
@@ -259,7 +294,7 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
             return warmWorkerSend(id, {
               path,
               export: {
-                preset,
+                preset: presetFor(path),
                 outputDir: dir,
                 overwrite,
                 // 스윕이 재둔 특징을 배치 프리셋으로 판단하는 정책 — 값의
@@ -294,15 +329,29 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
         collected.length = base;
         collected.push(...(outcome.results as BatchItemResult[]));
         setResults([...collected]);
+        offerLateConflictRetry(outcome.results as BatchItemResult[]);
         if (outcome.stopped && outcome.remaining.length > 0) {
-          setStopped({ paths: outcome.remaining, preset, outputDir: dir, overwrite });
+          setStopped({
+            paths: outcome.remaining,
+            preset,
+            outputDir: dir,
+            overwrite,
+            planned: remainingPlan(outcome.remaining),
+          });
         }
         return;
       }
       for (let i = 0; i < paths.length; i += 1) {
         if (stopRef.current) {
           // 남은 것을 들고 있어야 재개가 이어받는다.
-          setStopped({ paths: paths.slice(i), preset, outputDir: dir, overwrite });
+          const remaining = paths.slice(i);
+          setStopped({
+            paths: remaining,
+            preset,
+            outputDir: dir,
+            overwrite,
+            planned: remainingPlan(remaining),
+          });
           break;
         }
         setFileProgress({ done: i, total: paths.length });
@@ -311,7 +360,7 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
         const manual = manualLineIdsByPath[paths[i]];
         const rejected = rejectedLineIdsByPath[paths[i]];
         const { results: one } = await batchRun(
-          [paths[i]], preset, dir, overwrite,
+          [paths[i]], presetFor(paths[i]), dir, overwrite,
           manual && manual.length > 0 ? { [paths[i]]: manual } : {},
           DRAWN_LINES_POLICY,
           rejected && rejected.length > 0 ? { [paths[i]]: rejected } : {}
@@ -321,6 +370,7 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
         // 실패했는지 알기까지 한 시간을 기다리게 된다.
         setResults([...collected]);
       }
+      offerLateConflictRetry(collected.slice(base));
     } catch (e) {
       onError("배치 실행 실패", toEngineError(e));
     } finally {
@@ -363,10 +413,16 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
       const flagByPath = new Map(planned.map((p, i) => [p.outputPath, flags[i]]));
       const conflicts = await findConflicts(planned, async (p) => flagByPath.get(p) ?? false);
       if (conflicts.length > 0) {
-        setPendingRun({ paths, preset: selectedPreset, outputDir: dir, conflicts });
+        setPendingRun({
+          paths,
+          preset: selectedPreset,
+          outputDir: dir,
+          conflicts,
+          planned,
+        });
         return;
       }
-      await runBatch(paths, selectedPreset, dir, false);
+      await runBatch(paths, selectedPreset, dir, false, { planned });
     } catch (e) {
       onError("배치 실행 실패", toEngineError(e));
     }
@@ -483,7 +539,13 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
           <button
             type="button"
             onClick={() =>
-              void runBatch(stopped.paths, stopped.preset, stopped.outputDir, stopped.overwrite, { append: true })
+              void runBatch(
+                stopped.paths,
+                stopped.preset,
+                stopped.outputDir,
+                stopped.overwrite,
+                { append: true, planned: stopped.planned }
+              )
             }
           >
             재개
@@ -579,7 +641,13 @@ export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, reje
                 onClick={() => {
                   const r = pendingRun;
                   setPendingRun(null);
-                  void runBatch(r.paths, r.preset, r.outputDir, true);
+                  void runBatch(
+                    r.paths,
+                    r.preset,
+                    r.outputDir,
+                    true,
+                    { planned: r.planned }
+                  );
                 }}
               >
                 덮어쓰기 진행

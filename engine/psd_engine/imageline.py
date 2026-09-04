@@ -42,6 +42,25 @@ _FLATTENED_LINE_SESSIONS = None
 _AUTHORED_ALPHA_LUT = np.array([
     round(232 * value / 255) for value in range(256)
 ], dtype=np.uint8)
+
+
+def _style_generated_alpha(alpha):
+    """Match generated edges to the established authored BG line weight."""
+    authored = _AUTHORED_ALPHA_LUT[alpha]
+    eroded = np.array(
+        Image.fromarray(authored, "L").filter(ImageFilter.MinFilter(3)),
+        dtype=np.uint8,
+    )
+    styled = (
+        (
+            authored.astype(np.uint16) * 3
+            + eroded.astype(np.uint16) * 2
+            + 2
+        ) // 5
+    ).astype(np.uint8)
+    return styled
+
+
 def _max_rss_bytes():
     if _resource is None:
         return None
@@ -371,6 +390,42 @@ def _is_non_art_line_layer(name):
     )
 
 
+def _is_auxiliary_effect_line(layer, psd):
+    words = set(re.findall(r"[^\W_]+", layer.name.casefold()))
+    if not words & {"glass", "glow", "highlight", "hilight"}:
+        return False
+    image = layer.topil()
+    if image is None:
+        return False
+    alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+    occupied = int(np.count_nonzero(alpha >= 8))
+    return occupied < psd.width * psd.height * 0.01
+
+
+def _has_flattened_art_plate(psd):
+    document_area = psd.width * psd.height
+    return any(
+        not layer.is_group()
+        and layer.is_visible()
+        and layer.bbox != (0, 0, 0, 0)
+        and layer.width * layer.height >= document_area * 0.8
+        for layer in [*psd, *psd.descendants()]
+    )
+
+
+def _is_primary_line_candidate(layer, psd):
+    if layer.parent is psd:
+        return True
+    if layer.width * layer.height >= psd.width * psd.height * 0.20:
+        return True
+    ancestor = layer.parent
+    while ancestor is not None and ancestor is not psd:
+        if _is_named_line_layer(ancestor.name):
+            return True
+        ancestor = ancestor.parent
+    return False
+
+
 def _uses_explicit_turn_line_system(psd):
     for root in psd:
         if (
@@ -560,6 +615,12 @@ _NON_ART_CHILD_KEYS = {
 }
 
 
+def _is_non_art_group_name(name, root=False):
+    key = _object_key(name)
+    keys = _NON_ART_ROOT_KEYS if root else _NON_ART_CHILD_KEYS
+    return key in keys or key.startswith("template")
+
+
 def _production_roots(psd):
     semantic = [
         layer for layer in psd
@@ -572,11 +633,21 @@ def _production_roots(psd):
     ]
     if semantic:
         return semantic
+    def effectively_visible(layer):
+        visible = layer.is_visible()
+        parent = layer.parent
+        while parent is not None and parent is not psd:
+            visible &= parent.is_visible()
+            parent = parent.parent
+        return visible
+
+    visible_groups = [
+        layer for layer in [*psd, *psd.descendants()]
+        if layer.is_group() and effectively_visible(layer)
+    ]
     if not any(
-        layer.is_group()
-        and layer.is_visible()
-        and _object_key(layer.name) in _NON_ART_ROOT_KEYS
-        for layer in psd
+        _is_non_art_group_name(layer.name, root=True)
+        for layer in visible_groups
     ):
         return []
     # Some studio templates name production views after the object or angle
@@ -585,10 +656,12 @@ def _production_roots(psd):
     return [
         layer for layer in psd
         if (
-            layer.is_group()
-            and layer.is_visible()
+            layer.is_visible()
             and layer.bbox != (0, 0, 0, 0)
-            and _object_key(layer.name) not in _NON_ART_ROOT_KEYS
+            and (
+                not layer.is_group()
+                or not _is_non_art_group_name(layer.name, root=True)
+            )
         )
     ]
 
@@ -614,7 +687,10 @@ def _production_children(parent):
     ]
     selected = [
         child for child in children
-        if _object_key(child.name) not in _NON_ART_CHILD_KEYS
+        if (
+            not child.is_group()
+            or not _is_non_art_group_name(child.name)
+        )
     ]
     if selected:
         largest_area = max(
@@ -660,6 +736,8 @@ def _production_root_needs_raw_render(root):
 
 def _render_production_root(root):
     """Composite production only, with a raw fallback for optional effects."""
+    if not root.is_group():
+        return root.topil()
     _, selected = _production_children(root)
     if not _production_root_needs_raw_render(root):
         try:
@@ -1023,6 +1101,176 @@ def _paired_reference_line_layers(psd):
                     if other_layer is not layer
                 ):
                     candidates.append(layer)
+    return candidates
+
+
+def _nested_reference_line_layers(psd):
+    """Find authored lines nested below line groups in visible references."""
+    roots = [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and _object_key(layer.name) == "extraref"
+        )
+    ]
+    candidates = []
+
+    def walk(group, line_group=False, ancestors_visible=True):
+        effectively_visible = ancestors_visible and group.is_visible()
+        if not effectively_visible:
+            return
+        next_line_group = line_group or _is_named_line_layer(group.name)
+        if _is_colour_group_name(group.name):
+            next_line_group = False
+        for layer in group:
+            if layer.is_group():
+                walk(layer, next_line_group, effectively_visible)
+            elif (
+                layer.is_visible()
+                and layer.bbox != (0, 0, 0, 0)
+                and not layer.clipping
+                and not _is_non_art_line_layer(layer.name)
+                and (
+                    _is_named_line_layer(layer.name)
+                    or (
+                        next_line_group
+                        and (
+                            _has_sparse_alpha(layer, psd)
+                            or _has_authored_line_alpha(layer)
+                            or _is_character_fill_line_layer(layer, psd)
+                        )
+                    )
+                )
+            ):
+                candidates.append(layer)
+
+    for root in roots:
+        walk(root)
+    return candidates
+
+
+def _paired_note_art_line_layers(psd):
+    """Find authored line plates paired with colour in visible note art."""
+    roots = [
+        layer for layer in psd
+        if (
+            layer.is_group()
+            and layer.is_visible()
+            and bool(
+                set(re.findall(r"[^\W_]+", layer.name.casefold()))
+                & {"note", "notes"}
+            )
+        )
+    ]
+    candidates = []
+    for root in roots:
+        groups = [root, *[
+            layer for layer in root.descendants()
+            if layer.is_group() and layer.is_visible()
+        ]]
+        for group in groups:
+            ancestors_visible = True
+            parent = group.parent
+            while parent is not None and parent is not psd:
+                ancestors_visible &= parent.is_visible()
+                parent = parent.parent
+            if not ancestors_visible:
+                continue
+            leaves = [
+                layer for layer in group
+                if (
+                    not layer.is_group()
+                    and layer.is_visible()
+                    and layer.bbox != (0, 0, 0, 0)
+                )
+            ]
+            if not any(
+                _object_key(layer.name) in {"color", "colour"}
+                for layer in leaves
+            ):
+                continue
+            candidates.extend(
+                layer for layer in leaves
+                if (
+                    _object_key(layer.name) == "line"
+                    and not layer.clipping
+                )
+            )
+    return candidates
+
+
+def _hidden_flattened_line_layers(session):
+    """Recover hidden source ink when a visible Color plate already shows it."""
+    psd = session["psd"]
+    colour_plates = [
+        layer for layer in psd
+        if (
+            layer.is_visible()
+            and _object_key(layer.name) in {"color", "colour"}
+            and layer.width * layer.height >= psd.width * psd.height * 0.8
+        )
+    ]
+    hidden_lines = []
+    for layer in [*psd, *psd.descendants()]:
+        if (
+            layer.is_group()
+            or not _is_named_line_layer(layer.name)
+            or layer.bbox == (0, 0, 0, 0)
+        ):
+            continue
+        effectively_visible = layer.is_visible()
+        ancestor_keys = set()
+        ancestor = layer.parent
+        while ancestor is not None and ancestor is not psd:
+            effectively_visible &= ancestor.is_visible()
+            ancestor_keys.add(_object_key(ancestor.name))
+            ancestor = ancestor.parent
+        top_level_plate = (
+            layer.parent is psd
+            and layer.width * layer.height
+            >= psd.width * psd.height * 0.2
+        )
+        bw_source_branch = (
+            "bw" in ancestor_keys
+            and bool(ancestor_keys & {"bg", "mg", "fg"})
+        )
+        if not effectively_visible and (
+            top_level_plate or bw_source_branch
+        ):
+            hidden_lines.append(layer)
+    if not colour_plates or not hidden_lines:
+        return []
+    preview = _document_rgba(session)
+    edge_support = _rendered_edge_support(preview)
+    candidates = []
+    for layer in hidden_lines:
+        image = layer.topil()
+        if image is None:
+            continue
+        alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+        core = alpha >= 8
+        core_count = int(np.count_nonzero(core))
+        if core_count == 0:
+            continue
+        left, top, right, bottom = layer.bbox
+        clip_left = max(0, left)
+        clip_top = max(0, top)
+        clip_right = min(psd.width, right)
+        clip_bottom = min(psd.height, bottom)
+        if clip_right <= clip_left or clip_bottom <= clip_top:
+            continue
+        local = core[
+            clip_top - top:clip_bottom - top,
+            clip_left - left:clip_right - left,
+        ]
+        supported = edge_support[
+            clip_top:clip_bottom,
+            clip_left:clip_right,
+        ]
+        visible_ratio = float(np.count_nonzero(local & supported)) / core_count
+        if visible_ratio >= 0.80:
+            candidates.append(layer)
     return candidates
 
 
@@ -2098,10 +2346,7 @@ def _named_line_alpha(session):
                 continue
             effectively_visible = ancestors_visible and layer.is_visible()
             if layer.is_group():
-                if (
-                    production_roots
-                    and _object_key(layer.name) in _NON_ART_CHILD_KEYS
-                ):
+                if _is_non_art_group_name(layer.name):
                     continue
                 next_line_group = (
                     line_group or _is_named_line_layer(layer.name)
@@ -2173,7 +2418,19 @@ def _named_line_alpha(session):
         )
     )
     outline_only_ids = set()
+    for layer in _hidden_flattened_line_layers(session):
+        if id(layer) not in candidate_ids:
+            candidates.append(layer)
+            candidate_ids.add(id(layer))
     if not exclusive_production:
+        for layer in _nested_reference_line_layers(psd):
+            if id(layer) not in candidate_ids:
+                candidates.append(layer)
+                candidate_ids.add(id(layer))
+        for layer in _paired_note_art_line_layers(psd):
+            if id(layer) not in candidate_ids:
+                candidates.append(layer)
+                candidate_ids.add(id(layer))
         for layer in _paired_reference_line_layers(psd):
             outline_only_ids.add(id(layer))
             if id(layer) not in candidate_ids:
@@ -2210,6 +2467,22 @@ def _named_line_alpha(session):
             if not layer.clipping
         ]
         candidate_ids = {id(layer) for layer in candidates}
+        outline_only_ids = set()
+    elif (
+        candidates
+        and all(
+            _is_auxiliary_effect_line(layer, psd)
+            or not _is_primary_line_candidate(layer, psd)
+            for layer in candidates
+        )
+        and _has_flattened_art_plate(psd)
+    ):
+        # A local overlay/effect line is not proof that a flattened BG has an
+        # authored line system. Let the preview-driven BG extractor handle the
+        # whole plate instead of switching to residual completion, which
+        # leaves dark colour regions filled across the scene.
+        candidates = []
+        candidate_ids = set()
         outline_only_ids = set()
     silhouette_layers = _style_silhouette_layers(
         psd,
@@ -2277,6 +2550,7 @@ def _named_line_alpha(session):
         if image is None:
             continue
         alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+        dense_line_plate = float(np.mean(alpha >= 8)) > 0.25
         content_key = (
             tuple(layer.bbox),
             hashlib.sha256(alpha.tobytes()).digest(),
@@ -2304,6 +2578,8 @@ def _named_line_alpha(session):
             alpha = (
                 (alpha.astype(np.uint16) * opacity + 127) // 255
             ).astype(np.uint8)
+        if dense_line_plate:
+            alpha = np.minimum(alpha, 232).astype(np.uint8)
 
         _composite_layer_alpha(out, layer, alpha)
 
@@ -2354,7 +2630,9 @@ def _named_line_alpha(session):
         # Their alpha is a filled silhouette or white-backed plate, not ink.
         # The rendered composite is authoritative in that case and uses the
         # same model as its flattened PNG counterpart.
-        out = _flattened_model_alpha(_artwork_rgba(session))
+        out = _style_generated_alpha(
+            _flattened_model_alpha(_artwork_rgba(session))
+        )
     else:
         out = cleaned
 
@@ -2597,18 +2875,20 @@ def _visible_content_zones(psd):
     """Return visible production roots; template/reference chrome stays out."""
     zones = []
     for layer in _production_roots(psd):
-        boundary = next(
-            (
-                child for child in layer
-                if (
-                    not child.is_group()
-                    and child.is_visible()
-                    and child.name.strip().casefold() == "border"
-                    and child.bbox != (0, 0, 0, 0)
-                )
-            ),
-            layer,
-        )
+        boundary = layer
+        if layer.is_group():
+            boundary = next(
+                (
+                    child for child in layer
+                    if (
+                        not child.is_group()
+                        and child.is_visible()
+                        and child.name.strip().casefold() == "border"
+                        and child.bbox != (0, 0, 0, 0)
+                    )
+                ),
+                layer,
+            )
         left, top, right, bottom = boundary.bbox
         left = max(0, left)
         top = max(0, top)
@@ -2617,6 +2897,45 @@ def _visible_content_zones(psd):
         if right > left and bottom > top:
             zones.append((layer, (left, top, right, bottom)))
     return zones
+
+
+def _template_back_occlusion(psd):
+    """Return opaque delivery-template backing that hides production artwork."""
+    occlusion = np.zeros((psd.height, psd.width), dtype=bool)
+    for root in psd:
+        if (
+            not root.is_group()
+            or not root.is_visible()
+            or _object_key(root.name) != "template"
+        ):
+            continue
+        for layer in root.descendants():
+            words = set(re.findall(r"[^\W_]+", layer.name.casefold()))
+            if (
+                layer.is_group()
+                or not layer.is_visible()
+                or not {"template", "back"} <= words
+                or layer.bbox == (0, 0, 0, 0)
+                or layer.width < psd.width * 0.9
+            ):
+                continue
+            ancestors_visible = True
+            ancestor = layer.parent
+            while ancestor is not None and ancestor is not psd:
+                ancestors_visible &= ancestor.is_visible()
+                ancestor = ancestor.parent
+            if not ancestors_visible:
+                continue
+            image = layer.topil()
+            if image is None:
+                continue
+            alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+            _composite_layer_alpha(
+                occlusion,
+                layer,
+                (alpha >= 247).astype(np.uint8) * 255,
+            )
+    return occlusion
 
 
 def _composite_residual_alpha(session, line_alpha, min_length):
@@ -2641,8 +2960,11 @@ def _composite_residual_alpha(session, line_alpha, min_length):
     residual = np.zeros(line_alpha.shape, dtype=np.uint8)
     document_rgba = None
     for root, (left, top, right, bottom) in zones:
-        leaf_count = sum(
-            1 for layer in root.descendants() if not layer.is_group())
+        leaf_count = (
+            sum(1 for layer in root.descendants() if not layer.is_group())
+            if root.is_group()
+            else 1
+        )
         if leaf_count <= 120:
             try:
                 rendered = _render_production_root(root)
@@ -2755,7 +3077,7 @@ def _turn_colour_boundary_alpha(session, line_alpha):
             not root.is_group()
             or not root.is_visible()
             or _object_key(root.name) in {
-                "template", "extraref", "colorpalette", "colourpalette",
+                "template", "colorpalette", "colourpalette",
             }
         ):
             continue
@@ -2955,6 +3277,7 @@ def extract_image_line(session, image_line):
                 mask_u8,
                 opts["minLength"],
             )
+        residual = _style_generated_alpha(residual)
         np.maximum(mask_u8, residual, out=mask_u8)
         if exclusive_mode is None:
             artwork_rgba = _artwork_rgba(session)
@@ -2967,6 +3290,7 @@ def extract_image_line(session, image_line):
                 artwork_edges[
                     _flattened_annotation_zone(artwork_rgba[..., :3])
                 ] = 0
+            artwork_edges = _style_generated_alpha(artwork_edges)
             np.maximum(mask_u8, artwork_edges, out=mask_u8)
         mask_u8 = np.ascontiguousarray(mask_u8)
         finished = time.perf_counter()
@@ -3102,36 +3426,23 @@ def extract_image_line(session, image_line):
     ) > 0
     mask_u8[replacement_zone & (mask_u8 < 128)] = 0
     np.maximum(mask_u8, missing_edges, out=mask_u8)
-    authored_mask = _AUTHORED_ALPHA_LUT[mask_u8]
-    eroded_mask = np.array(
-        Image.fromarray(
-            authored_mask, "L").filter(ImageFilter.MinFilter(3)),
-        dtype=np.uint8,
-    )
-    # The rendered-document mask has a harder, wider raster core than the
-    # authored Line layers. A weighted one-pixel erosion lowers only the
-    # outer core pixels while retaining antialiased support and interior.
-    weighted_mask = (
-        (
-            authored_mask.astype(np.uint16) * 3
-            + eroded_mask.astype(np.uint16) * 2
-            + 2
-        ) // 5
-    ).astype(np.uint8)
+    weighted_mask = _style_generated_alpha(mask_u8)
     weighted_mask = _remove_large_solid_interiors(
         weighted_mask,
         thin_outline=True,
     )
+    template_occlusion = _template_back_occlusion(session["psd"])
     boundary_peak += (
-        mask.nbytes + mask_u8.nbytes + authored_mask.nbytes
-        + eroded_mask.nbytes + weighted_mask.nbytes + missing_edges.nbytes
-        + replacement_zone.nbytes
+        mask.nbytes + mask_u8.nbytes + weighted_mask.nbytes
+        + missing_edges.nbytes
+        + replacement_zone.nbytes + template_occlusion.nbytes
     )
     mask_u8 = _fill_drawing_panel_strokes(
         weighted_mask,
         rgba,
         drawing_panel_boxes,
     )
+    mask_u8[template_occlusion] = 0
     boundary_done = time.perf_counter()
     mask_u8[~alpha] = 0
     mask_u8 = np.ascontiguousarray(mask_u8)

@@ -62,6 +62,7 @@ vi.mock("../lib/presets", async (orig) => ({
 }));
 
 import { BatchPanel } from "./BatchPanel";
+import { open } from "@tauri-apps/plugin-dialog";
 import { loadPresets } from "../lib/presets";
 import type { FileEntry } from "../state/appStore";
 
@@ -89,6 +90,7 @@ beforeEach(() => {
   runningSignals = [];
   engine.onEngineEvent.mockResolvedValue(() => {});
   engine.pathsExist.mockImplementation(async (paths: string[]) => paths.map(() => false));
+  vi.mocked(open).mockResolvedValue(null);
   engine.batchRun.mockImplementation((paths: string[]) => {
     const d = deferred<{ results: unknown[] }>();
     runs.push({ paths, d });
@@ -146,6 +148,37 @@ test("the batch asks the engine for one file at a time", async () => {
   finish(0);
   await waitFor(() => expect(runs).toHaveLength(2));
   expect(runs[1].paths).toEqual(["/cuts/b.psd"]);
+});
+
+test("shared output folder numbers duplicate source names", async () => {
+  vi.mocked(open).mockResolvedValue("/out");
+  render(
+    <BatchPanel
+      files={[
+        { path: "/show/a/shot.psd", status: "open" },
+        { path: "/archive/b/shot.psd", status: "open" },
+      ]}
+      defaultPresetName={null}
+      manualLineIdsByPath={{}}
+      rejectedLineIdsByPath={{}}
+      workers={1}
+      onError={vi.fn()}
+      onRunningChange={() => {}}
+    />
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "배치 실행" })).toBeTruthy()
+  );
+  fireEvent.click(screen.getByLabelText("폴더 선택..."));
+  click("폴더 선택");
+  await waitFor(() => expect(screen.getByText("/out")).toBeTruthy());
+  click("배치 실행");
+
+  await waitFor(() => expect(runs).toHaveLength(1));
+  expect(engine.batchRun.mock.calls[0][1].outputSuffix).toBe("_LINE");
+  finish(0);
+  await waitFor(() => expect(runs).toHaveLength(2));
+  expect(engine.batchRun.mock.calls[1][1].outputSuffix).toBe("_LINE_1");
 });
 
 // planBatchOutputs was already correct and unit-tested — the bug was that
@@ -331,6 +364,33 @@ test("a file that could not be written is still a plain failure", async () => {
   await waitFor(() => expect(hasCell("실패")).toBe(true));
   click("자세히");
   await waitFor(() => expect(screen.getByText("output already exists")).toBeTruthy());
+});
+
+test("a late output conflict offers an overwrite retry for failed files", async () => {
+  await startRun();
+  runs[0].d.resolve({
+    results: [{
+      path: "/cuts/a.psd",
+      ok: false,
+      error: {
+        message: "output already exists: /cuts/a_LINE.psd",
+        traceback: "Traceback",
+      },
+    }],
+  });
+  await waitFor(() => expect(runs).toHaveLength(2));
+  finish(1);
+  await waitFor(() => expect(runs).toHaveLength(3));
+  finish(2);
+
+  await waitFor(() =>
+    expect(screen.getByRole("heading", { name: "이미 존재하는 파일 1개" })).toBeTruthy()
+  );
+  click("덮어쓰기 진행");
+
+  await waitFor(() => expect(runs).toHaveLength(4));
+  expect(runs[3].paths).toEqual(["/cuts/a.psd"]);
+  expect(engine.batchRun.mock.calls[3][3]).toBe(true);
 });
 
 /**

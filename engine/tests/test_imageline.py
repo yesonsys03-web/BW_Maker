@@ -504,6 +504,99 @@ def test_unnamed_reference_line_paired_with_fill_is_extracted(tmp_path):
     assert mask[10, 20] == 0
 
 
+def test_nested_reference_character_uses_authored_lines_and_visible_colours(
+        tmp_path, monkeypatch):
+    from pytoshop.user import nested_layers
+
+    turn_line = np.zeros((50, 80, 4), dtype=np.uint8)
+    turn_line[5:45, 5, :] = [20, 20, 20, 193]
+    reference_line = np.zeros((50, 80, 4), dtype=np.uint8)
+    reference_line[5:45, 20, :] = [20, 20, 20, 193]
+    base = np.zeros((50, 80, 4), dtype=np.uint8)
+    base[5:45, 30:60, :] = [230, 190, 150, 255]
+    detail = np.zeros((50, 80, 4), dtype=np.uint8)
+    detail[5:45, 45:60, :] = [190, 40, 70, 255]
+    arrow = np.zeros((50, 80, 4), dtype=np.uint8)
+    arrow[5:45, 70, :] = [20, 20, 20, 255]
+    path = tmp_path / "nested-reference-character.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURN", layers=[
+            _rgba_layer("LINE", turn_line),
+        ]),
+        nested_layers.Group(name="EXTRA REFS", layers=[
+            _rgba_layer("ARROWS", arrow),
+            nested_layers.Group(name="BACK 3/4", layers=[
+                nested_layers.Group(name="COLOR", layers=[
+                    _rgba_layer("base", base),
+                    _rgba_layer("detail", detail),
+                ]),
+                nested_layers.Group(name="LINES", layers=[
+                    _rgba_layer("Layer 15", reference_line),
+                ]),
+            ]),
+        ]),
+    ], width=80, height=50)
+    rendered_colours = base.copy()
+    rendered_colours[5:45, 45:60] = detail[5:45, 45:60]
+    preview = rendered_colours.copy()
+    preview[5:45, 5] = turn_line[5:45, 5]
+    preview[5:45, 20] = reference_line[5:45, 20]
+    preview[5:45, 70] = arrow[5:45, 70]
+    session = _session(path)
+    group_type = type(next(
+        layer for layer in session["psd"].descendants()
+        if layer.is_group() and layer.name == "COLOR"
+    ))
+
+    def composite(group):
+        if group.name == "COLOR":
+            return Image.fromarray(rendered_colours.copy(), "RGBA")
+        return Image.fromarray(preview.copy(), "RGBA")
+
+    monkeypatch.setattr(group_type, "composite", composite)
+    monkeypatch.setattr(
+        imageline,
+        "_document_rgba",
+        lambda session: preview.copy(),
+    )
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[5:45, 20].min() == 193
+    assert mask[10:40, 44].min() > 0
+    assert mask[:, 70].max() == 0
+
+
+def test_note_art_colour_pair_keeps_its_authored_line_without_divider(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    turn_line = np.zeros((50, 80, 4), dtype=np.uint8)
+    turn_line[5:45, 5, :] = [20, 20, 20, 193]
+    mouth_line = np.zeros((50, 80, 4), dtype=np.uint8)
+    mouth_line[5:45, 50, :] = [20, 20, 20, 193]
+    mouth_colour = np.zeros((50, 80, 4), dtype=np.uint8)
+    mouth_colour[10:40, 45:60, :] = [190, 40, 70, 255]
+    divider = np.zeros((50, 80, 4), dtype=np.uint8)
+    divider[25, 65:75, :] = [20, 20, 20, 255]
+    path = tmp_path / "note-box-mouth.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TURNAROUND", layers=[
+            _rgba_layer("LINE", turn_line),
+        ]),
+        nested_layers.Group(name="POSES/NOTES", layers=[
+            nested_layers.Group(name="NOTES BOX", layers=[
+                nested_layers.Group(name="OPEN MOUTH", layers=[
+                    _rgba_layer("divide lines", divider),
+                    _rgba_layer("COLOUR", mouth_colour),
+                    _rgba_layer("LINE", mouth_line),
+                ]),
+            ]),
+        ]),
+    ], width=80, height=50)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[5:45, 50].min() == 193
+    assert mask[25, 65:75].max() == 0
+
+
 def test_nested_art_group_coloured_strokes_are_extracted(tmp_path):
     from pytoshop.user import nested_layers
 
@@ -711,6 +804,113 @@ def test_flattened_model_alpha_is_strictly_binary():
         [0, 0, 0],
         [255, 255, 255],
     ], dtype=np.uint8))
+
+
+def test_generated_bg_strokes_keep_authored_alpha_ceiling(tmp_path):
+    rgba = np.full((40, 80, 4), [225, 210, 190, 255], dtype=np.uint8)
+    rgba[5:35, 15, :3] = 20
+    rgba[5:35, 45:49, :3] = 20
+    path = tmp_path / "generated-bg-density.psd"
+    write_psd(path, [_rgba_layer("background", rgba)], width=80, height=40)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[10:30, 15].min() > 0
+    assert mask[10:30, 45:49].max() > 0
+    assert mask.max() <= 232
+
+
+def test_template_back_hides_flattened_artwork_below_delivery_frame(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    artwork = np.full((40, 80, 4), [225, 210, 190, 255], dtype=np.uint8)
+    artwork[5:40, 15, :3] = 20
+    template_back = np.zeros((40, 80, 4), dtype=np.uint8)
+    template_back[30:40] = [255, 255, 255, 255]
+    path = tmp_path / "template-back-occlusion.psd"
+    write_psd(path, [
+        _rgba_layer("Color", artwork),
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("TEMPLATE BACK", template_back),
+        ]),
+    ], width=80, height=40)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[5:30, 15].min() > 0
+    assert mask[30:, 15].max() == 0
+
+
+def test_nested_template_bar_does_not_trigger_named_line_extraction(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    background = np.full((40, 80, 4), [255, 255, 255, 255], dtype=np.uint8)
+    artwork = np.zeros((40, 80, 4), dtype=np.uint8)
+    artwork[5:35, 15, :] = [20, 20, 20, 255]
+    pointing_line = np.zeros((40, 80, 4), dtype=np.uint8)
+    pointing_line[5:35, 70, :] = [20, 20, 20, 255]
+    path = tmp_path / "nested-template-bar.psd"
+    write_psd(path, [
+        nested_layers.Group(name="Layers", layers=[
+            _rgba_layer("COLOR", artwork),
+            nested_layers.Group(name="TEMPLATE BAR", layers=[
+                _rgba_layer("Pointing Lines", pointing_line),
+            ]),
+        ]),
+        _rgba_layer("BG", background),
+    ], width=80, height=40)
+    session = _session(path)
+    assert imageline._named_line_alpha(session) is None
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[5:35, 15].min() > 0
+    assert mask[:, 70].max() == 0
+
+
+def test_small_glass_line_does_not_switch_flattened_bg_to_named_mode(
+        tmp_path):
+    plate = np.full((40, 80, 4), [225, 210, 190, 255], dtype=np.uint8)
+    plate[5:35, 15, :3] = 20
+    glass = np.zeros((40, 80, 4), dtype=np.uint8)
+    glass[10:30, 50, :] = [235, 235, 235, 193]
+    path = tmp_path / "flattened-bg-with-glass-line.psd"
+    write_psd(path, [
+        _rgba_layer("glass line", glass),
+        _rgba_layer("background", plate),
+    ], width=80, height=40)
+    session = _session(path)
+    assert imageline._named_line_alpha(session) is None
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[5:35, 15].min() > 0
+
+
+def test_local_overlay_line_does_not_switch_flattened_bg_to_named_mode(
+        tmp_path):
+    from pytoshop import enums
+    from pytoshop.user import nested_layers
+
+    plate = np.full((40, 80, 4), [225, 210, 190, 255], dtype=np.uint8)
+    plate[5:35, 15, :3] = 20
+    overlay = np.full((20, 1, 4), [20, 20, 20, 193], dtype=np.uint8)
+    overlay_layer = nested_layers.Image(
+        name="LINE Door OPEN",
+        channels={
+            i: np.ascontiguousarray(overlay[..., i]) for i in range(3)
+        } | {-1: np.ascontiguousarray(overlay[..., 3])},
+        top=10,
+        left=50,
+        opacity=255,
+        visible=True,
+        blend_mode=enums.BlendMode.normal,
+    )
+    path = tmp_path / "flattened-bg-with-local-overlay-line.psd"
+    write_psd(path, [
+        nested_layers.Group(name="OL Door OPEN", layers=[
+            overlay_layer,
+        ]),
+        _rgba_layer("background", plate),
+    ], width=80, height=40)
+    session = _session(path)
+    assert imageline._named_line_alpha(session) is None
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[5:35, 15].min() > 0
 
 
 def test_flattened_review_guide_mask_rejects_red_but_not_brown_ink():
@@ -1247,6 +1447,83 @@ def test_full_canvas_color_layer_uses_existing_extractor_without_template(
     assert mask[:, 70].max() == 0
     assert imageline.image_line_profile(
         session, OPTS)["specialLineStyle"] == "flattenedColourLayer"
+
+
+def test_top_level_line_plate_is_kept_beside_template_chrome(tmp_path):
+    from pytoshop.user import nested_layers
+
+    colour = np.full((40, 80, 4), [210, 160, 100, 255], dtype=np.uint8)
+    line = np.zeros((40, 80, 4), dtype=np.uint8)
+    line[5:35, 15, :] = [20, 20, 20, 193]
+    template = np.zeros((40, 80, 4), dtype=np.uint8)
+    template[5:35, 70, :] = [20, 20, 20, 255]
+    path = tmp_path / "top-level-line-plate.psd"
+    write_psd(path, [
+        _rgba_layer("Color", colour),
+        _rgba_layer("Line", line),
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("frame", template),
+        ]),
+    ], width=80, height=40)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[5:35, 15].min() == 193
+    assert mask[:, 70].max() == 0
+
+
+def test_hidden_source_line_is_recovered_when_visible_color_plate_shows_it(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    line = np.zeros((40, 80, 4), dtype=np.uint8)
+    line[5:35, 15, :] = [20, 20, 20, 193]
+    stale_line = np.zeros((40, 80, 4), dtype=np.uint8)
+    stale_line[5:35, 35, :] = [20, 20, 20, 193]
+    colour = np.full((40, 80, 4), [210, 160, 100, 255], dtype=np.uint8)
+    colour[5:35, 15, :3] = 20
+    template = np.zeros((40, 80, 4), dtype=np.uint8)
+    template[5:35, 70, :] = [20, 20, 20, 255]
+    hidden_line = _rgba_layer("Line", line)
+    hidden_line.visible = False
+    hidden_stale_line = _rgba_layer("Lines", stale_line)
+    hidden_stale_line.visible = False
+    path = tmp_path / "flattened-color-with-hidden-line.psd"
+    write_psd(path, [
+        _rgba_layer("Color", colour),
+        hidden_line,
+        hidden_stale_line,
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("frame", template),
+        ]),
+    ], width=80, height=40)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[5:35, 15].min() == 193
+    assert mask[:, 35].max() == 0
+    assert mask[:, 70].max() == 0
+
+
+def test_hidden_bw_source_branch_is_recovered_from_visible_color_group(
+        tmp_path):
+    from pytoshop.user import nested_layers
+
+    line = np.zeros((40, 80, 4), dtype=np.uint8)
+    line[5:35, 15, :] = [20, 20, 20, 193]
+    colour = np.full((40, 80, 4), [210, 160, 100, 255], dtype=np.uint8)
+    colour[5:35, 15, :3] = 20
+    bw = nested_layers.Group(name="B&W", layers=[
+        nested_layers.Group(name="BG", layers=[
+            _rgba_layer("LINE Room", line),
+        ]),
+    ])
+    bw.visible = False
+    path = tmp_path / "flattened-color-with-hidden-bw-source.psd"
+    write_psd(path, [
+        nested_layers.Group(name="COLOR", layers=[
+            _rgba_layer("COLOR", colour),
+        ]),
+        nested_layers.Group(name="TEMPLATE", layers=[bw]),
+    ], width=80, height=40)
+    mask, _ = extract_image_line(_session(path), OPTS)
+    assert mask[5:35, 15].min() == 193
 
 
 def test_named_view_roots_are_kept_when_template_has_no_art_root(tmp_path):

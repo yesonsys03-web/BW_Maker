@@ -78,3 +78,42 @@ test("findConflicts calls existsFn once per planned output", async () => {
   await findConflicts(planned, existsFn);
   expect(calls).toEqual(["/a/one_LINE.psd", "/a/two_LINE.psd"]);
 });
+
+test("planBatchOutputs numbers colliding names in a shared output folder", () => {
+  expect(planBatchOutputs(
+    [
+      "/show/a/shot.psd",
+      "/archive/b/shot.psd",
+      "/show/c/shot.psd",
+      "/show/d/other.psd",
+    ],
+    "/out",
+    "_LINE",
+    "png"
+  )).toEqual([
+    { path: "/show/a/shot.psd", outputPath: "/out/shot_LINE.png" },
+    {
+      path: "/archive/b/shot.psd",
+      outputPath: "/out/shot_LINE_1.png",
+      outputSuffix: "_LINE_1",
+    },
+    {
+      path: "/show/c/shot.psd",
+      outputPath: "/out/shot_LINE_2.png",
+      outputSuffix: "_LINE_2",
+    },
+    { path: "/show/d/other.psd", outputPath: "/out/other_LINE.png" },
+  ]);
+});
+
+test("planBatchOutputs keeps equal basenames beside their own sources", () => {
+  expect(planBatchOutputs(
+    ["/show/a/shot.psd", "/archive/b/shot.psd"],
+    null,
+    "_LINE",
+    "png"
+  )).toEqual([
+    { path: "/show/a/shot.psd", outputPath: "/show/a/shot_LINE.png" },
+    { path: "/archive/b/shot.psd", outputPath: "/archive/b/shot_LINE.png" },
+  ]);
+});

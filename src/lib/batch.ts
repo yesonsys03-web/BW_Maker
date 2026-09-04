@@ -4,6 +4,8 @@ import type { OutputFormat } from "./types";
 export interface PlannedBatchOutput {
   path: string;
   outputPath: string;
+  /** Set only when this input needs a numbered suffix to avoid a batch collision. */
+  outputSuffix?: string;
 }
 
 function baseName(path: string): string {
@@ -35,12 +37,36 @@ export function planBatchOutputs(
   suffix: string,
   fmt: OutputFormat = "psd"
 ): PlannedBatchOutput[] {
-  return paths.map((path) => {
+  const preferred = paths.map((path) => {
     const outputPath =
       outputDir === null
         ? defaultExportPath(path, suffix, fmt)
         : joinDir(outputDir, `${stemOf(baseName(path))}${suffix}.${outputExtension(path, fmt)}`);
     return { path, outputPath };
+  });
+  const preferredPaths = new Set(preferred.map(({ outputPath }) => outputPath));
+  const used = new Set<string>();
+  return preferred.map((entry) => {
+    if (!used.has(entry.outputPath)) {
+      used.add(entry.outputPath);
+      return entry;
+    }
+    let index = 1;
+    let outputSuffix: string;
+    let outputPath: string;
+    do {
+      outputSuffix = `${suffix}_${index}`;
+      outputPath =
+        outputDir === null
+          ? defaultExportPath(entry.path, outputSuffix, fmt)
+          : joinDir(
+              outputDir,
+              `${stemOf(baseName(entry.path))}${outputSuffix}.${outputExtension(entry.path, fmt)}`
+            );
+      index += 1;
+    } while (used.has(outputPath) || preferredPaths.has(outputPath));
+    used.add(outputPath);
+    return { ...entry, outputPath, outputSuffix };
   });
 }
 
