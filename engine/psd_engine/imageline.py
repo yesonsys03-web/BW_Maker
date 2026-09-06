@@ -30,7 +30,31 @@ _DEFAULTS = {
     "boundaryThreshold": 32,
     "minLength": 8,
     "width": 1,
+    "profile": "auto",
 }
+#: 추출 프로파일. 프리셋에는 없는 엔진 내부 스위치다(테스트·계측용) — 아티스트
+#: 지시로 프리셋은 color_to_line 하나뿐이고, 파일 스타일은 auto 안에서 가른다.
+#: auto: FLORIDA 배경 파일(_is_fl102_document)은 inklayers 경로(그려진 라인
+#: 레이어만, 생성 없음), 그 밖의 파일은 이 모듈의 구조 추측 + 생성 보강 경로
+#: (기존 동작 그대로). inkLayers: 이름과 무관하게 inklayers 경로를 강제한다.
+IMAGE_LINE_PROFILES = ("auto", "inkLayers")
+
+
+def _uses_ink_layers(session, opts):
+    """
+    잉크 경로로 갈 파일인가: 강제(profile) / FLORIDA 배경 이름 / **칠한 배경
+    구조**(inklayers.has_painted_object_groups — 이름과 무관한 스타일 판정,
+    아티스트 요청 2026-09-04 "이름은 다른데 스타일이 같은 파일").
+    """
+    if opts["profile"] == "inkLayers":
+        return True
+    if opts["profile"] != "auto" or session.get("flattened_image"):
+        return False
+    if _is_fl102_document(session):
+        return True
+    from .inklayers import has_painted_object_groups
+
+    return has_painted_object_groups(session["psd"])
 _MASK_CACHE = OrderedDict()
 _PROFILE_CACHE = {}
 _MASK_CACHE_LIMIT = 2
@@ -74,6 +98,9 @@ def normalize_options(image_line):
         raise ValueError("imageLine.enabled must be true")
     if int(opts.get("version", 1)) != 1:
         raise ValueError(f"unsupported imageLine.version: {opts.get('version')!r}")
+    profile = opts.get("profile") or "auto"
+    if profile not in IMAGE_LINE_PROFILES:
+        raise ValueError(f"unsupported imageLine.profile: {profile!r}")
     return {
         "enabled": True,
         "version": 1,
@@ -81,6 +108,7 @@ def normalize_options(image_line):
         "boundaryThreshold": int(opts["boundaryThreshold"]),
         "minLength": max(0, int(opts["minLength"])),
         "width": max(1, int(opts["width"])),
+        "profile": profile,
     }
 
 
@@ -533,9 +561,23 @@ def _uses_clean_style(psd):
     )
 
 
+#: FLORIDA 쇼의 배경 파일 이름 규칙(FL102_BG_…, fl102_bg.psd). 에피소드 번호가
+#: 바뀌어도(FL103_BG_…) 같은 스타일이므로 자리수만 맞으면 받는다.
+_FLORIDA_BG_NAME = re.compile(r"^fl\d+_bg(?:[_.]|$)")
+
+
 def _is_fl102_document(session):
+    """
+    FLORIDA 배경 파일인가 — **이름**으로 가른다.
+
+    이 스타일(물체마다 밑칠 + 클리핑 음영 + 잉크 잎, 잉크 없는 구름·태양)은
+    extract_image_line이 inklayers 경로로 보낸다(2026-09-04). 구조로 가르면
+    다른 쇼의 파일이 잘못 걸릴 수 있고, 그러면 그 파일의 라인이 바뀐다 —
+    아티스트가 금지한 바로 그 일이라 이름 규칙으로만 가른다. 다른 이름의 같은
+    스타일 폴더가 오면 이 규칙을 넓힌다.
+    """
     name = os.path.basename(os.fspath(session["path"])).casefold()
-    return name == "fl102_bg.psd" or name.startswith("fl102_bg_")
+    return bool(_FLORIDA_BG_NAME.match(name))
 
 
 def _sparse_black_line_layers(psd):
@@ -3237,6 +3279,51 @@ def extract_image_line(session, image_line):
 
     started = time.perf_counter()
     algorithm_rss_start = _max_rss_bytes()
+    ink_result = None
+    if _uses_ink_layers(session, opts):
+        from .inklayers import ink_layers_alpha
+
+        mask_u8, summary = ink_layers_alpha(session)
+        finished = time.perf_counter()
+        algorithm_rss_end = _max_rss_bytes()
+        result = (mask_u8, hashlib.sha256(mask_u8.tobytes()).hexdigest())
+        profile = {
+            "compositeSeconds": 0.0,
+            "darkExtractionSeconds": 0.0,
+            "boundaryExtractionSeconds": 0.0,
+            "suppressionUnionSeconds": 0.0,
+            "totalSeconds": finished - started,
+            "peakTrackedArrayBytes": int(mask_u8.nbytes),
+            "algorithmPeakRssDeltaBytes": (
+                max(0, algorithm_rss_end - algorithm_rss_start)
+                if (
+                    algorithm_rss_start is not None
+                    and algorithm_rss_end is not None
+                )
+                else None
+            ),
+            **summary,
+        }
+        # 잉크 잎이 하나도 없으면 이 스타일이 아닐 수 있다(액자 속 포스터,
+        # 스마트 오브젝트로만 놓은 덤불). 그런 파일은 일반 경로가 전부터 내던
+        # 그림을 쓴다 — 단, 그 그림이 정말 선화일 때만(_looks_like_line_art).
+        # 라인 없는 하늘 판(#127)은 일반 경로가 캔버스의 36%를 검은 스프레이로
+        # 덮는다 — 그때는 잉크 경로의 구름·태양 윤곽이 답이다. profile을 강제한
+        # 호출(테스트·계측)은 잉크 결과를 그대로 돌려준다.
+        if opts["profile"] == "inkLayers" or summary["inkLayerCount"] > 0:
+            _cache_result(cache_key, result, profile)
+            return result
+        ink_result = (result, profile)
+        del mask_u8
+
+    def _finish(result, profile):
+        """일반 경로의 마무리. 잉크 경로가 대기 중이면 선화 검사로 가른다."""
+        if ink_result is not None and not _looks_like_line_art(result[0]):
+            result, profile = ink_result
+            profile = {**profile, "generalPathRejected": True}
+        _cache_result(cache_key, result, profile)
+        return result
+
     structured_sibling = _matching_sibling_psd_session(session)
 
     named_lines = _named_line_alpha(session)
@@ -3326,8 +3413,7 @@ def extract_image_line(session, image_line):
             "flattenedGraphicLayerCount": flattened_graphic_count,
             **residual_profile,
         }
-        _cache_result(cache_key, result, profile)
-        return result
+        return _finish(result, profile)
 
     drawing_panel_boxes = _drawing_panel_boxes(session["psd"])
     flattened_colour_plate = _flattened_colour_plate_rgba(session)
@@ -3383,8 +3469,7 @@ def extract_image_line(session, image_line):
                 else "sourcePsd" if structured_model else None
             ),
         }
-        _cache_result(cache_key, result, profile)
-        return result
+        return _finish(result, profile)
 
     rgb = rgba[..., :3]
     alpha = rgba[..., 3] > 0
@@ -3469,8 +3554,43 @@ def extract_image_line(session, image_line):
             else "filledDrawingPanels" if drawing_panel_boxes else None
         ),
     }
-    _cache_result(cache_key, result, profile)
-    return result
+    return _finish(result, profile)
+
+
+#: 일반 경로 결과를 선화로 인정하는 한도. FL102 BG 129장 실측: 진짜 선화는
+#: 캔버스의 14% 이하(대부분 10% 미만)이고 긴 획 성분에 픽셀이 몰린다. 검은
+#: 스프레이(#127, 36%)·점묘 잡티(#083)는 둘 중 하나에서 떨어진다.
+LINE_ART_MAX_COVERAGE = 0.15
+LINE_ART_MIN_LONG_RATIO = 0.5
+LINE_ART_MEASURE_SIDE = 2048
+#: "긴 획"의 최소 길이(측정 배율 기준). 점묘 잡티는 반짝이 점 하나가 40~80px라
+#: 16px 기준으로는 획으로 세어진다 — 실측(#083 0.39 vs 포스터 윤곽 #023 0.73)에서
+#: 64px가 둘을 가른다(#083 0.20 / #023 0.58 / 진짜 선화 0.66~0.97).
+LINE_ART_LONG_EXTENT = 64
+
+
+def _looks_like_line_art(mask):
+    """마스크가 선화처럼 생겼는가 — 덮는 비율이 작고, 긴 획 성분이 대부분이다."""
+    solid = mask >= 64
+    n = int(np.count_nonzero(solid))
+    if n == 0:
+        return False
+    if n > solid.size * LINE_ART_MAX_COVERAGE:
+        return False
+    h, w = solid.shape
+    scale = min(1.0, LINE_ART_MEASURE_SIDE / max(w, h))
+    small = solid
+    if scale < 1.0:
+        small = np.asarray(Image.fromarray(mask, "L").resize(
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            Image.Resampling.BOX,
+        )) >= 32
+    total = int(np.count_nonzero(small))
+    if total == 0:
+        return False
+    long_components = _remove_short_components(
+        small, LINE_ART_LONG_EXTENT, count_area=False)
+    return int(np.count_nonzero(long_components)) >= total * LINE_ART_MIN_LONG_RATIO
 
 
 def image_line_profile(session, image_line):
