@@ -51,10 +51,14 @@ PROFILE = "inkLayers"
 #: 그 안의 잉크 잎 `barrier ol`은 굵기 검사가 잡는다.
 INK_WORDS = frozenset({"line", "lineart", "outline", "ink"})
 #: 참고·안내 그룹 — 보이더라도 아래는 안 본다. 이름이 line인 잎이 그 안에
-#: 있어도 마찬가지다(안내선·러프 스케치).
+#: 있어도 마찬가지다(안내선·러프 스케치). fieldguide(s)는 배경 판이 *ART 옆에
+#: 두는 카메라 필드 틀 그룹(*FIELDGUIDES/…/fieldguide: FLGD·Crosshairs·보드
+#: 캐릭터) — 틀은 가는 획이라 굵기 검사가 잉크로 받고 보드 캐릭터는 잉크 없는
+#: 덩어리라 실루엣이 됐다(HH03 라운지 판, 2026-09-07). 일반 경로는 같은 이름을
+#: 문서 겉치레(_NON_ART_ROOT_KEYS)로 이미 뺀다.
 EXCLUDED_GROUP_WORDS = frozenset({
     "persp", "guide", "guides", "grid", "ref", "refs", "rough", "template",
-    "note", "notes", "screenshot", "sketch",
+    "note", "notes", "screenshot", "sketch", "fieldguide", "fieldguides",
 })
 #: 이름이 없는 잎(Layer 12)이 아니라 채색 어휘로 불리는 잎은 굵기 검사도 하지
 #: 않는다 — 검사 비용을 아끼고, 얇은 하이라이트 획이 잉크로 새는 문을 닫는다.

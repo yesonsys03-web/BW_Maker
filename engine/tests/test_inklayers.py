@@ -623,3 +623,67 @@ def test_line_typo_rule(name, expected):
 ])
 def test_ink_name_rule(name, expected):
     assert inklayers.is_named_ink_layer(name) is expected
+
+
+def _field_guide_bg_doc(tmp_path, name):
+    """배경 판 흉내: *ART(칠한 물체 그룹 + 잉크) 옆에 *FIELDGUIDES(카메라 필드
+    틀 FLGD·십자선·보드 캐릭터) — 실제 HH03 배경 판의 최상위 구조."""
+    fill = np.zeros((SIZE, SIZE, 4), dtype=np.uint8)
+    fill[20:110, 20:110, :] = [200, 150, 90, 255]
+    shade = np.zeros((SIZE, SIZE, 4), dtype=np.uint8)
+    shade[60:110, 20:110, :] = [40, 30, 20, 120]
+    hl = np.zeros((SIZE, SIZE, 4), dtype=np.uint8)
+    hl[20:40, 20:110, :] = [255, 255, 240, 90]
+    # 필드 틀: 2px 사각 테두리 — 굵기 검사로는 완벽한 획이다.
+    frame = np.zeros((SIZE, SIZE, 4), dtype=np.uint8)
+    frame[8:120, 8:10, :] = [0, 0, 0, 255]
+    frame[8:120, 118:120, :] = [0, 0, 0, 255]
+    frame[8:10, 8:120, :] = [0, 0, 0, 255]
+    frame[118:120, 8:120, :] = [0, 0, 0, 255]
+    cross = np.zeros((SIZE, SIZE, 4), dtype=np.uint8)
+    cross[62:64, 40:88, :] = [0, 0, 0, 255]
+    cross[40:88, 62:64, :] = [0, 0, 0, 255]
+    # 보드 캐릭터: 잉크 없는 그룹 안의 덩어리 — 실루엣 후보다.
+    board = np.zeros((40, 40, 4), dtype=np.uint8)
+    board[:, :, :] = [50, 50, 50, 255]
+    return write_psd(tmp_path / name, [
+        nested_layers.Group(name="*FIELDGUIDES", layers=[
+            nested_layers.Group(name="HH0309_050_0050", layers=[
+                nested_layers.Group(name="field a", layers=[
+                    nested_layers.Group(name="fieldguide", layers=[
+                        _layer("FLGD", frame),
+                        _layer("Crosshairs", cross),
+                    ]),
+                ]),
+                nested_layers.Group(name="board char", layers=[
+                    _layer("a", board, top=70, left=70),
+                ]),
+            ]),
+        ]),
+        nested_layers.Group(name="*ART", layers=[
+            nested_layers.Group(name="Wall", layers=[
+                _layer("Layer 13", fill),
+                _layer("S", shade, blend_mode=enums.BlendMode.multiply),
+                _layer("HL", hl),
+                _layer("LINE", _stroke()),
+            ]),
+        ]),
+    ], width=SIZE, height=SIZE, clipping=("S", "HL"))
+
+
+def test_field_guides_beside_art_stay_out_of_the_ink_result(tmp_path):
+    # 배경 판은 *ART 옆에 *FIELDGUIDES를 둔다. 일반 경로는 제작 루트(*ART)만
+    # 보는데 잉크 경로가 문서 전체를 걸어, 필드 틀은 획 모양이라 잉크로 받고
+    # 보드 캐릭터는 실루엣이 됐다(HH03 라운지 판, 2026-09-07). 라인은 *ART의
+    # 잉크뿐이어야 한다.
+    path = _field_guide_bg_doc(tmp_path, "lounge_bg.psd")
+    session = _session(path)
+    assert inklayers.has_painted_object_groups(session["psd"]) is True
+    found = inklayers.collect_ink_layers(session["psd"])
+    taken = [item["path"] for item in found["accepted"] + found["silhouettes"]]
+    assert taken == ["*ART/Wall/LINE"]
+    mask, _ = extract_image_line(session, AUTO)
+    assert imageline.image_line_profile(session, AUTO)["inkLayerProfile"] == "inkLayers"
+    assert mask[10, 10] == 200 and mask[100, 50] == 200
+    assert mask[20:90, 8:10].max() == 0 and mask[62:64, 40:60].max() == 0
+    assert mask[69:72, 74:106].max() == 0
