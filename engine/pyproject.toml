@@ -9,7 +9,10 @@ dependencies = [
     "pytoshop==1.2.1",
     "six>=1.16",
     "numpy>=2",
-    "onnxruntime==1.23.2",
+    # 1.19.2는 macOS 11/12 휠(macosx_11_0)이 있는 마지막 버전이다. 1.20~1.23은
+    # macosx_13_0, 1.24부터는 Intel macOS 휠이 없다. 몬터레이 지원용 핀이고,
+    # scripts/check-sidecar-minos.sh가 동결 산물에서 이를 판정한다.
+    "onnxruntime==1.19.2",
     "pillow>=12",
 ]
 
