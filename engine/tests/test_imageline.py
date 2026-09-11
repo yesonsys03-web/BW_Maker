@@ -663,6 +663,65 @@ def test_visible_composite_edges_fill_semantic_root_line_omissions(
     assert mask[13:18, 55].max() > 0
     assert mask[30, 43:48].max() > 0
     assert mask[:, 84].max() == 0
+    # 그린 라인이 렌더 경계의 98%를 못 덮으면 그 파일의 라인 체계는 이름 붙은
+    # 레이어가 아니다 — 잔여 생성(residual) 대신 일반 경로로 간다. KOTH 배경
+    # 127장 실측(2026-09-11): 덮임 0.07~0.97인 파일에서 잔여 생성은 램프·간판·
+    # 캐릭터 실루엣의 검은 덩어리, 선 옆의 번진 띠, 캔버스 전체가 검게 뒤집힌
+    # 판(덮임 0.68)을 만들었고, 같은 그림의 이름 없는 판은 일반 경로에서 깨끗했다.
+    profile = imageline.image_line_profile(session, OPTS)
+    assert profile["namedLinesIncomplete"]["namedLineLayerCount"] == 1
+    assert (profile["namedLinesIncomplete"]["coverage"]
+            < imageline.AUTHORED_LINE_COVERAGE_COMPLETE)
+    assert "compositeResidualPixels" not in profile
+
+
+def test_complete_authored_lines_skip_composite_residual_and_artwork_edges(
+        tmp_path, monkeypatch):
+    """그린 라인이 렌더의 색 경계를 거의 다 덮으면(≥98%) 남은 1~2%는 빠진 선이
+    아니라 잡음이다 — 2026-09-10 sample 전수: 진짜 누락이 있는 파일은 0.76~0.97,
+    라인이 완전한 파일은 0.990~0.996이었고 거기서 생성된 것은 전부 램프 기둥·
+    간판의 검은 덩어리와 기존 선 옆의 짧은 토막이었다.
+
+    타원을 쓴다 — 캔버스를 가로지르는 직선은 안내선으로 지워진다."""
+    from PIL import ImageDraw
+    from pytoshop.user import nested_layers
+
+    width, height = 2000, 1400
+    ellipse = (30, 30, width - 30, height - 30)
+    line_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    ImageDraw.Draw(line_img).ellipse(ellipse, outline=(35, 35, 35, 193), width=2)
+    line = np.array(line_img, dtype=np.uint8)
+    colour_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    ImageDraw.Draw(colour_img).ellipse(ellipse, fill=(100, 140, 220, 255))
+    colour = np.array(colour_img, dtype=np.uint8)
+    colour[700:706, 1000:1040, :] = [220, 40, 90, 255]
+    template = np.zeros((height, width, 4), dtype=np.uint8)
+    template[5:height - 5, width - 5, :] = [255, 0, 0, 255]
+    path = tmp_path / "complete-lines.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("guide", template),
+        ]),
+        nested_layers.Group(name="DESIGN", layers=[
+            _rgba_layer("LINE", line),
+            _rgba_layer("colour", colour),
+        ]),
+    ], width=width, height=height)
+    rendered_img = Image.new("RGBA", (width, height), (235, 225, 200, 255))
+    ImageDraw.Draw(rendered_img).ellipse(
+        ellipse, fill=(100, 140, 220, 255), outline=(35, 35, 35, 255), width=2)
+    rendered = np.array(rendered_img, dtype=np.uint8)
+    rendered[700:706, 1000:1040, :3] = [220, 40, 90]
+    session = _session(path)
+    design = next(layer for layer in session["psd"] if layer.name == "DESIGN")
+    monkeypatch.setattr(
+        type(design),
+        "composite",
+        lambda self: Image.fromarray(rendered.copy(), "RGBA"),
+    )
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[30:33, 1000].max() > 0
+    assert mask[688:718, 988:1052].max() == 0
 
 
 def test_hidden_colour_boundary_is_removed_by_rendered_edge_support():
@@ -739,6 +798,161 @@ def test_artwork_render_keeps_raw_art_when_optional_renderer_is_missing(
     rendered = imageline._artwork_rgba(session)
     assert (rendered[10, 10] == [90, 120, 180, 255]).all()
     assert rendered[:, 3, 3].max() == 0
+
+
+def test_artwork_raw_render_keeps_upper_layers_above_full_canvas_plate(tmp_path):
+    """전경 OL 회귀(2026-09-10): 원시 그리기가 위→아래로 그려 맨 아래 전체판
+    background가 그 위의 탁자·의자(OL)를 덮었다. 그리는 순서는 아래→위다."""
+    from pytoshop.user import nested_layers
+
+    plate = np.zeros((20, 30, 4), dtype=np.uint8)
+    plate[:, :, :] = [168, 200, 188, 255]
+    table = np.zeros((20, 30, 4), dtype=np.uint8)
+    table[10:18, 5:25, :] = [98, 66, 57, 255]
+    footer = np.zeros((20, 30, 4), dtype=np.uint8)
+    footer[19:20, :, :] = [0, 0, 0, 255]
+    path = tmp_path / "overlay-over-plate.psd"
+    # 리스트는 index 0 = 최상단. 문서 아래→위 = background, OL, TEMPLATE.
+    # TEMPLATE(비제작 자식)가 안에 있어야 psd-tools 합성 대신 원시 그리기로 간다.
+    write_psd(path, [
+        nested_layers.Group(name="*ART", layers=[
+            nested_layers.Group(name="TEMPLATE", layers=[
+                _rgba_layer("template back", footer),
+            ]),
+            nested_layers.Group(name="OL", layers=[
+                _rgba_layer("OL TABLE / CHAIRS", table),
+            ]),
+            _rgba_layer("background", plate),
+        ]),
+        nested_layers.Group(name="*FIELDGUIDES", layers=[
+            _rgba_layer("frame", footer),
+        ]),
+    ], width=30, height=20)
+    session = _session(path)
+    art = next(layer for layer in session["psd"] if layer.name == "*ART")
+    assert imageline._production_root_needs_raw_render(art)
+    rendered = imageline._artwork_rgba(session)
+    assert (rendered[14, 15] == [98, 66, 57, 255]).all()
+    assert (rendered[2, 2] == [168, 200, 188, 255]).all()
+
+
+def test_artwork_top_level_leaf_roots_follow_opacity_and_clipping(tmp_path):
+    """최상위 잎 루트도 포토샵 의미대로 그린다 — 불투명도가 적용되고, 클리핑
+    잎은 바탕이 있는 곳에만 보인다. 18% 텍스처가 100%로 캔버스 전체에 덮여
+    차고 문 라인 대신 점 잡음만 남던 파일(KOTH, 2026-09-11)."""
+    from pytoshop.user import nested_layers
+
+    plate = np.zeros((20, 30, 4), dtype=np.uint8)
+    plate[:, :, :] = [200, 200, 200, 255]
+    tint = np.zeros((20, 30, 4), dtype=np.uint8)
+    tint[:, 0:15, :] = [0, 0, 0, 255]
+    speckle = np.zeros((20, 30, 4), dtype=np.uint8)
+    speckle[:, 0:10, :] = [255, 0, 0, 255]
+    template = np.zeros((20, 30, 4), dtype=np.uint8)
+    template[18:20, :, :] = [0, 0, 0, 255]
+    path = tmp_path / "leaf-roots.psd"
+    # 리스트는 index 0 = 최상단. 아래→위 = plate, tint(50%, 왼쪽 절반),
+    # speckle(clip → tint, 왼쪽 1/3), TEMPLATE.
+    write_psd(path, [
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("template back", template),
+        ]),
+        _rgba_layer("speckle", speckle),
+        _rgba_layer("tint", tint),
+        _rgba_layer("plate", plate),
+    ], width=30, height=20, clipping=("speckle",))
+    session = _session(path)
+    tint_layer = next(l for l in session["psd"] if l.name == "tint")
+    tint_layer.opacity = 128
+    rendered = imageline._artwork_rgba(session)
+    assert rendered[5, 5, 0] > 200 and rendered[5, 5, 1] < 120  # 클리핑 잎, 바탕 위
+    assert 80 <= rendered[5, 12, 0] <= 120                 # 50% 검정 → 회색 절반
+    assert (rendered[5, 25, :3] == [200, 200, 200]).all()  # 바탕 밖: 잎 없음
+
+
+def test_artwork_uses_photoshop_composite_when_chrome_sits_on_template_back(
+        tmp_path):
+    """보이는 크롬이 전부 템플릿 바닥판 위에 있으면 포토샵이 저장한 합성이 곧
+    작품이다 — 바닥판 자리만 비우고 그대로 쓴다. psd-tools 합성기는 마스크 달린
+    통과(pass-through) 그룹에서 캔버스를 하얗게 덮었다(KOTH 거실 크리스마스
+    파일, 2026-09-11)."""
+    from pytoshop import enums
+    from pytoshop.user import nested_layers
+
+    paper = np.full((40, 80, 4), [255, 255, 255, 255], dtype=np.uint8)
+    plate = np.full((40, 80, 4), [200, 100, 50, 255], dtype=np.uint8)
+    stripes = np.zeros((40, 80, 4), dtype=np.uint8)
+    stripes[5:15, :, :] = [128, 128, 128, 255]
+    stripe_layer = nested_layers.Image(
+        name="wallpaper stripes",
+        channels={i: np.ascontiguousarray(stripes[..., i]) for i in range(3)}
+        | {-1: np.ascontiguousarray(stripes[..., 3])},
+        top=0, left=0, opacity=255, visible=True,
+        blend_mode=enums.BlendMode.multiply,
+    )
+    back = np.zeros((40, 80, 4), dtype=np.uint8)
+    back[30:40, :, :] = [255, 255, 255, 255]
+    label = np.zeros((40, 80, 4), dtype=np.uint8)
+    label[33:37, 10:30, :] = [0, 0, 0, 255]
+    path = tmp_path / "template-on-back.psd"
+    # 아래→위 = paper, Layers(COLOR, TEMPLATE(TEMPLATE BACK, LABEL)), stripes.
+    write_psd(path, [
+        stripe_layer,
+        nested_layers.Group(name="Layers", layers=[
+            nested_layers.Group(name="TEMPLATE", layers=[
+                _rgba_layer("LABEL - SCENE", label),
+                _rgba_layer("TEMPLATE BACK", back),
+            ]),
+            _rgba_layer("COLOR", plate),
+        ]),
+        _rgba_layer("Paper", paper),
+    ], width=80, height=40)
+    session = _session(path)
+    rendered = imageline._artwork_rgba(session)
+    assert 90 <= rendered[10, 30, 0] <= 110          # 곱하기 줄무늬 그대로
+    assert (rendered[20, 30, :3] == [200, 100, 50]).all()
+    assert rendered[30:40, :, 3].max() == 0           # 바닥판 자리는 비운다
+    assert rendered[:30, :, 3].min() == 255
+
+
+def test_artwork_render_honours_blend_modes_and_skips_nested_chrome(tmp_path):
+    """제작 루트를 직접 합성할 때 포토샵 합성기(psd-tools)를 쓴다 — 곱하기
+    줄무늬·오버레이 텍스처를 100% 일반 잎으로 그리던 원시 합성이 KOTH 배경에서
+    벽 전체를 세로줄로 덮었다(2026-09-11). 안에 든 템플릿 크롬은 계속 뺀다."""
+    from pytoshop import enums
+    from pytoshop.user import nested_layers
+
+    paper = np.full((40, 80, 4), [255, 255, 255, 255], dtype=np.uint8)
+    plate = np.full((40, 80, 4), [200, 100, 50, 255], dtype=np.uint8)
+    pointing_line = np.zeros((40, 80, 4), dtype=np.uint8)
+    pointing_line[5:35, 70, :] = [20, 20, 20, 255]
+    stripes = np.zeros((40, 80, 4), dtype=np.uint8)
+    stripes[5:15, :, :] = [128, 128, 128, 255]
+    stripe_layer = nested_layers.Image(
+        name="wallpaper stripes",
+        channels={i: np.ascontiguousarray(stripes[..., i]) for i in range(3)}
+        | {-1: np.ascontiguousarray(stripes[..., 3])},
+        top=0, left=0, opacity=255, visible=True,
+        blend_mode=enums.BlendMode.multiply,
+    )
+    path = tmp_path / "multiply-stripes.psd"
+    # 리스트는 index 0 = 최상단. 아래→위 = paper, Layers(COLOR, TEMPLATE BAR), stripes.
+    write_psd(path, [
+        stripe_layer,
+        nested_layers.Group(name="Layers", layers=[
+            nested_layers.Group(name="TEMPLATE BAR", layers=[
+                _rgba_layer("Pointing Lines", pointing_line),
+            ]),
+            _rgba_layer("COLOR", plate),
+        ]),
+        _rgba_layer("Paper", paper),
+    ], width=80, height=40)
+    rendered = imageline._artwork_rgba(_session(path))
+    # 곱하기: (200,100,50) × 128/255 ≈ (100,50,25). 일반 블렌드였다면 (128,128,128).
+    assert 90 <= rendered[10, 30, 0] <= 110
+    assert 40 <= rendered[10, 30, 1] <= 60
+    assert (rendered[20, 30, :3] == [200, 100, 50]).all()
+    assert (rendered[20, 70, :3] == [200, 100, 50]).all()
 
 
 def test_clean_style_sign_and_wall_pattern_get_outlines(tmp_path):
@@ -836,6 +1050,40 @@ def test_template_back_hides_flattened_artwork_below_delivery_frame(
     mask, _ = extract_image_line(_session(path), OPTS)
     assert mask[5:30, 15].min() > 0
     assert mask[30:, 15].max() == 0
+
+
+def test_flattened_template_strip_is_not_extracted_as_line_art(tmp_path):
+    """납품 템플릿이 **그룹이 아니라 평평한 잎 한 장**으로 들어온 파일도 그
+    글자를 라인으로 내지 않는다 — KOTH 오버레이 판(문 한 짝)은 그림보다 템플릿
+    글자가 더 많아 라인 그림이 서류처럼 나왔다(2026-09-11)."""
+    artwork = np.zeros((40, 80, 4), dtype=np.uint8)
+    artwork[5:28, 30, :] = [20, 20, 20, 255]
+    # 실물처럼 bbox가 아래쪽 띠에 꽉 맞는 잎으로 놓는다.
+    # 실물의 템플릿 잎은 **투명 띠**다 — 흰 바탕은 아래 종이에서 오고, 잎에는
+    # 글자·상자만 그려져 있다(알파 평균 79/255). 불투명 판으로 픽스처를 만들면
+    # 규칙이 실물에서 절반만 지우는 것을 못 잡는다.
+    strip = np.zeros((8, 68, 4), dtype=np.uint8)
+    strip[2:4, 4:24, :] = [0, 0, 0, 255]
+    strip[4:5, 4:40, :] = [0, 0, 0, 128]
+    from pytoshop import enums
+    from pytoshop.user import nested_layers
+
+    template = nested_layers.Image(
+        name="TEMPLATE",
+        channels={i: np.ascontiguousarray(strip[..., i]) for i in range(3)}
+        | {-1: np.ascontiguousarray(strip[..., 3])},
+        top=32, left=6, opacity=255, visible=True,
+        blend_mode=enums.BlendMode.normal,
+    )
+    path = tmp_path / "flat-template-strip.psd"
+    # 아래→위 = artwork, TEMPLATE(평평한 잎). 그룹이 하나도 없는 파일이다.
+    write_psd(path, [template, _rgba_layer("artwork", artwork)],
+              width=80, height=40)
+    session = _session(path)
+    assert imageline._production_roots(session["psd"]) == []
+    mask, _ = extract_image_line(session, OPTS)
+    assert mask[5:28, 30].max() > 0
+    assert mask[32:, :].max() == 0
 
 
 def test_nested_template_bar_does_not_trigger_named_line_extraction(

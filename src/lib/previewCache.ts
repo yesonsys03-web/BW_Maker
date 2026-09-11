@@ -224,8 +224,20 @@ export interface PreviewFileId {
  *
  * 53 (2026-09-03): LAYOUT의 NEON 선화와 pupils도 보이는 배경 라인으로
  * 포함하되 NEON fill은 제외하고 기존 가림 처리를 적용한다.
+ *
+ * 54 (2026-09-10): 제작 루트를 직접 합성할 때 드로잉 레이어를 아래→위
+ * 순서로 그린다. 위→아래로 그려 맨 아래 전체 배경이 전경 OL 그룹(탁자·
+ * 의자)을 덮던 것을 바로잡는다. 그린 라인이 렌더의 색 경계를 98% 이상
+ * 덮는 파일은 색 경계 생성(composite residual·artwork edges)을 건너뛴다 —
+ * 바로잡힌 렌더에서 그 생성이 램프 기둥·간판의 검은 덩어리를 만들었다.
+ *
+ * 55 (2026-09-11): KOTH 배경 219장 실측. 그린 라인이 렌더 경계의 98%를
+ * 못 덮는 파일은 잔여 생성 대신 일반 경로로 간다(검은 덩어리·번진 띠·
+ * 캔버스가 검게 뒤집힌 판). 제작 루트를 직접 합성할 때 포토샵 합성기로
+ * 문서째 합성해 곱하기 줄무늬·오버레이 텍스처가 세로줄·점 잡음이 되던
+ * 것을 없앴다.
  */
-export const PREVIEW_PICTURE_VERSION = 53;
+export const PREVIEW_PICTURE_VERSION = 55;
 
 export function previewCacheKey(
   file: PreviewFileId,

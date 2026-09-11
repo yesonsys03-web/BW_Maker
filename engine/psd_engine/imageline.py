@@ -151,6 +151,85 @@ def _document_rgba(session):
     return np.array(img.convert("RGBA"), dtype=np.uint8)
 
 
+def _effectively_visible(layer, psd):
+    visible = layer.is_visible()
+    parent = layer.parent
+    while parent is not None and parent is not psd:
+        visible = visible and parent.is_visible()
+        parent = parent.parent
+    return visible
+
+
+#: 잉크 위치를 확인하려고 디코드할 크롬 레이어의 최대 개수. 이보다 많으면
+#: 판정을 포기하고(=False) 합성 경로로 간다 — 로고·스마트 오브젝트 두어 장은
+#: 싸지만, 수십 장을 디코드하면서까지 볼 일은 아니다.
+CHROME_DECODE_LIMIT = 8
+
+
+def _chrome_confined_to_occlusion(psd, roots, occlusion):
+    """보이는 비제작 레이어의 잉크가 전부 `occlusion`(템플릿 바닥판) 안에 있는가.
+
+    그렇다면 포토샵이 저장한 합성 그림이 곧 작품이다 — 바닥판 자리만 비우면
+    되고, 레이어 스택을 다시 합성할 이유가 없다. 재합성은 느릴 뿐 아니라
+    (KOTH 거실 판에서 90초) psd-tools 합성기가 마스크 달린 통과 그룹에서
+    캔버스를 하얗게 덮는 자리를 밟는다(2026-09-11).
+    """
+    if not occlusion.any():
+        return False
+    rows = np.flatnonzero(occlusion.any(axis=1))
+    cols = np.flatnonzero(occlusion.any(axis=0))
+    top, bottom = int(rows[0]), int(rows[-1]) + 1
+    left, right = int(cols[0]), int(cols[-1]) + 1
+    allowed = _production_layer_ids(roots)
+    pending = []
+    for layer in psd.descendants():
+        if (
+            layer.is_group()
+            or id(layer) in allowed
+            or layer.bbox == (0, 0, 0, 0)
+            or not _effectively_visible(layer, psd)
+        ):
+            continue
+        l, t, r, b = layer.bbox
+        if l >= left and t >= top and r <= right and b <= bottom:
+            continue
+        pending.append(layer)
+        if len(pending) > CHROME_DECODE_LIMIT:
+            return False
+    for layer in pending:
+        try:
+            image = layer.topil()
+        except (ImportError, NotImplementedError):
+            return False
+        if image is None:
+            continue
+        alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+        painted = np.zeros((psd.height, psd.width), dtype=bool)
+        _composite_layer_alpha(painted, layer, (alpha >= 8).astype(np.uint8) * 255)
+        if np.any(painted & ~occlusion):
+            return False
+    return True
+
+
+def _production_layer_ids(roots):
+    """제작 루트 아래에서 실제로 그릴 레이어의 id 집합 — 단계마다
+    _production_children의 선택(크롬 그룹·작은 copy 잎 제외)을 그대로 따른다."""
+    allowed = set()
+
+    def take(group):
+        _, selected = _production_children(group)
+        for child in selected:
+            allowed.add(id(child))
+            if child.is_group():
+                take(child)
+
+    for root in roots:
+        allowed.add(id(root))
+        if root.is_group():
+            take(root)
+    return allowed
+
+
 def _artwork_rgba(session):
     """Render production roots without sibling template/reference chrome."""
     psd = session["psd"]
@@ -168,15 +247,55 @@ def _artwork_rgba(session):
     if len(roots) == 1 and not visible_siblings:
         return _document_rgba(session)
 
+    occlusion = _template_back_occlusion(psd)
+    if _chrome_confined_to_occlusion(psd, roots, occlusion):
+        # 보이는 크롬이 전부 템플릿 바닥판 위에 있다 — 포토샵이 저장한 합성이
+        # 곧 작품이고, 바닥판 자리만 비우면 된다.
+        rgba = _document_rgba(session).copy()
+        rgba[occlusion] = 0
+        return rgba
+
+    # 포토샵 합성기(psd-tools)로 제작 레이어만 골라 문서째 합성한다 — 블렌드
+    # 모드·클리핑·마스크·불투명도가 그대로 살고, 템플릿·참고 크롬은 필터로
+    # 뺀다. 아래의 루트별 원시 합성은 곱하기 줄무늬·오버레이 텍스처를 100%
+    # 일반 잎으로 그려 KOTH 배경의 벽을 세로줄과 점 잡음으로 덮었다
+    # (2026-09-11). 조정 레이어는 bbox가 비어 제작 자식에 들지 않으므로 scipy
+    # 없이도 합성된다; 벡터 도형(aggdraw)처럼 합성기가 못 그리는 것이 있으면
+    # 예전 원시 합성으로 내려간다.
+    allowed = _production_layer_ids(roots)
+    try:
+        rendered = psd.composite(
+            force=True,
+            color=1.0,
+            alpha=0.0,
+            layer_filter=lambda layer: id(layer) in allowed,
+        )
+    except (ImportError, NotImplementedError):
+        rendered = None
+    if rendered is not None:
+        return np.array(rendered.convert("RGBA"), dtype=np.uint8)
+
     canvas = Image.new("RGBA", (psd.width, psd.height))
     rendered_any = False
     for root in roots:
+        if not root.is_group() and getattr(root, "clipping", False):
+            # 최상위 클리핑 잎(전체 캔버스 텍스처)은 아래 루트에 입히는 것이지
+            # 그림이 아니다 — draw()가 그룹 안에서 건너뛰듯 여기서도 건너뛴다.
+            # 18% 텍스처를 100%로 덮어 차고 문 대신 점 잡음만 남던 파일(KOTH,
+            # 2026-09-11).
+            continue
         try:
             rendered = _render_production_root(root)
         except (ImportError, NotImplementedError):
             rendered = None
         if rendered is None:
             continue
+        if not root.is_group() and int(root.opacity) < 255:
+            rgba = np.array(rendered.convert("RGBA"), dtype=np.uint8)
+            rgba[..., 3] = (
+                rgba[..., 3].astype(np.uint16) * int(root.opacity) + 127
+            ) // 255
+            rendered = Image.fromarray(rgba, "RGBA")
         left, top, right, bottom = root.bbox
         clip_left = max(0, left)
         clip_top = max(0, top)
@@ -794,7 +913,10 @@ def _render_production_root(root):
 
     def draw(nodes, parent_opacity):
         _, production = _production_children(nodes)
-        for child in reversed(production):
+        # psd-tools는 아래→위 순서이고 alpha_composite는 뒤에 그린 것이 위에
+        # 놓인다 — 그 순서 그대로 그린다. reversed()로 돌리면 맨 아래 전체판
+        # (background)이 마지막에 그려져 위의 전경 OL 그룹을 덮는다(2026-09-10).
+        for child in production:
             opacity = (
                 parent_opacity * int(child.opacity) + 127
             ) // 255
@@ -2941,16 +3063,54 @@ def _visible_content_zones(psd):
     return zones
 
 
+#: 평평한 템플릿 잎을 바닥판으로 받는 조건 — 캔버스 너비의 60% 이상으로 넓고,
+#: 위 끝이 캔버스 아래 4분의 1 안에 있다. KOTH 오버레이 판의 TEMPLATE 잎은
+#: 너비 86%, 위 끝 92% 자리에 있다.
+TEMPLATE_STRIP_MIN_WIDTH = 0.60
+TEMPLATE_STRIP_TOP = 0.75
+#: 띠의 높이 한도 — 이보다 두꺼우면 납품 푸터가 아니라 그림일 수 있다.
+TEMPLATE_STRIP_MAX_HEIGHT = 0.25
+
+
 def _template_back_occlusion(psd):
-    """Return opaque delivery-template backing that hides production artwork."""
+    """Return opaque delivery-template backing that hides production artwork.
+
+    최상위뿐 아니라 **중첩된** TEMPLATE 그룹도 본다 — KOTH 배경은 템플릿을
+    `layers/textures/TEMPLATE`처럼 작품 그룹 안에 두고, 그때도 바닥판은 캔버스
+    아래를 통째로 덮는다(2026-09-11).
+    """
     occlusion = np.zeros((psd.height, psd.width), dtype=bool)
-    for root in psd:
+    for layer in [*psd, *psd.descendants()]:
+        # 템플릿이 **평평한 잎 한 장**으로 들어온 파일 — 그룹도 "back" 낱말도
+        # 없다. 캔버스 아래쪽에 가로로 넓게 누운 TEMPLATE 잎이면 바닥판이다
+        # (KOTH 오버레이 판, 2026-09-11).
         if (
-            not root.is_group()
-            or not root.is_visible()
-            or _object_key(root.name) != "template"
+            not layer.is_group()
+            and _object_key(layer.name) == "template"
+            and _effectively_visible(layer, psd)
+            and layer.bbox != (0, 0, 0, 0)
+            and layer.width >= psd.width * TEMPLATE_STRIP_MIN_WIDTH
+            and layer.top >= psd.height * TEMPLATE_STRIP_TOP
+            and layer.height <= psd.height * TEMPLATE_STRIP_MAX_HEIGHT
+        ):
+            # 이 잎은 **투명 띠**다 — 흰 바탕은 아래 종이에서 오고 잎에는
+            # 글자·상자만 그려져 있다(실측 알파 평균 79/255). 불투명 심만
+            # 지우면 안티에일리어싱 가장자리가 남아 글자가 흐리게 남는다.
+            # 띠 전체가 크롬이므로 bbox를 통째로 가린다.
+            left = max(0, layer.left)
+            top = max(0, layer.top)
+            right = min(psd.width, layer.right)
+            bottom = min(psd.height, layer.bottom)
+            if right > left and bottom > top:
+                occlusion[top:bottom, left:right] = True
+            continue
+        if (
+            not layer.is_group()
+            or not _effectively_visible(layer, psd)
+            or _object_key(layer.name) != "template"
         ):
             continue
+        root = layer
         for layer in root.descendants():
             words = set(re.findall(r"[^\W_]+", layer.name.casefold()))
             if (
@@ -2978,6 +3138,56 @@ def _template_back_occlusion(psd):
                 (alpha >= 247).astype(np.uint8) * 255,
             )
     return occlusion
+
+
+#: 그린 라인이 렌더의 색 경계를 이 비율 이상 덮으면 라인은 완전한 것이고, 남은
+#: 경계는 빠진 선이 아니라 잡음이다 — 생성 단계(composite residual·artwork
+#: edges)를 건너뛴다. 2026-09-10 sample 전수(named 경로, 렌더 순서를 바로잡은
+#: 뒤): 누락이 실제로 있는 파일은 0.76·0.79·0.97, 라인이 완전한 파일은
+#: 0.990·0.996·0.996이었고 후자에서 생성된 것은 전부 램프 기둥·간판 글자의 검은
+#: 덩어리와 기존 선 옆의 짧은 토막이었다(렌더가 뒤집혀 있던 동안 생성이 0이던
+#: 파일들 — 아티스트 기준 그림 BW_line_sample도 윤곽선뿐이다).
+#:
+#: 2026-09-11 KOTH 배경 127장으로 0.98 → 0.95로 내렸다. 0.95~0.98 구간의 판은
+#: 이름 라인이 **그 파일의 라인 체계가 맞다**(LINE 레이어 9~17장이 장면 전체를
+#: 덮는다). 그 구간을 일반 경로로 보내면 천장 레일 같은 선을 잃고 대신 넓은 칠이
+#: 들어와 덩어리가 는다(차고 두 판: 3픽셀 → 25,454·32,074픽셀). 이름 라인만
+#: 쓰면 덩어리가 3픽셀로 떨어지고 그림은 그대로다. 1604 배경 92장으로 0.93까지
+#: 더 내렸다 — 덮임 0.9496·0.9739·0.9793인 판이 일반 경로에서 덩어리
+#: 16,306·?·115,868픽셀이었고 이름 라인만 쓰면 76·30·1,792픽셀이 된다.
+#: 반대쪽 경계(덮임 0.9044·0.9122)는 일반 경로가 더 낫다(덩어리 6,111→3,237,
+#: 162,734→20,718) — 그래서 0.93이다.
+AUTHORED_LINE_COVERAGE_COMPLETE = 0.93
+
+
+def _named_lines_incomplete(residual_profile):
+    """이름 라인이 렌더 경계의 98%를 못 덮으면 그 파일의 라인 체계는 이름 붙은
+    레이어가 아니다 — 잔여 생성(residual·artwork edges) 대신 **일반 경로**로
+    간다. KOTH 배경 127장 실측(2026-09-11): 덮임 0.07~0.97에서 잔여 생성은
+    램프·간판·캐릭터 실루엣의 검은 덩어리, 선 옆의 번진 띠(2048 축소·확대),
+    캔버스가 통째로 검게 뒤집힌 판(덮임 0.68)을 만들었고, 같은 그림의 이름
+    없는 판은 일반 경로에서 깨끗했다. 덮임을 재지 않는 TURN·배타 모드와
+    후보가 0인 경우는 해당 없다."""
+    if residual_profile.get("compositeResidualMode") is not None:
+        return None
+    candidates = residual_profile.get("compositeEdgeCandidatePixels", 0)
+    coverage = residual_profile.get("compositeEdgeCoverageBefore", 1.0)
+    if candidates > 0 and coverage < AUTHORED_LINE_COVERAGE_COMPLETE:
+        return {"coverage": round(float(coverage), 4)}
+    return None
+
+
+def _authored_lines_complete(residual_profile):
+    """composite residual이 잰 덮임으로 '그린 라인이 완전한가'를 가른다.
+    TURN·배타 모드는 덮임을 재지 않으므로(1.0 고정) 해당 없다."""
+    if residual_profile.get("compositeResidualMode") is not None:
+        return False
+    candidates = residual_profile.get("compositeEdgeCandidatePixels", 0)
+    return (
+        candidates > 0
+        and residual_profile.get("compositeEdgeCoverageBefore", 0.0)
+        >= AUTHORED_LINE_COVERAGE_COMPLETE
+    )
 
 
 def _composite_residual_alpha(session, line_alpha, min_length):
@@ -3327,6 +3537,7 @@ def extract_image_line(session, image_line):
     structured_sibling = _matching_sibling_psd_session(session)
 
     named_lines = _named_line_alpha(session)
+    named_incomplete = None
     if named_lines is not None:
         (
             mask_u8,
@@ -3364,9 +3575,24 @@ def extract_image_line(session, image_line):
                 mask_u8,
                 opts["minLength"],
             )
+        named_incomplete = _named_lines_incomplete(residual_profile)
+        if named_incomplete is not None:
+            named_incomplete["namedLineLayerCount"] = named_line_count
+            del mask_u8, residual
+    if named_lines is not None and named_incomplete is None:
+        authored_complete = _authored_lines_complete(residual_profile)
+        if authored_complete:
+            residual = np.zeros_like(residual)
+            residual_profile = {
+                **residual_profile,
+                "compositeResidualSkipped": "authoredLinesComplete",
+            }
         residual = _style_generated_alpha(residual)
         np.maximum(mask_u8, residual, out=mask_u8)
-        if exclusive_mode is None:
+        generate_artwork_edges = (
+            exclusive_mode is None and not authored_complete
+        )
+        if generate_artwork_edges:
             artwork_rgba = _artwork_rgba(session)
             artwork_edges = _missing_colour_edges(
                 artwork_rgba,
@@ -3387,7 +3613,7 @@ def extract_image_line(session, image_line):
             hashlib.sha256(mask_u8.tobytes()).hexdigest(),
         )
         peak_tracked_array_bytes = mask_u8.nbytes + residual.nbytes
-        if exclusive_mode is None:
+        if generate_artwork_edges:
             peak_tracked_array_bytes += (
                 artwork_rgba.nbytes + artwork_edges.nbytes
             )
@@ -3463,6 +3689,7 @@ def extract_image_line(session, image_line):
                 else None
             ),
             "flattenedLineModel": "informative_drawings+line_relifer",
+            "namedLinesIncomplete": named_incomplete,
             "flattenedStructure": (
                 "matchingSiblingPsd"
                 if structured_sibling is not None
@@ -3553,6 +3780,7 @@ def extract_image_line(session, image_line):
             if flattened_colour_plate is not None
             else "filledDrawingPanels" if drawing_panel_boxes else None
         ),
+        "namedLinesIncomplete": named_incomplete,
     }
     return _finish(result, profile)
 
