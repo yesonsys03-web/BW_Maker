@@ -2,6 +2,7 @@ import types
 
 import numpy as np
 import pytest
+from PIL import Image
 from psd_tools import PSDImage
 
 from psd_engine import render as render_mod
@@ -30,6 +31,90 @@ def test_extract_rgba_empty_layer_raises():
         extract_rgba(layer)
 
 
+def test_masked_fixture_really_carries_masks(masked_psd):
+    """
+    픽스처가 무엇을 확인하는지부터 확인한다. 마스크가 안 붙으면 아래 동등성
+    테스트가 전부 마스크 없는 경로를 재고도 통과한다 — 0fbbeef에서 타일 수를
+    안 세서 공허해졌던 테스트와 같은 함정이다.
+    """
+    psd = PSDImage.open(masked_psd)
+    by_name = {l.name: l for l in psd.descendants()}
+    assert set(by_name) >= {"plain_mask", "bg255_mask", "dense_mask",
+                            "half_opacity_mask"}
+    for name in ("plain_mask", "bg255_mask", "dense_mask", "half_opacity_mask"):
+        m = by_name[name].mask
+        assert m is not None and not m.disabled, f"{name}에 마스크가 없다"
+    assert by_name["bg255_mask"].mask.background_color == 255
+    assert by_name["bg255_mask"].mask.bbox != by_name["bg255_mask"].bbox
+    assert by_name["dense_mask"].mask.parameters is not None
+    assert by_name["half_opacity_mask"].opacity == 128
+
+
+@pytest.mark.parametrize("name", ["plain_mask", "bg255_mask", "dense_mask",
+                                  "half_opacity_mask"])
+def test_masked_extract_is_byte_identical_to_composite(masked_psd, name):
+    """
+    값싼 경로는 psd-tools의 합성과 **바이트로** 같아야 한다.
+
+    ±1도 실패다. export.py가 이 함수를 쓰므로 계약이 바이트 동일이고, ±1은
+    보통 float32 산술이나 uint8 절삭을 psd-tools와 다르게 했다는 신호다.
+    """
+    psd = PSDImage.open(masked_psd)
+    layer = next(l for l in psd.descendants() if l.name == name)
+    reference = np.array(layer.composite(viewport=layer.bbox).convert("RGBA"))
+
+    fast = render_mod._extract_rgba_masked(layer)
+
+    assert fast is not None, f"{name}이 가드를 못 넘어 값싼 경로를 타지 못했다"
+    assert fast.shape == reference.shape
+    assert np.array_equal(fast, reference), (
+        f"최대차 {np.abs(fast.astype(int) - reference.astype(int)).max()}, "
+        f"다른 성분 {(fast != reference).sum()}/{fast.size}"
+    )
+
+
+def test_masked_clip_fixture_really_clips_and_masks(masked_clip_psd):
+    """
+    아래 거부 테스트가 공허하지 않은지부터 확인한다. 마스크가 없으면 값싼 경로는
+    클리핑과 무관하게 거부하고, 클리핑이 안 걸리면 잴 것이 없다.
+    """
+    psd = PSDImage.open(masked_clip_psd)
+    by_name = {l.name: l for l in psd.descendants()}
+    assert set(by_name) >= {"shade", "base"}
+    for name in ("shade", "base"):
+        m = by_name[name].mask
+        assert m is not None and not m.disabled, f"{name}에 마스크가 없다"
+        assert by_name[name].is_visible(), f"{name}이 숨어 있다"
+    assert by_name["shade"].clipping
+    assert by_name["base"].has_clip_layers()
+
+
+@pytest.mark.parametrize("name", ["shade", "base"])
+def test_clipping_shapes_fall_back_instead_of_taking_the_fast_path(
+        masked_clip_psd, name, monkeypatch):
+    """
+    클리핑이 낀 두 모양은 값싼 경로가 거부하고 예전 경로로 떨어져야 한다.
+
+    shade(clipping=True)는 composite가 통째로 건너뛰어 배경만 남고, base는
+    composite가 shade를 위에 합성해 준다. 값싼 경로는 둘 다 재현하지 않는다.
+    """
+    psd = PSDImage.open(masked_clip_psd)
+    layer = next(l for l in psd.descendants() if l.name == name)
+    reference = np.array(layer.composite(viewport=layer.bbox).convert("RGBA"))
+
+    assert render_mod._extract_rgba_masked(layer) is None, "가드가 걸러야 한다"
+    assert np.array_equal(extract_rgba(layer), reference), \
+        "fallback이 예전과 같은 그림을 내야 한다"
+
+    # 가드를 빼면 실제로 그림이 달라진다 — 이 테스트가 무언가를 지키고 있다는 증거다.
+    # 이것이 없으면 값싼 경로가 우연히 같은 값을 내는 경우와 구별되지 않는다.
+    monkeypatch.setattr(render_mod, "_mask_fast_ok", lambda l: True)
+    unguarded = render_mod._extract_rgba_masked(layer)
+    assert unguarded is not None
+    assert not np.array_equal(unguarded, reference), \
+        "가드를 빼도 같다면 이 가드는 아무것도 지키지 않는 것이다"
+
+
 def test_merge_rgba_overlap(fixture_psd):
     s = _session(fixture_psd)
     # 'fill'(128, 전체) 위에 'lines'(200, (10,10)-(30,20))
@@ -47,6 +132,852 @@ def test_merge_rgba_respects_hidden_source(fixture_psd):
     arr, left, top = merge_rgba(s["psd"], [s["layers_by_id"][3]])
     assert (left, top) == (5, 5)
     assert (arr[..., :3] == 77).all()
+
+
+def _spy_on_composite(psd):
+    """psd.composite 호출을 기록한다(실제 동작은 그대로)."""
+    calls = []
+    real = psd.composite
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    psd.composite = spy
+    return calls
+
+
+def test_merge_rgba_plain_layers_skip_document_composite(alpha_overlap_psd):
+    """
+    평범한 레이어(normal/불투명도 255/마스크 없음)끼리의 병합은 문서 전체 합성을
+    부르지 않는다.
+
+    psd.composite는 병합에 참여하는 레이어를 전부 합집합 뷰포트 크기로 부풀린 뒤
+    float32로 훑는다. 실측에서 109장짜리 병합 하나가 5,009 Mpx를 만지고 19.5GB를
+    썼다 — 레이어들이 실제로 차지하는 넓이는 98 Mpx뿐인데도.
+    """
+    s = _session(alpha_overlap_psd)
+    calls = _spy_on_composite(s["psd"])
+    merge_rgba(s["psd"], [s["layers_by_id"][0], s["layers_by_id"][1]])
+    assert calls == [], "평범한 병합인데 문서 전체 합성을 불렀다"
+
+
+def test_merge_rgba_fast_matches_slow_on_overlapping_alpha(alpha_overlap_psd, monkeypatch):
+    """
+    빠른 경로의 결과는 psd.composite 경로와 픽셀 단위로 같아야 한다.
+
+    같게 만드는 조건이 세 가지다(전부 실측으로 확인했다): 알파 0인 자리는 흰색
+    (psd.composite(color=1.0)), 합성 순서는 문서 순서(아래→위), 양자화는 반올림이
+    아니라 절삭((255 * color).astype(uint8)). 하나라도 어긋나면 값이 갈린다.
+    """
+    s = _session(alpha_overlap_psd)
+    layers = [s["layers_by_id"][0], s["layers_by_id"][1]]
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert fast.shape == slow.shape
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_merge_rgba_fast_path_takes_masked_and_faded_layers(masked_psd, monkeypatch):
+    """
+    마스크와 불투명도가 붙은 잎끼리의 병합도 빠른 경로를 타야 한다.
+
+    실측 2026-08-06, 납품 25장의 병합 55건 인구조사에서 잎 마스크가 가장 큰
+    가드였다(레이어 19장이 332.3 Mpx를 예전 경로에 묶고 있었다). 풀고 나니
+    빠른 경로가 32건 → 36건이 되고 풀린 4건이 3~6배 빨라졌다.
+    """
+    s = _session(masked_psd)
+    layers = [l for l in s["layers_by_id"].values() if not l.is_group()]
+    assert len(layers) == 4
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    calls = _spy_on_composite(s["psd"])
+    merge_rgba(s["psd"], layers)
+    assert calls == [], "마스크·불투명도만으로 예전 경로에 떨어졌다"
+
+
+def test_merge_rgba_fast_matches_slow_on_masked_and_faded_layers(masked_psd, monkeypatch):
+    """
+    마스크·불투명도가 낀 병합도 psd.composite 경로와 **바이트로** 같아야 한다.
+
+    네 장이 같은 자리에 겹쳐 있어(0,0,32,24) 배경이 빈 경우와 이미 쌓인 경우를
+    한 번에 지나간다. 이 조합이 shape != alpha를 만드는 전부다 — 마스크 bbox가
+    레이어보다 좁고 배경이 255인 것(bg255_mask), 마스크 밀도(dense_mask),
+    opacity 128(half_opacity_mask).
+
+    가드를 넓힌 방향이라 ±1도 실패다. 다만 이 픽스처는 (shape - alpha) 항을
+    지운 예전 식으로도 통과한다 — 불투명도가 다른 한 장이 맨 아래라 alpha_b가
+    0이어서 그 항이 사라지기 때문이다. 그것을 가르는 것은
+    faded_over_solid_psd 쪽이다.
+    """
+    s = _session(masked_psd)
+    layers = [l for l in s["layers_by_id"].values() if not l.is_group()]
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert fast.shape == slow.shape
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_merge_rgba_fast_matches_slow_for_a_masked_layer_inside_a_group(
+        masked_clip_psd, monkeypatch):
+    """
+    마스크 달린 잎이 그룹 안에 있고 거기에 클리핑 레이어까지 붙은 경우.
+
+    빠른 경로는 잎을 평평하게 그리는데 psd.composite는 그룹마다 하위 Compositor를
+    세운다(_get_group, 715행). 그 하위 Compositor는 isolated=True라 _alpha_0가 0이고,
+    그래서 그룹이 도관처럼 투명해지는 것이 빠른 경로가 성립하는 근거다 — 마스크가
+    붙어도 그대로인지 여기서 확인한다.
+    """
+    s = _session(masked_clip_psd)
+    base = next(l for l in s["layers_by_id"].values() if l.name == "base")
+    assert base.mask is not None and base.has_clip_layers()
+    layers = [base]
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    calls = _spy_on_composite(s["psd"])
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert calls == [], "그룹 안의 마스크 달린 잎이 예전 경로로 떨어졌다"
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_merge_rgba_fast_matches_slow_when_a_faded_leaf_sits_on_another(
+        faded_over_solid_psd, monkeypatch):
+    """
+    불투명도가 있는 잎이 다른 잎 **위에** 얹히는 경우. 여기가 shape != alpha의 값이
+    실제로 결과를 바꾸는 유일한 자리다.
+
+    _apply_source의 (shape - alpha) * alpha_b * color_b 항은 alpha_b가 0이면
+    사라진다. 그래서 병합의 첫 장에서는 옛 식과 새 식이 같고, 이미 무언가 쌓인
+    위에 반투명한 장이 올 때만 갈린다. 갈리는 크기는 float32 반올림 한 자리뿐이라
+    (두 식은 대수적으로 같다) 픽스처가 절삭 경계를 실제로 밟아야 한다 —
+    faded_over_solid_psd가 (배경색, 마스크) 65,536쌍을 다 깔아 80픽셀을 밟는다.
+    """
+    s = _session(faded_over_solid_psd)
+    layers = [l for l in s["layers_by_id"].values() if not l.is_group()]
+    assert {l.name for l in layers} == {"solid", "fade"}
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    calls = _spy_on_composite(s["psd"])
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert calls == [], "불투명도만으로 예전 경로에 떨어졌다"
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_mask_and_opacity_are_exempted_for_leaves_only(masked_psd):
+    """
+    마스크·불투명도 면제는 병합 대상 잎에만 준다. 조상 규율은 예전 그대로다.
+
+    그룹의 마스크·불투명도는 자식마다 따로 걸리는 값이 아니라 자식들을 다 합성한
+    결과 한 장에 걸린다(_get_group, 715행). 겹치는 자식이 있으면 두 순서의 결과가
+    다르므로 잎에 준 면제를 조상으로 옮길 수 없다. _fast_mergeable이 두 호출을
+    구분해서 하는지를 여기서 못박는다.
+    """
+    psd = PSDImage.open(masked_psd)
+    faded = next(l for l in psd.descendants() if l.name == "half_opacity_mask")
+    assert faded.mask is not None and faded.opacity == 128
+    assert render_mod._plain(faded, allow_mask_opacity=True), \
+        "잎은 마스크·불투명도가 있어도 통과해야 한다"
+    assert not render_mod._plain(faded, allow_passthrough=True), \
+        "조상 자리에서는 같은 레이어가 걸려야 한다"
+
+
+def test_merge_rgba_fast_path_ignores_clip_layers_outside_the_merge(clip_layer_psd, monkeypatch):
+    """
+    병합 대상에 클리핑 레이어가 붙어 있어도 빠른 경로를 쓴다.
+
+    merge_rgba는 layer_filter로 병합 대상과 그 조상만 통과시키므로, 그들에게
+    클리핑된 레이어는 psd.composite에서 이미 걸러진다(_apply_clip_layers가 만드는
+    하위 Compositor도 같은 filter를 물려받고, 아무것도 적용되지 않으면 backdrop
+    배열을 그대로 돌려준다). 결과에 영향이 없는 것을 이유로 빠른 경로를 막으면
+    실제 납품 PSD에서는 이득이 거의 사라진다 — 실측에서 걸린 가드 316건 중
+    309건이 이것이었다.
+    """
+    s = _session(clip_layer_psd)
+    assert s["layers_by_id"][2].clipping, "픽스처가 클리핑 플래그를 못 세웠다"
+    layers = [s["layers_by_id"][1], s["layers_by_id"][3]]   # line, line2
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    calls = _spy_on_composite(s["psd"])
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert calls == [], "합성에 끼지도 못하는 클리핑 레이어 때문에 빠른 경로를 막았다"
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def _opt_in_fast(s, layers):
+    """오버레이가 하는 것과 같은 호출 — allow_clipping을 켠 빠른 경로.
+
+    `merge_rgba`로는 이것을 못 잰다. 내보내기는 `allow_clipping`을 주지 않으므로
+    클리핑이 낀 병합이 언제나 느린 경로로 떨어지고, 그러면 아래 비교가 같은 코드
+    끼리가 되어 아무것도 지키지 못한다.
+    """
+    boxes = [l.bbox for l in layers if l.bbox != (0, 0, 0, 0)]
+    vp = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+          max(b[2] for b in boxes), max(b[3] for b in boxes))
+    ok = render_mod._fast_mergeable(s["psd"], layers, allow_clipping=True)
+    return ok, vp
+
+
+def _whole_composite(s, layers, vp):
+    wanted = render_mod._wanted_ids(s["psd"], layers)
+    return np.array(s["psd"].composite(
+        viewport=vp, force=True, color=1.0, alpha=0.0,
+        layer_filter=lambda l: id(l) in wanted).convert("RGBA"))
+
+
+def test_fast_merge_lays_a_clipping_target_onto_its_base(clip_layer_psd):
+    """
+    병합 대상 안에 base와 그 클리핑 잎이 함께 있으면, 빠른 경로가 그 잎을 본
+    패스에서 빼고 base의 색 위에 얹는다 — psd.composite의 _apply_clip_layers
+    (606행)와 같은 자리다.
+
+    세 가지를 한꺼번에 본다 — 빠른 경로가 이 집합을 받는가, psd-tools와 픽셀이
+    같은가, 그리고 클리핑 잎이 실제로 그림을 바꾸는가. 마지막 하나가 없으면 이
+    픽스처가 아무 차이도 만들지 않을 때 앞의 둘이 조용히 통과한다.
+    """
+    s = _session(clip_layer_psd)
+    base, clip = _by_name(s, "line", "shade")   # shade가 line에 클리핑돼 있다
+
+    ok, vp = _opt_in_fast(s, [base, clip])
+    assert ok, "빠른 경로가 이 집합을 안 받는다 — 비교가 공허하다"
+    fast, _, _ = render_mod._merge_rgba_fast(s["psd"], [base, clip], vp)
+    whole = _whole_composite(s, [base, clip], vp)
+    base_only = _whole_composite(s, [base], vp)
+
+    assert np.array_equal(fast, whole), (
+        f"최대차 {np.abs(fast.astype(int) - whole.astype(int)).max()}, "
+        f"다른 성분 {(fast != whole).sum()}/{fast.size}"
+    )
+    assert not np.array_equal(whole, base_only), \
+        "클리핑 잎이 그림을 안 바꾼다 — 이 픽스처로는 아무것도 지키지 못한다"
+
+
+def test_fast_merge_lays_a_masked_clipping_target_onto_a_masked_base(masked_clip_psd):
+    """
+    클리핑 잎에도 base에도 마스크가 걸린 경우. 이 코드에서 가장 어려운 조합이다.
+
+    마스크가 붙으면 `shape_s`와 `alpha_s`가 갈라지고(_layer_source의 주석),
+    `_clipped_colour`가 하위 Compositor의 `_alpha_0`로 쓰는 base의 shape는 **마스크
+    전** 값이어야 한다 — _get_object가 `alpha = shape * 1.0`을 마스크보다 먼저 뜨기
+    때문이다. 마스크 없는 픽스처로는 이 순서가 틀려도 결과가 같아 안 드러난다.
+
+    두 마스크가 다 0..255 그라데이션이라 (base 알파, 클리핑 알파) 조합이 넓게 깔린다.
+    """
+    s = _session(masked_clip_psd)
+    base, clip = _by_name(s, "base", "shade")
+
+    ok, vp = _opt_in_fast(s, [base, clip])
+    assert ok, "빠른 경로가 이 집합을 안 받는다 — 비교가 공허하다"
+    fast, _, _ = render_mod._merge_rgba_fast(s["psd"], [base, clip], vp)
+    whole = _whole_composite(s, [base, clip], vp)
+    base_only = _whole_composite(s, [base], vp)
+
+    assert np.array_equal(fast, whole), (
+        f"최대차 {np.abs(fast.astype(int) - whole.astype(int)).max()}, "
+        f"다른 성분 {(fast != whole).sum()}/{fast.size}"
+    )
+    assert not np.array_equal(whole, base_only), \
+        "마스크 낀 클리핑 잎이 그림을 안 바꾼다 — 지키는 게 없다"
+
+
+def test_merge_rgba_still_falls_back_when_a_merged_layer_is_itself_clipping(
+        clip_layer_psd, monkeypatch):
+    """
+    **내보내기는 클리핑이 낀 병합을 계속 느린 경로로 보낸다.** 위 두 테스트가 보이듯
+    클리핑 재현 자체는 psd-tools와 픽셀이 같은데도 그렇게 둔다.
+
+    이유는 클리핑이 아니라 빠른 경로 자체다 — 잎을 평평하게 union하느냐 그룹마다
+    union하느냐로 float32의 마지막 비트가 갈려, psd.composite와 **원리적으로** 비트
+    동일이 아니다(_fast_mergeable docstring에 한 픽셀짜리 증거가 있다). 내보내기에
+    이 문을 열었더니 납품 26장 중 3장이 즉시 갈렸다(271/1210/124px, 대부분 알파).
+    그래서 내보내기의 인구는 이미 기준선으로 검증된 것만 유지한다.
+    """
+    s = _session(clip_layer_psd)
+    base, clip = _by_name(s, "line", "shade")
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    calls = _spy_on_composite(s["psd"])
+    merge_rgba(s["psd"], [base, clip])
+    assert calls, "내보내기가 클리핑 낀 병합을 빠른 경로로 보냈다"
+    assert not render_mod._fast_mergeable(s["psd"], [base, clip]), \
+        "allow_clipping 없이도 통과한다 — 옵트인이 아무 일도 안 한다"
+
+
+def test_fast_merge_refuses_a_clipping_target_clipped_to_a_group(clipped_group_psd):
+    """
+    클리핑 잎의 base가 병합 대상 밖의 **그룹**이면 `allow_clipping`이어도 거절한다.
+
+    psd.composite는 그 그룹을 통째로 합성한 뒤 그 결과 위에 잎을 얹지만
+    (_apply_clip_layers, 606행) 빠른 경로에는 그런 중간 결과가 없다 — 잎만 차례로
+    캔버스에 얹기 때문이다. 그대로 태우면 그 잎이 조용히 빠진다.
+
+    **옵트인을 켜고 봐야 한다.** `merge_rgba`로 재면 `allow_clipping`이 없어서
+    어차피 거절되므로, 이 가드를 지워도 테스트가 통과한다.
+
+    그리고 그 잎이 실제로 그림을 바꾸는지도 같이 본다. 그것이 없으면 잎이 빠져도
+    티가 안 나 가드가 지키는 것이 없다 — clip_layer_psd로 쓴 첫 판이 정확히
+    그랬다(거기서는 base가 잎이라 빠른 경로가 옳게 재현했다).
+    """
+    s = _session(clipped_group_psd)
+    base, clip = _by_name(s, "line", "shade")
+
+    assert not render_mod._fast_mergeable(s["psd"], [base, clip], allow_clipping=True), \
+        "그룹에 물린 클리핑 잎인데 빠른 경로가 받았다"
+
+    boxes = [l.bbox for l in [base, clip]]
+    vp = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+          max(b[2] for b in boxes), max(b[3] for b in boxes))
+    whole = _whole_composite(s, [base, clip], vp)
+    base_only = _whole_composite(s, [base], vp)
+    assert not np.array_equal(whole, base_only), \
+        "이 클리핑 잎이 그림을 안 바꾼다 — 빠져도 티가 안 나므로 지키는 게 없다"
+
+
+def test_merge_rgba_draws_a_layer_under_a_hidden_group(hidden_group_psd):
+    """
+    숨겨진 그룹 안의 레이어도, 병합 대상으로 지정했으면 그려진다.
+
+    프리셋의 includeHidden이 그런 레이어를 매칭에 넣으므로 여기서 조용히 빠지면
+    "병합되면 사라지고 단독으로 나가면 나온다"는 상태가 된다 — 실제 납품 파일에서
+    바 스툴 6개 중 하나가 그렇게 통째로 빠져 있었다(HotelINTLobbyBarMMESS002의
+    CHAIR06). 옛 경로가 떨어뜨린 이유는 psd.composite가 isolated 그룹의 뷰포트를
+    그 그룹 bbox와 교차시키는데, 숨겨진 조상 탓에 그 bbox가 (0,0,0,0)이어서다.
+    """
+    s = _session(hidden_group_psd)
+    hidden_line = next(l for lid, l in s["layers_by_id"].items()
+                       if not l.is_group() and l.left == 34)
+    visible_line = next(l for lid, l in s["layers_by_id"].items()
+                        if not l.is_group() and l.left == 4)
+
+    arr, left, top = merge_rgba(s["psd"], [visible_line, hidden_line])
+
+    assert (left, top) == (4, 4)
+    # 숨겨진 그룹 쪽 레이어(문서 x 34~54)가 결과에 있어야 한다
+    assert arr[..., 3][:, 34 - left:54 - left].max() == 255, "숨겨진 그룹 안의 라인이 빠졌다"
+    assert arr[..., 3][:, 0:20].max() == 255, "보이는 라인까지 빠졌다"
+
+
+def test_merge_rgba_tiles_the_viewport_when_fast_path_is_unavailable(faded_group_psd,
+                                                                     monkeypatch):
+    """
+    빠른 경로를 못 쓰는 병합은 뷰포트를 타일로 나눠 합성하고, 결과는 한 번에
+    합성한 것과 같아야 한다.
+
+    느림의 원인은 합성식이 아니라 뷰포트였다 — psd.composite는 병합에 참여하는
+    레이어를 전부 합집합 뷰포트 크기로 부풀린다. 뷰포트를 잘라 부르면 psd-tools가
+    타일에 걸치지 않는 레이어를 스스로 건너뛰므로(apply의 viewport 교집합 검사)
+    그 부풀림이 사라진다. 합성 자체는 psd-tools가 그대로 하므로 마스크·클리핑·
+    그룹 semantics를 다시 구현하지 않는다 — 그것이 이 방식을 고른 이유다.
+    """
+    s = _session(faded_group_psd)
+    # 조상 그룹 'ART'의 불투명도가 128이라 빠른 경로가 거부한다 -> 타일 경로로 간다.
+    # (클리핑으로 막던 것을 바꿨다 — 빠른 경로가 이제 클리핑을 재현한다.
+    #  faded_group_psd docstring 참고.)
+    layers = _by_name(s, "line", "line2")
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    whole, whole_left, whole_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    monkeypatch.setattr(render_mod, "MERGE_TILE_SIZE", 8)
+    calls = _spy_on_composite(s["psd"])
+    tiled, tiled_left, tiled_top = merge_rgba(s["psd"], layers)
+
+    assert len(calls) > 1, f"타일로 나누지 않았다(합성 호출 {len(calls)}회)"
+    assert (tiled_left, tiled_top) == (whole_left, whole_top)
+    assert tiled.shape == whole.shape
+    assert np.array_equal(tiled, whole), (
+        f"최대차 {np.abs(tiled.astype(int) - whole.astype(int)).max()}, "
+        f"다른 성분 {(tiled != whole).sum()}/{tiled.size}"
+    )
+
+
+def _by_name(s, *names):
+    return [next(l for l in s["layers_by_id"].values() if l.name == n) for n in names]
+
+
+def test_merge_rgba_keeps_an_off_canvas_viewport_that_still_fits(off_canvas_psd):
+    """
+    캔버스 밖으로 나갔더라도 담을 수 있는 뷰포트는 그대로 둔다.
+
+    납품 25장 중 13장이 이런 모양이고, 그 26개 병합의 좌표는 지금까지 나간 산출물에
+    그대로 들어 있다. 여기서 자르면 그 전부가 어긋난다 — 자르기는 담을 수 없을 때의
+    마지막 수단이지 기본 동작이 아니다.
+    """
+    s = _session(off_canvas_psd)
+    layers = _by_name(s, "spills left", "spills right")
+
+    arr, left, top = merge_rgba(s["psd"], layers)
+
+    assert (left, top) == (-12, -9)          # 합집합 (-12,-9)-(89,38)
+    assert arr.shape == (47, 101, 4)
+
+
+def test_merge_rgba_clamps_a_viewport_that_cannot_be_composited(oversize_union_psd):
+    """
+    합집합이 30,000을 넘으면 그때는 캔버스까지 자른다.
+
+    캔버스가 11901x7297인 납품 PSB 한 장이 32510x9335 합집합을 만들어 병합이
+    "exceeds the PSD maximum of 30000 px per axis"로 죽은 적이 있다. 버려지는 것은
+    포토샵에서 어차피 보이지 않는 영역이다.
+
+    상수를 monkeypatch로 낮추지 않고 진짜 임계값을 지나간다 — 낮추면 자르는 산술만
+    확인하고 임계값 자체가 맞는지는 확인하지 못한다.
+    """
+    s = _session(oversize_union_psd)
+    psd = s["psd"]
+    layers = _by_name(s, "spills left", "spills right", "far right")
+
+    arr, left, top = merge_rgba(psd, layers)
+
+    # 자르기 전 합집합은 (-10,-6)-(30540,40) = 30550x46 이다.
+    assert (left, top) == (0, 0)
+    assert arr.shape == (40, psd.width, 4)
+    assert left + arr.shape[1] <= psd.width and top + arr.shape[0] <= psd.height
+
+
+def test_merge_rgba_fast_matches_slow_on_a_clamped_viewport(
+        oversize_union_psd, monkeypatch):
+    """
+    뷰포트를 잘랐어도 빠른 경로와 psd.composite 경로의 픽셀이 같아야 한다.
+
+    자르지 않은 뷰포트는 합집합이라 모든 레이어가 그 안에 통째로 들어가지만, 자르고
+    나면 걸쳐 나갈 수 있다. 그때 빠른 경로가 원본 배열을 그대로 얹으면 오프셋이
+    음수가 되는데, numpy는 예외를 내지 않고 배열 반대쪽 끝을 집어 엉뚱한 자리에
+    그린다 — 조용히 틀리는 종류라 여기서 잡아야 한다.
+    """
+    s = _session(oversize_union_psd)
+    layers = _by_name(s, "spills left", "spills right", "far right")
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert (fast_left, fast_top) == (slow_left, slow_top)
+    assert fast.shape == slow.shape
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_merge_rgba_fast_matches_slow_when_nothing_is_clamped(off_canvas_psd, monkeypatch):
+    """
+    자르기가 걸리지 않는 평범한 경우에도 두 경로가 같아야 한다.
+
+    _merge_rgba_fast의 걸침 자르기는 이 경우 no-op이어야 한다 — 그것이 납품 파일
+    대부분이 지나가는 길이고, 여기서 한 픽셀이라도 움직이면 기준선이 깨진다.
+    """
+    s = _session(off_canvas_psd)
+    layers = _by_name(s, "spills left", "spills right", "outside")
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    slow, slow_left, slow_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    fast, fast_left, fast_top = merge_rgba(s["psd"], layers)
+
+    assert (fast_left, fast_top) == (slow_left, slow_top) == (-200, -9)
+    assert np.array_equal(fast, slow), (
+        f"최대차 {np.abs(fast.astype(int) - slow.astype(int)).max()}, "
+        f"다른 성분 {(fast != slow).sum()}/{fast.size}"
+    )
+
+
+def test_merge_rgba_tiled_matches_slow_on_a_clamped_viewport(
+        oversize_union_psd, monkeypatch):
+    """
+    타일 경로도 잘린 뷰포트에서 같은 그림을 내야 한다.
+
+    실제 납품 PSD의 병합은 마스크·클리핑이 끼어 빠른 경로를 못 쓰는 것이 많아서
+    이쪽이 오히려 흔한 길이다. 여기서는 걸침을 psd-tools가 처리하지만(타일마다
+    viewport로 잘라 부른다), 이어붙이는 인덱스는 우리가 계산하므로 확인이 필요하다.
+    """
+    s = _session(oversize_union_psd)
+    layers = _by_name(s, "spills left", "spills right", "far right")
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", False)
+    whole, whole_left, whole_top = merge_rgba(s["psd"], layers)
+
+    monkeypatch.setattr(render_mod, "FAST_MERGE", True)
+    monkeypatch.setattr(render_mod, "_fast_mergeable", lambda psd, layers: False)
+    monkeypatch.setattr(render_mod, "MERGE_TILE_SIZE", 8)
+    tiled, tiled_left, tiled_top = merge_rgba(s["psd"], layers)
+
+    assert (tiled_left, tiled_top) == (whole_left, whole_top)
+    assert tiled.shape == whole.shape
+    assert np.array_equal(tiled, whole), (
+        f"최대차 {np.abs(tiled.astype(int) - whole.astype(int)).max()}, "
+        f"다른 성분 {(tiled != whole).sum()}/{tiled.size}"
+    )
+
+
+def test_what_a_psb_over_30000_can_and_cannot_do(wide_psb, tmp_path):
+    """
+    30,000을 넘는 PSB에서 되는 것과 안 되는 것의 경계를 못박아 둔다.
+
+    psd-tools는 PSB에도 PSD v1의 30,000px 축 상한을 건다 — 스펙이 아니라 메모리
+    보호가 이유라고 자기 주석에 적어 두었다(api/utils.py). 그 상한을 풀어줄까
+    고민했지만 풀지 않기로 했다: 납품 파일 26장의 캔버스·그룹 bbox·마스크 리프
+    bbox를 전부 재보니 30,000을 넘는 축이 하나도 없었다(가장 큰 것이 Bar027의
+    *ART 그룹 26367x11024). 닿지 않는 경로를 위해 남의 라이브러리 가드를 전역으로
+    바꾸는 것은 값이 비싸다.
+
+    그래서 경계는 이렇게 남는다. 열기·레이어 단위 추출·병합은 되고(내보내기가
+    쓰는 길은 전부 이쪽이다), 문서 전체를 한 번에 합성하는 것만 막힌다.
+    """
+    from psd_engine.session import SessionStore
+
+    store = SessionStore()
+    s = store.get(store.open(wide_psb))
+    assert s["psd"].version == 2 and s["psd"].width == 32510
+
+    leaves = [l for l in s["layers_by_id"].values() if not l.is_group()]
+    lids = [lid for lid, l in s["layers_by_id"].items() if not l.is_group()]
+
+    # 되는 것 — 내보내기가 실제로 쓰는 길
+    assert extract_rgba(leaves[0]).shape[2] == 4
+    assert render_thumbnails(s, lids, max_size=64, out_dir=tmp_path)
+    arr, left, top = merge_rgba(s["psd"], leaves)
+    assert (left, top) == (100, 20)
+    assert left + arr.shape[1] == 32510, "30,000 뒤의 픽셀이 뷰포트에서 잘렸다"
+
+    # 안 되는 것 — 문서 전체 합성. 배치 내보내기는 여기를 지나지 않는다.
+    with pytest.raises(ValueError, match="exceeds the PSD maximum"):
+        render_document_preview(s, max_size=64, out_dir=tmp_path)
+
+
+def test_merge_rgba_rejects_a_clamped_merge_with_nothing_left(all_outside_union_psd):
+    # 자른 결과 그릴 것이 하나도 남지 않으면 빈 레이어와 같이 다룬다. 0x0 배열을
+    # 돌려주면 export가 그것을 레이어로 기록하려다 훨씬 뒤에서 터진다.
+    s = _session(all_outside_union_psd)
+    layers = _by_name(s, "way left", "near left")   # 합집합 30,940 > 30,000, 전부 캔버스 왼쪽
+    with pytest.raises(ValueError, match="outside the canvas"):
+        merge_rgba(s["psd"], layers)
+
+
+def test_scaled_leaf_premultiplies_before_resizing(fixture_psd):
+    """
+    축소는 프리멀티플라이드 알파에서 해야 한다.
+
+    스트레이트 알파로 R/G/B/A를 따로 줄이면 알파가 0인 자리에 남아 있는 색이
+    가장자리로 번진다. 라인아트는 안티에일리어싱이 전부 알파에 들어 있어서 그
+    번짐이 그대로 보인다 — apply_line_color의 주석이 같은 이유를 적고 있다.
+    """
+    s = _session(fixture_psd)
+    leaf = s["layers_by_id"][4]          # 'line' value=50, 32x24, 알파 255
+    out = render_mod._scaled_leaf(leaf, 0.25, (0, 0))
+    assert out is not None
+    rgba, x0, y0 = out
+    assert rgba.dtype == np.float32
+    assert rgba.shape == (6, 8, 4)
+    assert (x0, y0) == (0, 0)
+    # 알파가 전부 1이므로 프리멀티플라이드 색은 원본과 같다: 50/255
+    assert np.allclose(rgba[..., 3], 1.0, atol=1e-3)
+    assert np.allclose(rgba[..., :3], 50 / 255, atol=2e-3)
+
+
+def _exact_group_thumbnail(psd, group):
+    """
+    render_thumbnails가 '비싼 그룹' 갈래에서 정확 기준으로 실제로 쓰는 것과 같은
+    layer_filter로 그룹을 합성한다(render.py의 render_thumbnails 참고: 조상은
+    강제로 통과시키고 — 숨은 그룹 오버라이드 — 보이는 자손만 넣는다).
+
+    필터 없이 group.composite(force=True, color=1.0, alpha=0.0)를 부르면 다른
+    그림이 나온다 — 실측(설계 문서 §4.3)에서 두 기준이 LINES 33.9, wall2 53.5만큼
+    달랐고, 그 차이를 축소 합성기의 오차로 잘못 읽을 뻔했다. 이 테스트 스위트의
+    두 기존 테스트가 그 실수를 그대로 물려받고 있었다 — 여기로 옮겨 한 곳에서
+    고친다.
+    """
+    ancestors_and_self = set()
+    cur = group
+    while cur is not psd:
+        ancestors_and_self.add(id(cur))
+        cur = cur.parent
+    descendant_ids = {id(d) for d in group.descendants() if d.visible}
+    return group.composite(
+        force=True, color=1.0, alpha=0.0,
+        layer_filter=lambda l: id(l) in ancestors_and_self or id(l) in descendant_ids,
+    )
+
+
+def test_scaled_group_reproduces_blend_modes(blend_group_psd):
+    """
+    축소 합성기는 평탄화가 아니다.
+
+    실납품에서 8Mpx 넘는 그룹의 80%가 블렌드나 클리핑을 갖고 있고, 비용 상위
+    30개 중 29개가 클리핑을 갖는다. 알파 오버로 겹쳐 버리면 정작 사람이 기다리는
+    그룹의 그림이 전부 틀린다 — 이 테스트가 그 회귀를 잡는다.
+
+    48px 캔버스 합성은 시간이 0에 가까우므로 이 충실도는 공짜다.
+
+    픽스처가 판별력을 갖는 것을 확인해 두었다: base 64에 shade 192를 multiply로
+    얹으면 겹치는 자리가 **48**, 알파 오버로 겹치면 **192**다(실측). 그래서 이
+    테스트는 평탄화 구현에서 반드시 실패한다.
+    """
+    s = _session(blend_group_psd)
+    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+    group = s["layers_by_id"][gid]
+
+    exact_img = _exact_group_thumbnail(s["psd"], group).convert("RGBA")
+    exact_img.thumbnail((16, 16))
+    exact_small = np.array(exact_img)
+
+    # production과 같은 순서로 줄인다 — _group_rgba_scaled는 중간 해상도로
+    # 돌려주고, 축소는 render_thumbnails의 img.thumbnail 한 번뿐이다.
+    scaled_img = Image.fromarray(
+        render_mod._group_rgba_scaled(s["psd"], group, group.bbox), "RGBA")
+    scaled_img.thumbnail((16, 16))
+    scaled = np.array(scaled_img)
+
+    assert scaled.shape == exact_small.shape
+    diff = np.abs(scaled.astype(int) - exact_small.astype(int)).max()
+    assert diff <= 24, f"블렌드가 재현되지 않았다 — 최대차 {diff} (평탄화면 144 근처)"
+    # 막대가 실제로 판별하는지 여기서 함께 못박는다 — 겹치는 자리가 곱연산 값이어야
+    # 한다. 위 최대차만 보면 축소 때문에 우연히 통과하는 구현을 놓칠 수 있다.
+    assert scaled[2, 2, 0] < 120, (
+        f"겹치는 자리가 {scaled[2, 2, 0]} — 곱연산(48)이 아니라 알파 오버(192)다")
+
+
+def test_scaled_group_reproduces_clipping(clip_layer_psd, tmp_path):
+    """
+    클리핑 레이어는 베이스의 **색만** 바꾸고 알파는 바꾸지 않는다 —
+    _apply_clip_layers가 하위 Compositor의 _color만 돌려주기 때문이다.
+
+    평탄화 구현은 클리핑 레이어를 베이스 밖에까지 그려서 알파가 넓어진다.
+    그래서 알파를 비교하면 그 실수가 잡힌다.
+    """
+    s = _session(clip_layer_psd)
+    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+    group = s["layers_by_id"][gid]
+
+    exact_img = _exact_group_thumbnail(s["psd"], group).convert("RGBA")
+    exact_img.thumbnail((16, 16))
+    exact_small = np.array(exact_img)
+
+    scaled_img = Image.fromarray(
+        render_mod._group_rgba_scaled(s["psd"], group, group.bbox), "RGBA")
+    scaled_img.thumbnail((16, 16))
+    scaled = np.array(scaled_img)
+
+    assert scaled.shape == exact_small.shape
+    alpha_diff = np.abs(scaled[..., 3].astype(int) - exact_small[..., 3].astype(int)).max()
+    assert alpha_diff <= 24, f"클리핑이 알파를 넓혔다 — 최대차 {alpha_diff}"
+
+
+def test_scaled_group_reproduces_its_own_mask_and_opacity(masked_group_psd):
+    """
+    그룹 **자신**의 마스크·불투명도가 최상위/중첩 어느 자리에서도 반영돼야 한다.
+
+    _group_rgba_scaled는 한동안 own_alpha_factor 없이 draw()의 for-루프 안에서
+    불투명도만(그것도 자식으로 방문될 때만) 곱했다 — 그룹 자신의 마스크는 어디서도
+    읽지 않았고, 최상위 그룹은 어느 부모의 for-루프에도 안 걸리므로 자기
+    불투명도조차 반영되지 않았다. 알파를 비교하면 그 둘 다 잡힌다 — 마스크가
+    걸린 자리는 완전히 다른 값이 나온다(실측: 옛 코드에서 이 픽스처의 알파
+    최대차 180).
+    """
+    s = _session(masked_group_psd)
+    outer = next(l for l in s["layers_by_id"].values()
+                if l.is_group() and l.name == "OUTER")
+
+    exact = np.array(outer.composite(force=True, color=1.0, alpha=0.0).convert("RGBA"))
+    scaled = render_mod._group_rgba_scaled(s["psd"], outer, outer.bbox)
+
+    assert scaled.shape == exact.shape
+    alpha_diff = np.abs(scaled[..., 3].astype(int) - exact[..., 3].astype(int)).max()
+    assert alpha_diff <= 4, (
+        f"그룹 자신의 마스크·불투명도가 반영되지 않았다 — 최대차 {alpha_diff}")
+
+
+def test_scaled_leaf_opacity_is_not_double_applied_when_masked(masked_leaf_group_psd):
+    """
+    마스크 달린 잎의 불투명도를 두 번 곱하지 않는다.
+
+    extract_rgba는 마스크 달린 잎의 불투명도·fill 불투명도를 이미 반영해 돌려준다
+    (_extract_rgba_masked 또는 layer.composite 경유). own_alpha_factor가 무조건 또
+    곱하면 128/255가 아니라 (128/255)^2이 되어, 캔버스 전체 알파가 낮게 나온다
+    (실측: 옛 코드에서 이 픽스처의 알파 최대차 64).
+    """
+    s = _session(masked_leaf_group_psd)
+    group = next(l for l in s["layers_by_id"].values() if l.is_group())
+
+    exact = np.array(group.composite(force=True, color=1.0, alpha=0.0).convert("RGBA"))
+    scaled = render_mod._group_rgba_scaled(s["psd"], group, group.bbox)
+
+    assert scaled.shape == exact.shape
+    alpha_diff = np.abs(scaled[..., 3].astype(int) - exact[..., 3].astype(int)).max()
+    assert alpha_diff <= 4, (
+        f"불투명도가 두 번 적용된 것으로 보인다 — 최대차 {alpha_diff} "
+        f"(두 번 곱하면 128/255가 아니라 (128/255)^2, 즉 128 대신 64 근처가 된다)")
+
+
+def test_scaled_group_does_not_double_apply_a_masked_clip_layer(masked_clip_multiply_psd):
+    """
+    마스크 달린 베이스에 곱연산 클리핑 레이어가 붙은 경우도 두 번 합성하지 않는다.
+
+    extract_rgba는 클리핑 있는 마스크 레이어를 항상 layer.composite()로 떨어뜨려
+    (has_clip_layers 가드) 클리핑까지 이미 합성해 돌려준다. draw()가 클리핑 루프를
+    또 태우면 곱연산이 두 번 걸린다 — 곱연산은 멱등이 아니라서(normal과 달리) 두
+    번째로 갈수록 값이 계속 준다(실측: 옛 코드에서 정확 50, 옛 코드 12; 시각적
+    RGB 최대차 38).
+    """
+    s = _session(masked_clip_multiply_psd)
+    group = next(l for l in s["layers_by_id"].values() if l.is_group())
+
+    exact = np.array(group.composite(force=True, color=1.0, alpha=0.0).convert("RGBA")).astype(int)
+    scaled = render_mod._group_rgba_scaled(s["psd"], group, group.bbox).astype(int)
+
+    assert scaled.shape == exact.shape
+    both_visible = (exact[..., 3] > 0) & (scaled[..., 3] > 0)
+    assert both_visible.any(), "픽스처에 겹치는 자리가 없다 — 판별력을 잃었다"
+    rgb_diff = np.abs(scaled[..., :3] - exact[..., :3]).max(axis=2)
+    visible_diff = rgb_diff[both_visible].max()
+    assert visible_diff <= 4, (
+        f"클리핑 레이어가 두 번 합성된 것으로 보인다 — 시각적 RGB 최대차 "
+        f"{visible_diff}(두 번 곱하면 38 근처가 된다)")
+
+
+def test_scaled_group_ignores_a_clip_layer_that_lives_outside_it(sibling_clip_group_psd):
+    """
+    썸네일 대상 그룹 **자신**에게, 그 그룹의 부모 컨테이너 안에서 붙은 클리핑
+    레이어는 무시해야 한다 — 실납품에서 실제로 걸린 회귀다(HH0306 02_Color의
+    'LINES' 그룹에 형제 'Layer 621'이 클리핑돼 있었다).
+
+    render_thumbnails의 layer_filter(조상+자손만 통과)는 GROUP의 부모에 속한 그
+    클리핑 레이어를 걸러 no-op으로 만든다. `_group_rgba_scaled`가 최상위 그룹을
+    draw()의 일반 자식 루프에 태워 자기 clip_layers를 필터 없이 처리하면, 이
+    자리에서만 그 클리핑이 새 나간다 — 실측: 이 회귀로 평범한 그룹 108개 기준
+    최악 premultiplied 차이가 10.0에서 103.7로 뛰었다.
+
+    같은 그룹 **안쪽**의 클리핑('inner_clip'이 'inner_base'에 곱연산으로 클리핑)은
+    자손끼리라 필터 안에 들어오므로 그대로 반영돼야 한다 — 이 테스트는 "그룹 밖
+    클리핑은 무시, 그룹 안 클리핑은 반영"을 한 번에 가른다.
+    """
+    s = _session(sibling_clip_group_psd)
+    lines = next(l for l in s["layers_by_id"].values() if l.is_group() and l.name == "LINES")
+
+    exact = np.array(_exact_group_thumbnail(s["psd"], lines).convert("RGBA")).astype(int)
+    scaled = render_mod._group_rgba_scaled(s["psd"], lines, lines.bbox).astype(int)
+
+    assert scaled.shape == exact.shape
+    diff = np.abs(scaled.astype(int) - exact.astype(int)).max()
+    assert diff <= 4, (
+        f"그룹 밖 클리핑이 새 나간 것으로 보인다 — 최대차 {diff}")
+
+    # 픽스처가 실제로 판별력을 갖는지 — sibling_clip을 걸렀을 때와 안 걸렀을 때가
+    # 달라야 한다. 안 그러면 위 assert가 우연히 통과했을 뿐일 수 있다.
+    unfiltered = np.array(lines.composite(force=True, color=1.0, alpha=0.0).convert("RGBA"))
+    unfiltered_diff = np.abs(exact.astype(int) - unfiltered.astype(int)).max()
+    assert unfiltered_diff > 4, (
+        "필터를 걸고 안 걸고가 그림에서 차이가 안 난다 — 이 픽스처가 sibling_clip "
+        "제외를 판별하지 못한다")
+
+    # 안쪽 클리핑(inner_clip)은 여전히 반영돼야 한다 — 곱연산이라 겹치는 자리가
+    # 200이 아니라 200*64/255=50 근처여야 한다.
+    assert scaled[16, 16, 0] < 120, (
+        f"안쪽 클리핑이 반영되지 않았다 — {scaled[16, 16, 0]} (반영되면 50 근처, "
+        f"안 되면 200)")
+
+
+def test_scaled_group_gives_a_passthrough_subgroup_the_real_backdrop(passthrough_subgroup_psd):
+    """
+    pass-through 하위그룹은 격리해서 그린 뒤 얹으면 안 된다 — 그 안의 블렌드가
+    부모(형제 base)가 아니라 자기만의 빈 캔버스를 배경으로 계산돼 버린다.
+
+    이 픽스처는 판별력이 crisp하다: base 64 위에 pass-through 하위그룹 안의
+    mult(곱연산) 192가 곱해지면 겹치는 자리가 **48 근처**(64*192/255)여야 한다.
+    격리해서 그리면 mult가 흰 배경 위에서 곱해져 그대로 **192**가 남는다 — 차이 144.
+
+    review 실측(2026-08-05)과 같은 모양: exact 50 vs 격리 64.
+    """
+    s = _session(passthrough_subgroup_psd)
+    outer = next(l for l in s["layers_by_id"].values() if l.is_group() and l.name == "OUTER")
+
+    exact = np.array(_exact_group_thumbnail(s["psd"], outer).convert("RGBA"))
+    scaled = render_mod._group_rgba_scaled(s["psd"], outer, outer.bbox)
+
+    assert scaled.shape == exact.shape
+    diff = np.abs(scaled.astype(int) - exact.astype(int)).max()
+    assert diff <= 4, f"pass-through 하위그룹이 부모 배경을 못 받았다 — 최대차 {diff}"
+    # 막대가 실제로 판별하는지 여기서 못박는다 — 겹치는 자리가 곱연산 값이어야 한다.
+    assert scaled[16, 16, 0] < 120, (
+        f"겹치는 자리가 {scaled[16, 16, 0]} — 곱연산(48 근처)이 아니라 격리해서 그린 "
+        f"값(192)이다")
+
+
+def test_a_cheap_group_keeps_the_exact_composite(fixture_psd, tmp_path, monkeypatch):
+    """
+    축소 합성기는 비싼 그룹만 위한 것이다. 잘 나오고 있는 썸네일은 결과만 같으면
+    되는 것이 아니라 들르지도 말아야 한다 — 근사 경로가 조용히 기본이 되면
+    바이트 동일이라는 성질을 잃고도 아무도 모른다.
+    """
+    calls = []
+    real = render_mod._group_rgba_scaled
+    monkeypatch.setattr(render_mod, "_group_rgba_scaled",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    s = _session(fixture_psd)
+    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+
+    render_thumbnails(s, [gid], max_size=16, out_dir=tmp_path)
+
+    assert calls == [], "싼 그룹인데 축소 합성기로 갔다"
+
+
+def test_an_expensive_group_uses_the_scaled_compositor(fixture_psd, tmp_path, monkeypatch):
+    calls = []
+    real = render_mod._group_rgba_scaled
+    monkeypatch.setattr(render_mod, "_group_rgba_scaled",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    monkeypatch.setattr(render_mod, "THUMBNAIL_EXACT_BUDGET", 0)
+    s = _session(fixture_psd)
+    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+
+    paths = render_thumbnails(s, [gid], max_size=16, out_dir=tmp_path)
+
+    assert calls, "예산을 0으로 낮췄는데도 축소 합성기를 타지 않았다"
+    assert Image.open(paths[str(gid)]).size[0] <= 16
 
 
 def test_render_thumbnails_and_preview(fixture_psd, tmp_path):
@@ -271,3 +1202,355 @@ def test_render_preview_without_line_color_keeps_source_colors(fixture_psd, tmp_
     arr = np.array(im)
     assert arr[0, 0, 0] == 128
     assert arr[15, 15, 0] == 200
+
+
+# 아티스트가 라인이 아닌 색 레이어를 손으로 체크해 넣으면, 미리보기가 그것까지
+# 라인 색으로 칠해 화면에서 새까맣게 보였다(썸네일은 원본 색이라 더 헷갈렸다).
+# 색 통일은 프리셋 규칙에 걸린 라인 레이어에만 걸려야 한다.
+def test_render_preview_only_normalizes_the_matched_line_layers(fixture_psd, tmp_path):
+    from PIL import Image
+    s = _session(fixture_psd)
+    # id 2 = fill(128, 캔버스 전체), id 4 = line(50, 0,0..32,24). 배율은 1.0이다
+    # (문서 64x48이 max_size 256보다 작아 확대하지 않는다).
+    im = Image.open(render_preview(
+        s, [2, 4], max_size=256, out_dir=tmp_path,
+        line_color="#FF0000", line_color_ids=[4],
+    )).convert("RGBA")
+    arr = np.array(im)
+    assert tuple(arr[5, 5][:3]) == (255, 0, 0), "라인이 색 통일되지 않았다"
+    assert tuple(arr[40, 40][:3]) == (128, 128, 128), "규칙에 걸리지 않은 레이어가 덮였다"
+
+
+def test_render_preview_normalizes_everything_when_no_ids_are_given(fixture_psd, tmp_path):
+    # line_color_ids가 None이면 예전대로 전부 건다 — 규칙을 모르는 호출자용 기본값.
+    from PIL import Image
+    s = _session(fixture_psd)
+    im = Image.open(render_preview(
+        s, [2, 4], max_size=256, out_dir=tmp_path, line_color="#FF0000",
+    )).convert("RGBA")
+    arr = np.array(im)
+    painted = arr[..., 3] > 0
+    assert (arr[painted][:, 0] == 255).all()
+    assert (arr[painted][:, 1] == 0).all()
+
+
+def test_assign_line_color_marks_only_the_matched_sources():
+    from psd_engine.render import assign_line_color
+
+    entries = [{"sourceIds": [4]}, {"sourceIds": [2]}]
+    assign_line_color(entries, "#000000", [4])
+    assert entries[0]["lineRgb"] == (0, 0, 0)
+    assert entries[1]["lineRgb"] is None
+
+
+def test_assign_line_color_skips_a_merge_that_mixes_matched_and_unmatched():
+    # 색은 병합이 끝난 뒤 한 번에 덮으므로, 소스가 섞이면 라인만 골라 덮을 수
+    # 없다. 그때는 색 통일을 포기하고 원본 색을 지킨다(지우는 쪽이 아니라 남기는 쪽).
+    from psd_engine.render import assign_line_color
+
+    entries = [{"sourceIds": [4, 5]}, {"sourceIds": [4, 2]}]
+    assign_line_color(entries, "#000000", [4, 5])
+    assert entries[0]["lineRgb"] == (0, 0, 0)
+    assert entries[1]["lineRgb"] is None
+
+
+def test_assign_line_color_without_a_color_marks_nothing():
+    from psd_engine.render import assign_line_color
+
+    entries = [{"sourceIds": [4]}]
+    assign_line_color(entries, None, [4])
+    assert entries[0]["lineRgb"] is None
+
+
+def test_render_preview_draws_the_edge_overlays_it_is_given(fixture_psd, tmp_path):
+    # 화면에서 확인할 수 없으면 내보내기 전에 알 방법이 없다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    overlay = np.zeros((8, 8, 4), np.uint8)
+    overlay[..., :3] = [255, 0, 0]
+    overlay[..., 3] = 255
+    png = render_preview(s, [4], max_size=256, out_dir=tmp_path,
+                         edge_overlays=[{"rgba": overlay, "left": 0, "top": 0,
+                                         "lineIds": [4]}])
+    arr = np.array(Image.open(png).convert("RGBA"))
+    assert tuple(arr[2, 2][:3]) == (255, 0, 0)
+
+
+def test_render_preview_a_fully_transparent_overlay_leaves_the_canvas_unchanged(
+        fixture_psd, tmp_path):
+    # None과 []는 둘 다 루프를 0번 돈다 — 루프 본문이 무슨 짓을 해도 통과하는
+    # 공허한 대조였다. 알파가 전부 0인 진짜 오버레이를 실제로 루프에 태우고도
+    # (필터 통과, 리사이즈, 합성까지 다 거치고) 결과가 바뀌지 않아야 한다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    transparent = np.zeros((8, 8, 4), np.uint8)  # alpha 전부 0
+    a = np.array(Image.open(render_preview(s, [4, 5], 256, tmp_path)).convert("RGBA"))
+    b = np.array(Image.open(render_preview(
+        s, [4, 5], 256, tmp_path,
+        edge_overlays=[{"rgba": transparent, "left": 0, "top": 0, "lineIds": [4]}],
+    )).convert("RGBA"))
+    assert np.array_equal(a, b)
+
+
+def test_render_preview_hides_an_overlay_whose_view_is_not_on_screen(fixture_psd, tmp_path):
+    # 눈 아이콘으로 뷰의 라인을 끄면(=visible_layer_ids에서 빠지면) 그 뷰의 생성된
+    # 획도 같이 사라져야 한다 — 안 그러면 화면에 없는 레이어의 획이 캔버스에
+    # 떠 있게 된다(결함 1).
+    from PIL import Image
+    s = _session(fixture_psd)
+    shown = np.zeros((4, 4, 4), np.uint8)
+    shown[..., :3] = [0, 255, 0]
+    shown[..., 3] = 255
+    hidden = np.zeros((4, 4, 4), np.uint8)
+    hidden[..., :3] = [0, 0, 255]
+    hidden[..., 3] = 255
+    png = render_preview(s, [4], max_size=256, out_dir=tmp_path, edge_overlays=[
+        {"rgba": shown, "left": 0, "top": 0, "lineIds": [4]},   # lineIds가 화면에 있다
+        {"rgba": hidden, "left": 40, "top": 0, "lineIds": [5]},  # lineIds가 화면에 없다
+    ])
+    arr = np.array(Image.open(png).convert("RGBA"))
+    assert tuple(arr[2, 2][:3]) == (0, 255, 0), "화면에 있는 뷰의 획이 그려지지 않았다"
+    assert arr[2, 42, 3] == 0, "화면에 없는 뷰의 획이 그려졌다"
+
+
+def test_render_preview_only_recolors_overlays_whose_view_is_in_the_color_scope(
+        fixture_psd, tmp_path):
+    # 색 통일이 일부 레이어에만 걸릴 때(line_color_ids로 범위를 좁혔을 때), 그
+    # 범위 밖 뷰의 획은 원본 색을 지켜야 한다 — assign_line_color가 규칙에
+    # 걸리지 않은 엔트리의 lineRgb를 None으로 남기는 것과 같은 규칙이다(결함 2).
+    from PIL import Image
+    s = _session(fixture_psd)
+    original = np.zeros((4, 4, 4), np.uint8)
+    original[..., :3] = [100, 100, 100]
+    original[..., 3] = 255
+    png = render_preview(
+        s, [4, 5], max_size=256, out_dir=tmp_path,
+        line_color="#FF0000", line_color_ids=[4],
+        edge_overlays=[
+            {"rgba": original.copy(), "left": 0, "top": 0, "lineIds": [4]},   # 범위 안
+            {"rgba": original.copy(), "left": 40, "top": 0, "lineIds": [5]},  # 범위 밖
+        ],
+    )
+    arr = np.array(Image.open(png).convert("RGBA"))
+    assert tuple(arr[2, 2][:3]) == (255, 0, 0), "범위 안 뷰의 획이 통일색으로 칠해지지 않았다"
+    assert tuple(arr[2, 42][:3]) == (100, 100, 100), "범위 밖 뷰의 획이 통일색으로 칠해졌다"
+
+
+def test_leaf_thumbnails_reuse_preview_tiles_instead_of_decoding(fixture_psd, tmp_path, monkeypatch):
+    # 참고 그룹(TEMPLATE 등)을 펼칠 때마다 56.9Mpx 잎이 47초씩 다시 디코드되던
+    # 회귀 방지 — 잎 썸네일은 미리보기·전체 캐시가 데워 둔 타일에서 줄인다.
+    s = _session(fixture_psd)
+    render_mod._preview_tile(s, 2, 1.0)  # 미리보기 배율(캔버스 64px < 1500 → 1.0)
+
+    def boom(layer):
+        raise AssertionError("타일이 있으면 디코드하면 안 된다")
+
+    monkeypatch.setattr(render_mod, "extract_rgba", boom)
+    thumbs = render_thumbnails(s, [2], max_size=32, out_dir=tmp_path)
+    assert "2" in thumbs
+
+
+def test_leaf_thumbnails_fall_back_to_full_res_when_the_tile_is_too_small(fixture_psd, tmp_path, monkeypatch):
+    # 작은 잎 × 큰 캔버스 축소에서는 타일이 썸네일보다 작아 확대 흐림이 생긴다 —
+    # 그때만 원본 디코드로 간다(그런 잎은 어차피 싸다). 원본 경로면 64x48
+    # 잎에서 32px 썸네일이 나오고, 8px짜리 타일을 억지로 키웠다면 8px다.
+    from PIL import Image
+    monkeypatch.setattr(render_mod, "THUMBNAIL_SOURCE_MAX_SIZE", 8)
+    s = _session(fixture_psd)
+    thumbs = render_thumbnails(s, [2], max_size=32, out_dir=tmp_path)
+    assert max(Image.open(thumbs["2"]).size) == 32
+
+
+def test_thumbnailing_does_not_shrink_the_cached_tile(fixture_psd, tmp_path):
+    # 썸네일은 캐시된 타일의 **사본**에서 줄여야 한다 — 제자리에서 줄이면 다음
+    # 미리보기가 48px 뭉개진 그림으로 그려진다.
+    s = _session(fixture_psd)
+    w = render_mod._preview_tile(s, 2, 1.0)[0].width
+    render_thumbnails(s, [2], max_size=16, out_dir=tmp_path)
+    assert render_mod._preview_tile(s, 2, 1.0)[0].width == w
+
+
+def test_render_preview_keeps_a_thin_stroke_visible_at_a_small_scale(fixture_psd, tmp_path):
+    # 12,000px짜리 소품 시트는 미리보기 배율이 ~0.125라, 자동 굵기 몇 px짜리
+    # 획이 LANCZOS 평균에 녹아 사라져 보였다 — "생성됐는데 화면에 없다"로 두 번
+    # 신고된 증상. 축소 전에 획을 두껍게 만들어 축소 후에도 진한 획이 남아야
+    # 한다. 64px 캔버스에 max_size=8이면 배율 0.125로 그 조건이 재현된다.
+    from PIL import Image
+    s = _session(fixture_psd)
+    overlay = np.zeros((48, 64, 4), np.uint8)
+    overlay[24, :, :3] = [255, 0, 0]      # 폭 1px짜리 가로 획
+    overlay[24, :, 3] = 255
+    png = render_preview(s, [4], max_size=8, out_dir=tmp_path,
+                         edge_overlays=[{"rgba": overlay, "left": 0, "top": 0,
+                                         "lineIds": [4]}])
+    arr = np.array(Image.open(png).convert("RGBA")).astype(np.int32)
+    # 캔버스에는 레이어 픽셀(알파 255)도 있으므로 알파만으로는 획을 못 집고,
+    # 투명 배경 위 안개 픽셀도 RGB는 순빨강이라 색만으로도 못 집는다 — 눈에
+    # 보이는 양은 (빨강 우세) × 알파다. 무보정이면 알파가 ~22라 이 값이 22에
+    # 머문다(실측).
+    redness = (arr[..., 0] - np.maximum(arr[..., 1], arr[..., 2])) * arr[..., 3] // 255
+    assert int(redness.max()) >= 100, \
+        f"축소 후 획이 안개가 됐다 — 보이는 빨강 {int(redness.max())}"
+
+
+def _redness(png):
+    from PIL import Image
+    a = np.array(Image.open(png).convert("RGBA")).astype(np.int32)
+    return int(((a[..., 0] - np.maximum(a[..., 1], a[..., 2])) * a[..., 3] // 255).max())
+
+
+def test_render_preview_lifts_a_faint_stroke_without_flattening_a_strong_one(fixture_psd, tmp_path):
+    """
+    "사라지지 않게"와 "무조건 진하게"는 다르다.
+
+    전부 최댓값으로 올리면 굵기·농도 차이가 화면에서 사라져 실제보다 굵고 진해
+    보이고, 아티스트는 그것을 결함으로 읽는다 — 생성된 라인이 진해 보인다고
+    실제로 신고됐다(2026-08-13). 얇은 획은 안개가 되지 않아야 하고, 굵은 획은
+    그보다 진하게 남아야 한다.
+    """
+    def render(stroke_px):
+        # 세션을 따로 연다 — 줄여 둔 오버레이 캐시가 모양이 같은 둘을 한 그림으로
+        # 묶지 않게(테스트에는 viewKey가 없다).
+        s = _session(fixture_psd)
+        ov = np.zeros((48, 64, 4), np.uint8)
+        ov[24:24 + stroke_px, :, :3] = [255, 0, 0]
+        ov[24:24 + stroke_px, :, 3] = 255
+        return _redness(render_preview(s, [4], max_size=8, out_dir=tmp_path,
+                                       edge_overlays=[{"rgba": ov, "left": 0, "top": 0,
+                                                       "lineIds": [4]}]))
+
+    thin, thick = render(1), render(8)
+    assert thin >= 100, f"얇은 획이 안개가 됐다 — {thin}"
+    assert thick > thin, f"굵기 차이가 화면에서 사라졌다 — 얇은 {thin}, 굵은 {thick}"
+
+
+def test_render_preview_scales_an_overlay_once_and_reuses_it(fixture_psd, tmp_path, monkeypatch):
+    """
+    줄여 놓은 오버레이는 (뷰, 배율, 색)만의 함수인데 원본 해상도 배열을 훑는
+    일이다. 캐시가 없으면 **토글할 때마다** 같은 값을 다시 만들고, 실측으로 그
+    비용이 레이어 수와 무관하게 매 렌더 0.68초로 고정이었다(2026-08-13 색 판:
+    n=3이든 14든 렌더가 0.71초).
+    """
+    s = _session(fixture_psd)
+    overlay = np.zeros((48, 64, 4), np.uint8)
+    overlay[24, :, :3] = [255, 0, 0]
+    overlay[24, :, 3] = 255
+    ov = [{"rgba": overlay, "left": 0, "top": 0, "lineIds": [4]}]
+
+    ks = []
+    real = render_mod._visible_reduce
+    monkeypatch.setattr(render_mod, "_visible_reduce",
+                        lambda a, k: (ks.append(k), real(a, k))[1])
+
+    first = render_preview(s, [4], max_size=8, out_dir=tmp_path, edge_overlays=ov)
+    assert len(ks) == 1
+    second = render_preview(s, [4], max_size=8, out_dir=tmp_path, edge_overlays=ov)
+    assert len(ks) == 1, "같은 뷰·배율인데 축소를 다시 했다"
+    # 재사용한 그림이 처음과 같아야 캐시가 의미가 있다.
+    assert _redness(second) == _redness(first) >= 100
+
+
+def test_render_preview_rescales_the_overlay_when_the_scale_changes(fixture_psd, tmp_path,
+                                                                    monkeypatch):
+    # 캐시 키에 배율이 빠지면 창 크기가 달라져도 옛 크기 오버레이를 그대로 얹는다.
+    s = _session(fixture_psd)
+    overlay = np.zeros((48, 64, 4), np.uint8)
+    overlay[24, :, :3] = [255, 0, 0]
+    overlay[24, :, 3] = 255
+    ov = [{"rgba": overlay, "left": 0, "top": 0, "lineIds": [4]}]
+
+    ks = []
+    real = render_mod._visible_reduce
+    monkeypatch.setattr(render_mod, "_visible_reduce",
+                        lambda a, k: (ks.append(k), real(a, k))[1])
+
+    render_preview(s, [4], max_size=8, out_dir=tmp_path, edge_overlays=ov)
+    render_preview(s, [4], max_size=16, out_dir=tmp_path, edge_overlays=ov)
+    assert len(ks) == 2, "배율이 달라졌는데 옛 크기를 재사용했다"
+
+
+def test_group_thumbnail_composites_from_preview_tiles_when_big(
+        blend_group_psd, monkeypatch, tmp_path):
+    """큰 그룹 썸네일은 잎을 미리보기 타일에서 가져온다 — 블렌드는 그대로.
+
+    배경: ZIP 디코드가 빨라진 뒤(fae8496) _group_rgba_scaled의 전해상도
+    premultiply·축소가 남은 비용의 전부가 됐다(판 20 실측 205.9 대 216.4초로
+    옛 경로와 동률). 타일은 그 축소를 이미 마친 같은 extract_rgba 산출물이다.
+
+    실판 크기를 픽스처로 만들 수 없으니 문턱 셋을 내려 '큰 그룹' 조건을 만든다:
+    비용 문턱 0(스케일 경로로), 예산 256px(scale<1), 타일 원본 8px(ts<scale).
+    """
+    import psd_engine.render as render_mod
+    from psd_engine.session import SessionStore
+
+    store = SessionStore()
+    s = store.get(store.open(blend_group_psd))
+    gid = next(lid for lid, l in s["layers_by_id"].items() if l.is_group())
+
+    monkeypatch.setattr(render_mod, "THUMBNAIL_EXACT_BUDGET", 0.0)
+    monkeypatch.setattr(render_mod, "THUMBNAIL_SUPERSAMPLE_PX", 256)
+    monkeypatch.setattr(render_mod, "THUMBNAIL_SOURCE_MAX_SIZE", 8)
+    calls = []
+    orig_tile = render_mod._preview_tile
+
+    def counting_tile(ss, lid, sc):
+        calls.append(lid)
+        return orig_tile(ss, lid, sc)
+
+    monkeypatch.setattr(render_mod, "_preview_tile", counting_tile)
+    out = render_mod.render_thumbnails(s, [gid], 16, tmp_path)
+    assert calls, "타일 소스가 안 쓰였다 — render_thumbnails→_group_rgba_scaled의 session 배선이 끊겼다"
+
+    scaled = np.array(Image.open(out[str(gid)]).convert("RGBA"))
+    # multiply가 살아 있는가 — 곱연산이면 64*192/255=48, 알파 오버로 뭉개지면 192.
+    # test_scaled_group_reproduces_blend_modes와 같은 판정 자리다.
+    assert scaled[2, 2, 0] < 120, (
+        f"겹치는 자리가 {scaled[2, 2, 0]} — 타일 경로가 블렌드를 잃었다")
+
+
+def test_group_thumbnail_keeps_full_resolution_for_small_groups(
+        blend_group_psd, monkeypatch):
+    """예산 아래(scale=1.0) 그룹은 타일로 낮추지 않는다 — 오늘 그림 그대로."""
+    import psd_engine.render as render_mod
+    from psd_engine.session import SessionStore
+
+    store = SessionStore()
+    s = store.get(store.open(blend_group_psd))
+    group = next(l for l in s["psd"] if l.is_group())
+
+    calls = []
+    orig_tile = render_mod._preview_tile
+
+    def counting_tile(ss, lid, sc):
+        calls.append(lid)
+        return orig_tile(ss, lid, sc)
+
+    monkeypatch.setattr(render_mod, "_preview_tile", counting_tile)
+    monkeypatch.setattr(render_mod, "THUMBNAIL_SOURCE_MAX_SIZE", 8)
+    ref = render_mod._group_rgba_scaled(s["psd"], group, group.bbox)
+    got = render_mod._group_rgba_scaled(s["psd"], group, group.bbox, session=s)
+    assert not calls, "작은 그룹까지 타일 해상도로 떨어뜨렸다"
+    assert (ref == got).all()
+
+
+def test_preview_tile_skips_a_shape_layer_without_raster():
+    """
+    래스터 채널이 없는 도형(shape) 레이어 — bbox는 커도 has_pixels()가 False고
+    topil()이 None이다(납품 판 실측: 4350×2261 'parallel_x'). 워밍업의 잎 목록은
+    "그룹 아닌 레이어 전부"라 이런 레이어도 들어오는데, 가드가 0×0만 보면
+    extract_rgba가 ValueError를 던져 전체 캐시 스윕이 파일째 실패한다.
+    0×0 빈 레이어와 같은 None 계약으로 건너뛰어야 한다.
+    """
+    import psd_engine.render as render_mod
+
+    class ShapeHusk:
+        width, height = 4350, 2261
+
+        @staticmethod
+        def has_pixels():
+            return False
+
+    session = {"layers_by_id": {7: ShapeHusk()}}
+    assert render_mod._preview_tile(session, 7, 0.25) is None
+    # 두 번째 호출은 RAM 캐시로 답해야 한다(디스크에 묻지 않는 것까지 포함).
+    assert render_mod._preview_tile(session, 7, 0.25) is None

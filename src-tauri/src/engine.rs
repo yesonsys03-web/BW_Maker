@@ -113,13 +113,34 @@ fn locate_bundled_engine() -> Result<std::path::PathBuf, String> {
     })
 }
 
-fn engine_command() -> Result<Command, String> {
+pub(crate) fn engine_command() -> Result<Command, String> {
     let mut c = if cfg!(debug_assertions) {
-        // dev: 저장소의 engine/ 프로젝트를 uv로 실행한다. 엔진을 고칠 때마다 다시
+        // dev: 저장소의 engine/ 프로젝트를 그대로 실행한다. 엔진을 고칠 때마다 다시
         // 동결할 필요가 없다.
+        //
+        // venv의 인터프리터를 **직접** 부르는 것이 요점이다. `uv run`을 거치면 앱의
+        // 직계 자식은 uv이고 엔진은 그 손자가 되는데, 종료 시 죽일 수 있는 것은
+        // 직계 자식뿐이라 엔진이 살아남는다. 실제로 배치 도중 앱을 닫았을 때
+        // CPU 99%·RSS 8.9GB짜리 파이썬이 남아 산출물을 계속 썼다.
         let engine_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine");
-        let mut c = Command::new("uv");
-        c.args(["run", "python", "-m", "psd_engine"]).current_dir(engine_dir);
+        let venv_python = engine_dir.join(if cfg!(windows) {
+            ".venv/Scripts/python.exe"
+        } else {
+            ".venv/bin/python"
+        });
+        let mut c = if venv_python.is_file() {
+            let mut c = Command::new(venv_python);
+            c.args(["-m", "psd_engine"]);
+            c
+        } else {
+            // venv가 아직 없는 첫 클론. uv가 만들어 준다. 이 경로에서는 위의 손자
+            // 문제가 남지만, 엔진 쪽 부모 감시(psd_engine/rpc.py의
+            // _watch_for_orphaning)가 그때도 정리한다.
+            let mut c = Command::new("uv");
+            c.args(["run", "python", "-m", "psd_engine"]);
+            c
+        };
+        c.current_dir(engine_dir);
         c
     } else {
         // 릴리스: scripts/build-engine.*이 동결하고 tauri.conf의 bundle.resources가

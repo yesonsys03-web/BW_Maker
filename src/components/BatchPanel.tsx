@@ -1,15 +1,70 @@
-import { Fragment, useEffect, useState } from "react";
+import { DRAWN_LINES_POLICY } from "../lib/detectDrawnLines";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { findConflicts, planBatchOutputs } from "../lib/batch";
-import { batchRun, onEngineEvent, pathsExist } from "../lib/engine";
+import {
+  findConflicts,
+  planBatchOutputs,
+  type PlannedBatchOutput,
+} from "../lib/batch";
+import {
+  batchRun, onEngineEvent, onWarmWorkerExit, onWarmWorkerLine, pathsExist,
+  warmWorkerSend, warmWorkersStart, warmWorkersStop,
+} from "../lib/engine";
 import { loadPresets } from "../lib/presets";
-import { toEngineError } from "../lib/preview";
+import { batchOutcome, describeVerification } from "../lib/verifyReport";
+import { PREVIEW_MAX_SIZE, toEngineError } from "../lib/preview";
+import { runBatchExport, type BatchExportHandle } from "../lib/warmWorkers";
 import type { FileEntry } from "../state/appStore";
 import type { BatchItemResult, EngineError, Preset } from "../lib/types";
 
 interface BatchPanelProps {
   files: FileEntry[];
+  /**
+   * 배치가 처음 고를 프리셋의 이름. 출처는 위쪽 `PresetBar`의 현재 선택이다 —
+   * 프로젝트를 열면 그 프리셋이 곧 위쪽의 선택이 되므로, 프로젝트를 연 직후에는
+   * 둘이 같다. 프로젝트를 안 열었으면 여기도 위쪽도 같은 loadPresets()를 읽으므로
+   * 결과는 예전과 같다.
+   *
+   * 아티스트가 화면에서 보고 승인한 설정과 배치가 실제로 내보내는 설정이 갈리면
+   * 산출물이 조용히 달라진다 — 배치가 자기 목록의 첫 번째로 시작하는 바람에
+   * 2026-08-10에 생성된 라인이 빠진 산출물이 실제로 나갔다. 프로젝트의 프리셋이
+   * 아니라 "지금 위쪽 바가 고른 것"을 따르는 이유도 같다: 프로젝트를 연 뒤
+   * 위쪽을 바꿨다면 배치도 그것을 따라야 화면과 산출물이 갈리지 않는다.
+   *
+   * **목록을 읽는 그 순간에만 본다.** 값으로 보고 바뀔 때마다 선택을 맞추면,
+   * 아티스트가 배치 드롭다운에서 고른 것이 위쪽 바를 건드릴 때마다 되돌아간다
+   * (`PresetBar`에서 밟았던 함정이다). 배치 탭은 눌러야 마운트되므로, 그 시점엔
+   * 이미 프로젝트의 프리셋이 위쪽에 올라와 있다.
+   */
+  defaultPresetName: string | null;
+  /**
+   * 화면에서 손으로 "라인으로 지정"한 레이어. {경로: [id]} 꼴이고 열어둔
+   * 파일에만 있다.
+   *
+   * 배치는 프리셋만 갖고 파일마다 처음부터 다시 매칭하므로, 이름 규칙이 닿지
+   * 않는 판은 아티스트가 화면에서 고쳐 놓아도 여기까지 오지 않아
+   * `no layers matched`로 실패했다(2026-08-10 신고). 그 지정을 실어 보낸다.
+   */
+  manualLineIdsByPath: Record<string, number[]>;
+  /**
+   * 아티스트가 화면에서 뺀 검출 결과. 위 지정의 반대 방향이고, 이것을 함께
+   * 보내야 배치가 사이드카에서 그 잎을 되살리지 않는다.
+   */
+  rejectedLineIdsByPath: Record<string, number[]>;
+  /**
+   * 작업 프로세스 수 — 파일 패널의 워커 드롭다운(전체 캐시와 같은 값)이다.
+   * 2 이상이면 파일들을 워커 프로세스에 나눠 내보낸다: 메인 엔진(stdin 직렬)이
+   * 비므로 배치 중에도 미리보기가 살고, 파일 단위 병렬이라 배치 자체도 빨라진다.
+   * 1이면 지금까지의 직렬 경로 그대로다.
+   */
+  workers: number;
   onError: (title: string, error: EngineError) => void;
+  /**
+   * 배치가 도는 동안 배경 큐들이 비켜설 수 있도록 알린다. 파일 사이의 틈은
+   * 사람이 누른 것을 처리하라고 생긴 것이지, 미리보기 준비가 끼어들라고 생긴
+   * 것이 아니다.
+   */
+  onRunningChange: (running: boolean) => void;
 }
 
 interface ProgressState {
@@ -36,11 +91,26 @@ function fileName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+function imageLineEnabled(preset: Preset): boolean {
+  return ((preset as Preset & { imageLine?: { enabled?: boolean } }).imageLine?.enabled) === true;
+}
+
+/** 중지하고 남은 실행. 재개가 그대로 이어받도록 원래 설정을 함께 든다. */
+interface StoppedRun {
+  paths: string[];
+  preset: Preset;
+  outputDir: string | null;
+  planned: PlannedBatchOutput[];
+  /** 시작할 때 사람이 고른 덮어쓰기 여부. 재개가 그것을 바꾸면 안 된다. */
+  overwrite: boolean;
+}
+
 interface PendingRun {
   paths: string[];
   preset: Preset;
   outputDir: string | null;
   conflicts: string[];
+  planned: PlannedBatchOutput[];
 }
 
 /**
@@ -51,7 +121,7 @@ interface PendingRun {
  * independent of any currently-open session, and the engine keeps going past
  * per-file failures, so this UI only ever renders the final results list.
  */
-export function BatchPanel({ files, onError }: BatchPanelProps) {
+export function BatchPanel({ files, defaultPresetName, manualLineIdsByPath, rejectedLineIdsByPath, workers, onError, onRunningChange }: BatchPanelProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedPresetName, setSelectedPresetName] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set(files.map((f) => f.path)));
@@ -62,6 +132,19 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
   const [results, setResults] = useState<BatchItemResult[] | null>(null);
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [pendingRun, setPendingRun] = useState<PendingRun | null>(null);
+  /** 지금까지 몇 파일을 끝냈는지. 파일 안의 stage 진행과 별개다. */
+  const [fileProgress, setFileProgress] = useState<{ done: number; total: number } | null>(null);
+  /**
+   * 중지를 눌렀지만 아직 안 멈춘 상태. 파일 하나는 한 번의 RPC라 중간에 끊을 수
+   * 없으므로, 누른 뒤 그 파일이 끝날 때까지 몇 분이 걸릴 수 있다 — 아무 반응이
+   * 없으면 버튼이 안 먹은 것으로 보이므로 문구로 알린다.
+   */
+  const [stopping, setStopping] = useState(false);
+  const stopRef = useRef(false);
+  /** 워커 모드 실행 핸들. 중지 버튼이 드레인(진행 중 파일은 마침)을 건다. */
+  const batchHandleRef = useRef<BatchExportHandle | null>(null);
+  /** 중지하고 남은 것. 재개가 여기서 이어받는다. 취소하면 버린다. */
+  const [stopped, setStopped] = useState<StoppedRun | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -70,7 +153,12 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
         const loaded = await loadPresets();
         if (cancelled) return;
         setPresets(loaded);
-        setSelectedPresetName(loaded[0]?.name ?? null);
+        // 목록에 없는 이름이면(지웠거나 이름을 바꿨으면) 예전처럼 첫 번째로 간다.
+        const wanted =
+          defaultPresetName && loaded.some((p) => p.name === defaultPresetName)
+            ? defaultPresetName
+            : loaded[0]?.name ?? null;
+        setSelectedPresetName(wanted);
       } catch (e) {
         if (cancelled) return;
         onError("프리셋 목록 불러오기 실패", toEngineError(e));
@@ -80,6 +168,8 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
       cancelled = true;
     };
     // Loaded once on mount; onError identity is stable (useCallback in appStore).
+    // defaultPresetName은 일부러 의존성에 없다 — 넣으면 아티스트가 배치에서 고른
+    // 것이 위쪽 바를 건드릴 때마다 되돌아간다(prop 주석 참고).
   }, []);
 
   useEffect(() => {
@@ -126,20 +216,179 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
     }
   }
 
-  async function runBatch(paths: string[], preset: Preset, dir: string | null, overwrite: boolean) {
+  /**
+   * 파일을 하나씩 돌린다.
+   *
+   * 예전에는 목록 전체를 batchRun 한 번에 넘겼다. 그러면 엔진이 수십 분간
+   * stdin을 읽지 않으므로 취소 요청이 파이프에 앉은 채로 남아 — 중지가 구조적으로
+   * 불가능했고, 그동안 사람이 누른 미리보기·레이어 조작도 전부 그 뒤에 줄을 섰다.
+   *
+   * 한 파일씩 부르면 파일 경계마다 엔진이 비므로 셋이 한꺼번에 풀린다: 중지가
+   * 듣고, 그 틈에 사람이 누른 것이 처리되고, 진행이 파일 단위로 보인다. 엔진은
+   * 그대로다 — run_batch는 원래 경로 목록을 도는 루프였고, 목록이 하나로 줄었을
+   * 뿐이다.
+   */
+  async function runBatch(
+    paths: string[],
+    preset: Preset,
+    dir: string | null,
+    overwrite: boolean,
+    {
+      append = false,
+      planned = planBatchOutputs(paths, dir, preset.outputSuffix, preset.outputFormat),
+    }: { append?: boolean; planned?: PlannedBatchOutput[] } = {}
+  ) {
     setRunning(true);
-    setResults(null);
-    setExpandedRows(new Set());
+    onRunningChange(true);
+    setStopped(null);
+    setStopping(false);
+    stopRef.current = false;
+    if (!append) {
+      setResults(null);
+      setExpandedRows(new Set());
+    }
     setProgress(null);
+    const collected: BatchItemResult[] = append ? [...(results ?? [])] : [];
+    const base = collected.length;
+    const plannedByPath = new Map(planned.map((entry) => [entry.path, entry]));
+    const presetFor = (path: string): Preset => {
+      const outputSuffix = plannedByPath.get(path)?.outputSuffix;
+      return outputSuffix === undefined ? preset : { ...preset, outputSuffix };
+    };
+    const remainingPlan = (remaining: string[]) => {
+      const remainingPaths = new Set(remaining);
+      return planned.filter((entry) => remainingPaths.has(entry.path));
+    };
+    const offerLateConflictRetry = (entries: BatchItemResult[]) => {
+      if (overwrite) return;
+      const retryPaths = entries
+        .filter((entry) =>
+          entry.error?.message.startsWith("output already exists:")
+        )
+        .map((entry) => entry.path);
+      if (retryPaths.length === 0) return;
+      const retryPlan = remainingPlan(retryPaths);
+      setPendingRun({
+        paths: retryPaths,
+        preset,
+        outputDir: dir,
+        conflicts: retryPlan.map((entry) => entry.outputPath),
+        planned: retryPlan,
+      });
+    };
     try {
-      const { results: batchResults } = await batchRun(paths, preset, dir, overwrite);
-      setResults(batchResults);
+      if (workers > 1) {
+        // 워커 모드: 파일들을 워커 프로세스에 나눠 내보낸다. 규칙은 엔진의
+        // batch._process_one 그대로라 산출물이 직렬 경로와 같고, 큐·중지·실패
+        // 가시화는 전체 캐시 스윕과 같은 코어(runBatchExport)를 쓴다. 워커
+        // 스폰(warmWorkersStart)은 이전 세대를 죽이므로 전체 캐시 스윕과 배치가
+        // 겹치면 안 된다 — App의 스윕 효과가 batchRunning 동안 비켜선다.
+        const handle = runBatchExport({
+          paths,
+          workerCount: workers,
+          start: (count) => warmWorkersStart(count, PREVIEW_MAX_SIZE),
+          send: (id, path) => {
+            // 이 파일의 지정만 실어 보낸다 — 직렬 경로와 같은 판단이다.
+            const manual = manualLineIdsByPath[path];
+            const rejected = rejectedLineIdsByPath[path];
+            return warmWorkerSend(id, {
+              path,
+              export: {
+                preset: presetFor(path),
+                outputDir: dir,
+                overwrite,
+                // 스윕이 재둔 특징을 배치 프리셋으로 판단하는 정책 — 값의
+                // 단일 출처는 detectDrawnLines.ts다. 특징 없는 파일(미스윕)은
+                // 엔진이 지금까지처럼 이름 매칭 + 수동 지정만으로 돈다.
+                drawnLines: DRAWN_LINES_POLICY,
+                ...(manual && manual.length > 0 ? { manualLineIds: manual } : {}),
+                ...(rejected && rejected.length > 0 ? { rejectedIds: rejected } : {}),
+              },
+            });
+          },
+          stop: warmWorkersStop,
+          onLine: onWarmWorkerLine,
+          onExit: onWarmWorkerExit,
+          onProgress: (p) => {
+            setFileProgress({ done: p.filesDone, total: p.filesTotal });
+            if (p.stage !== undefined) {
+              setProgress({ path: p.path, stage: p.stage,
+                            current: p.current ?? 0, total: p.total ?? 0 });
+            }
+          },
+          onResult: (entry) => {
+            // 파일마다 표를 갱신한다 — 직렬 경로와 같은 약속. 최종 목록은
+            // finished가 입력 순서로 정렬해 다시 채운다.
+            collected.push(entry as BatchItemResult);
+            setResults([...collected]);
+          },
+        });
+        batchHandleRef.current = handle;
+        setFileProgress({ done: 0, total: paths.length });
+        const outcome = await handle.finished;
+        collected.length = base;
+        collected.push(...(outcome.results as BatchItemResult[]));
+        setResults([...collected]);
+        offerLateConflictRetry(outcome.results as BatchItemResult[]);
+        if (outcome.stopped && outcome.remaining.length > 0) {
+          setStopped({
+            paths: outcome.remaining,
+            preset,
+            outputDir: dir,
+            overwrite,
+            planned: remainingPlan(outcome.remaining),
+          });
+        }
+        return;
+      }
+      for (let i = 0; i < paths.length; i += 1) {
+        if (stopRef.current) {
+          // 남은 것을 들고 있어야 재개가 이어받는다.
+          const remaining = paths.slice(i);
+          setStopped({
+            paths: remaining,
+            preset,
+            outputDir: dir,
+            overwrite,
+            planned: remainingPlan(remaining),
+          });
+          break;
+        }
+        setFileProgress({ done: i, total: paths.length });
+        // 이 파일의 지정만 실어 보낸다. 전부 보내도 엔진이 경로로 골라 쓰지만,
+        // 남의 파일 id가 섞여 들어갈 여지를 아예 없앤다.
+        const manual = manualLineIdsByPath[paths[i]];
+        const rejected = rejectedLineIdsByPath[paths[i]];
+        const { results: one } = await batchRun(
+          [paths[i]], presetFor(paths[i]), dir, overwrite,
+          manual && manual.length > 0 ? { [paths[i]]: manual } : {},
+          DRAWN_LINES_POLICY,
+          rejected && rejected.length > 0 ? { [paths[i]]: rejected } : {}
+        );
+        collected.push(...one);
+        // 파일마다 표를 갱신한다 — 끝까지 기다려야 아무것도 안 보이면, 무엇이
+        // 실패했는지 알기까지 한 시간을 기다리게 된다.
+        setResults([...collected]);
+      }
+      offerLateConflictRetry(collected.slice(base));
     } catch (e) {
       onError("배치 실행 실패", toEngineError(e));
     } finally {
+      batchHandleRef.current = null;
       setRunning(false);
+      onRunningChange(false);
+      setStopping(false);
       setProgress(null);
+      setFileProgress(null);
     }
+  }
+
+  function handleStop() {
+    stopRef.current = true;
+    // 워커 모드의 중지는 드레인이다 — 새 파일은 안 먹이고 진행 중 파일은 마친다.
+    // 산출물 쓰기가 원자적이지 않아 즉시 죽이면 반쪽 PSD가 남는다.
+    batchHandleRef.current?.stop();
+    setStopping(true);
   }
 
   async function handleRunClick() {
@@ -152,18 +401,28 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
         onError("배치 실행 실패", { message: "출력 폴더를 선택하세요.", traceback: "" });
         return;
       }
+      if (imageLineEnabled(selectedPreset) && selectedPreset.outputFormat === "jpg") {
+        onError("배치 실행 실패", { message: "imageLine 배치는 PNG 또는 PSD만 지원합니다.", traceback: "" });
+        return;
+      }
 
-      const planned = planBatchOutputs(paths, dir, selectedPreset.outputSuffix);
+      const planned = planBatchOutputs(paths, dir, selectedPreset.outputSuffix, selectedPreset.outputFormat);
       // paths_exist (not plugin-fs's exists) — batch outputs routinely land
       // outside the AppData scope plugin-fs is capability-restricted to.
       const flags = await pathsExist(planned.map((p) => p.outputPath));
       const flagByPath = new Map(planned.map((p, i) => [p.outputPath, flags[i]]));
       const conflicts = await findConflicts(planned, async (p) => flagByPath.get(p) ?? false);
       if (conflicts.length > 0) {
-        setPendingRun({ paths, preset: selectedPreset, outputDir: dir, conflicts });
+        setPendingRun({
+          paths,
+          preset: selectedPreset,
+          outputDir: dir,
+          conflicts,
+          planned,
+        });
         return;
       }
-      await runBatch(paths, selectedPreset, dir, false);
+      await runBatch(paths, selectedPreset, dir, false, { planned });
     } catch (e) {
       onError("배치 실행 실패", toEngineError(e));
     }
@@ -249,16 +508,54 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
       {running && (
         <div className="export-progress">
           <div className="export-progress-bar">
+            {/* 막대는 파일 수로 그린다. 파일 안의 stage 진행은 파일마다 길이가 달라
+                막대가 되감기는 것처럼 보이므로 문구로만 보인다. */}
             <div
               className="export-progress-fill"
-              style={{ width: progress && progress.total > 0 ? `${(progress.current / progress.total) * 100}%` : "0%" }}
+              style={{
+                width: fileProgress && fileProgress.total > 0
+                  ? `${(fileProgress.done / fileProgress.total) * 100}%`
+                  : "0%",
+              }}
             />
           </div>
-          <span className="export-progress-label">
-            {progress
-              ? `${progress.path ? fileName(progress.path) + " - " : ""}${progress.stage} (${progress.current}/${progress.total})`
-              : "실행 중..."}
-          </span>
+          <div className="batch-progress-row">
+            <span className="export-progress-label">
+              {fileProgress ? `파일 ${fileProgress.done}/${fileProgress.total}` : "실행 중..."}
+              {progress
+                ? ` — ${progress.path ? fileName(progress.path) + " " : ""}${progress.stage} (${progress.current}/${progress.total})`
+                : ""}
+            </span>
+            <button type="button" onClick={handleStop} disabled={stopping}>
+              {stopping ? "현재 파일 마치는 중..." : "중지"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {stopped && !running && (
+        <div className="batch-progress-row">
+          <span className="export-progress-label">중지됨 — 남은 파일 {stopped.paths.length}개</span>
+          <button
+            type="button"
+            onClick={() =>
+              void runBatch(
+                stopped.paths,
+                stopped.preset,
+                stopped.outputDir,
+                stopped.overwrite,
+                { append: true, planned: stopped.planned }
+              )
+            }
+          >
+            재개
+          </button>
+          {/* 취소는 남은 목록을 버리는 것뿐이다. 이미 나간 산출물은 그대로 둔다 —
+              지우는 것은 되돌릴 수 없고, 어느 것이 이번 실행의 것인지도 화면이
+              단정할 수 없다. */}
+          <button type="button" onClick={() => setStopped(null)}>
+            취소
+          </button>
         </div>
       )}
 
@@ -275,12 +572,16 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
           <tbody>
             {results.map((r, i) => (
               <Fragment key={r.path}>
-                <tr className={r.ok ? "batch-row-ok" : "batch-row-fail"}>
+                <tr className={`batch-row-${batchOutcome(r)}`}>
                   <td title={r.path}>{fileName(r.path)}</td>
                   <td>
-                    {r.ok ? "성공" : (
+                    {batchOutcome(r) === "ok" ? (
+                      "성공"
+                    ) : (
                       <>
-                        실패{" "}
+                        {/* 쓰기가 실패한 것과 썼는데 검증이 어긋난 것은 다르다 —
+                            뒤엣것은 산출물이 디스크에 있고 열어볼 수 있다. */}
+                        {batchOutcome(r) === "failed" ? "실패" : "확인 필요"}{" "}
                         <button type="button" onClick={() => toggleExpanded(i)}>
                           {expandedRows.has(i) ? "접기" : "자세히"}
                         </button>
@@ -290,11 +591,20 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
                   <td>{r.layerCount ?? "-"}</td>
                   <td title={r.outputPath}>{r.outputPath ? fileName(r.outputPath) : "-"}</td>
                 </tr>
-                {!r.ok && expandedRows.has(i) && r.error && (
+                {batchOutcome(r) !== "ok" && expandedRows.has(i) && (
                   <tr className="batch-row-detail">
                     <td colSpan={4}>
-                      <p className="error-card-message">{r.error.message}</p>
-                      <pre className="error-card-traceback">{r.error.traceback}</pre>
+                      {r.error ? (
+                        <>
+                          <p className="error-card-message">{r.error.message}</p>
+                          <pre className="error-card-traceback">{r.error.traceback}</pre>
+                        </>
+                      ) : (
+                        <p className="error-card-message">
+                          {(r.verification && describeVerification(r.verification)) ??
+                            "무엇이 어긋났는지 엔진이 알려주지 않았습니다."}
+                        </p>
+                      )}
                     </td>
                   </tr>
                 )}
@@ -331,7 +641,13 @@ export function BatchPanel({ files, onError }: BatchPanelProps) {
                 onClick={() => {
                   const r = pendingRun;
                   setPendingRun(null);
-                  void runBatch(r.paths, r.preset, r.outputDir, true);
+                  void runBatch(
+                    r.paths,
+                    r.preset,
+                    r.outputDir,
+                    true,
+                    { planned: r.planned }
+                  );
                 }}
               >
                 덮어쓰기 진행

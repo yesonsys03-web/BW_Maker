@@ -33,14 +33,14 @@ uv pip install --python $VenvPython ./engine "pyinstaller>=6.21"
 # 임포트 게이트 — build-engine.sh와 같은 이유(uv 캐시가 .dist-info만 남기는 일이
 # 있다). 여기서 멈추지 않으면 모듈이 빠진 번들이 "성공"으로 나가 사용자 PC의 첫
 # 요청에서 죽는다.
-& $VenvPython -c "import psd_tools, pytoshop, numpy, PIL"
+& $VenvPython -c "import psd_tools, pytoshop, numpy, PIL, onnxruntime"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "build venv import gate failed -- reinstalling without cache and re-verifying..."
     uv pip install --python $VenvPython --reinstall --no-cache ./engine
-    & $VenvPython -c "import psd_tools, pytoshop, numpy, PIL"
+    & $VenvPython -c "import psd_tools, pytoshop, numpy, PIL, onnxruntime"
     if ($LASTEXITCODE -ne 0) { throw "engine deps not importable in build venv" }
 }
-Write-Host "build venv import gate OK (psd_tools, pytoshop, numpy, PIL)"
+Write-Host "build venv import gate OK (psd_tools, pytoshop, numpy, PIL, onnxruntime)"
 
 Write-Host "Freezing psd_engine (PyInstaller --onedir, console)..."
 # --onedir/--console/--noupx/--name은 spec 안에 있다(스펙이 주어지면 PyInstaller가

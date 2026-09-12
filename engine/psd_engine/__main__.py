@@ -1,3 +1,3 @@
-from .rpc import main
+from .entry import main
 
 main()

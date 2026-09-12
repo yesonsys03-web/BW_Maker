@@ -1,24 +1,163 @@
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { exists, mkdir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
-import type { Preset } from "./types";
+import type { EdgeLines, ImageLineExtraction, OutputFormat, Preset } from "./types";
 
 const PRESETS_FILENAME = "presets.json";
 
-export const DEFAULT_PRESET: Preset = {
-  name: "line 추출",
-  include: { type: "contains", value: "line", caseSensitive: false },
-  excludeGroupPrefixes: ["-"],
+/**
+ * 선화가 아닌 레이어를 걸러내는 기본 어휘. 엔진 DEFAULT_EXCLUDE_TOKENS와 같다.
+ *
+ * `height`는 키 기준선(`CHARACTER HEIGHT LINE` 등)을 뺀다 — 이름에 line이 들어
+ * 있어 include 규칙에 걸리지만 선화가 아니다. 근거 수치는 엔진 쪽 주석에 있다.
+ *
+ * `divide`는 주석 상자의 칸막이 선(`divide lines`)을 뺀다(2026-08-21 아티스트
+ * 판단: "캐릭터 라인이 아니다"). CH 74판 전수 실측에서 33장이 전부 매칭되어
+ * 라인판에 나가고 있었고, 실측 823x8 픽셀 가로 띠다. 그 낱말이 걸리는 것은
+ * `divide lines`·`divide lines copy` 둘뿐이고 BG 26판에는 0장이라 파급이 좁다 —
+ * 같은 `NOTES BOX` 안의 진짜 도해 선화 48장은 그대로 남는다.
+ */
+export const DEFAULT_EXCLUDE_TOKENS = ["col", "colour", "color", "height", "divide"];
+
+/**
+ * 색 경계선 생성 기본값. 엔진 EDGE_DEFAULTS(engine/psd_engine/edges.py)와
+ * threshold/gap/width/minLength/lineAlpha가 같다 — enabled만 TS 쪽에만 있다
+ * (엔진은 edgeLines.get("enabled")로 켜짐 여부를 읽는다). 기본은 꺼짐이라
+ * BG 프리셋과 이미 저장된 모든 프리셋은 이 기능 도입 전과 똑같이 동작한다.
+ *
+ * `width: 0`은 **자동**이다 — 그 뷰 자신의 라인 굵기에서 유도한다. 이 값들이
+ * 엔진 기본값과 같아야 하는 이유가 여기서 드러난다: 프런트는 다섯 수치를 **항상**
+ * 실어 보내므로, 여기 0이 아닌 값이 있으면 엔진의 자동 판정을 매번 덮어쓴다.
+ * 한동안 여기만 5로 남아 있어서 엔진이 자동을 지원해도 화면에서는 늘 5가 강제됐다.
+ */
+export const DEFAULT_EDGE_LINES: EdgeLines = {
+  enabled: false, threshold: 24, gap: 4, width: 0, minLength: 8, lineAlpha: 64,
+  colourMode: "composite", edgeMode: "region", widthScale: 1,
+};
+
+export const DISABLED_IMAGE_LINE: ImageLineExtraction = {
+  enabled: false, version: 1, darkThreshold: 254, boundaryThreshold: 32, minLength: 8, width: 1,
+};
+
+export const COLOR_TO_LINE_IMAGE_LINE: ImageLineExtraction = {
+  enabled: true, version: 1, darkThreshold: 254, boundaryThreshold: 32, minLength: 8, width: 1,
+};
+export const COLOR_TO_LINE_COLOR = "#3d3d3d";
+
+/**
+ * 두 기본 프리셋이 공유하는 부분. 값은 납품 데이터에서 검증된 것이지 임의의
+ * 초기값이 아니다 — merge/mergeRule/naming/lineColor는 픽셀 기준선(납품 BG 26장,
+ * `baseline/hh0306.jsonl`)을 뜬 그 설정이고, 아티스트가 실제로 쓰던 값과도 같다.
+ * (그전 기본값은 merge "none" / naming "pathPrefix" / lineColor null이었는데,
+ * 아무도 그대로 쓰지 않아서 프리셋을 골라도 바로 작업이 안 됐다.)
+ */
+const SHARED: Omit<Preset, "name" | "excludeGroupPrefixes" | "edgeLines" | "imageLine"> = {
+  include: { type: "contains", value: "line, lineart", caseSensitive: false },
   matchGroups: true,
   includeHidden: true,
-  merge: "none",
+  merge: "byElement",
   roleTokens: ["UL", "OL_UL", "OL"],
-  mergeRule: "role",
-  naming: "pathPrefix",
+  mergeRule: "group",
+  naming: "original",
   outputSuffix: "_LINE",
   embedPreview: true,
-  lineColor: null,
+  lineColor: "#000000",
   splitLayers: false,
+  outputFormat: "psd",
+  excludeTokens: [...DEFAULT_EXCLUDE_TOKENS],
 };
+
+/**
+ * 배경 판용. 경계선 생성은 끈다 — 그 기능은 캐릭터 모델 전용이다.
+ *
+ * BG만 `neon`을 라인 어휘에 더한다(2026-08-19 아티스트 결정). 납품 BG 26장
+ * 전수 실측에서 도시 판의 네온 간판·튜브 47장이 전부 가는 획 그림인데 이름에
+ * line이 없어 빠지고 있었다. 다만 같은 이름 아래 빛 장식(점 전구·글로 막대)이
+ * 섞여 있으므로 자동 포함으로 끝내지 않는다 — 네온으로 걸린 레이어에는 트리에
+ * "라인인지 확인 필요" 배지가 붙는다(LayerTree + layerNames.isNeonName).
+ */
+export const BG_PRESET: Preset = {
+  ...SHARED,
+  name: "BG",
+  include: { type: "contains", value: "line, lineart, neon", caseSensitive: false },
+  excludeGroupPrefixes: ["-"],
+  edgeLines: { ...DEFAULT_EDGE_LINES },
+  imageLine: { ...DISABLED_IMAGE_LINE },
+};
+
+/**
+ * 캐릭터 모델 판용. BG와 **세 가지만** 다르다.
+ *
+ * - 라인 어휘에 `neon`이 없다(SHARED 그대로). 네온 간판은 배경 판의 물건이고,
+ *   캐릭터 판에서 neon이 걸리면 그건 의상 장식 색 레이어일 가능성이 크다.
+ * - 그룹 접두사에 `HEIGHTS`, `TEMPLATE`, `COLOR PALETTE`를 더한다. 캐릭터 판에만
+ *   있는 참고용 그룹이다(BG 26장 전수에서 이 이름 0건이라 BG에 넣어도 무해하지만,
+ *   넣지 않는 편이 각 프리셋이 무엇을 위한 것인지 분명하다).
+ * - 색 경계선 생성을 켠다. 나머지 수치는 엔진 기본값 그대로다 — 굵기는 자동
+ *   (`width: 0`), 색 그림은 정확(composite), 경계는 영역(region).
+ *
+ * `height` 토큰은 SHARED에 있어 양쪽 다 걸린다. 키 기준선(`CHARACTER HEIGHT LINE`)
+ * 은 캐릭터에만 있고 BG에는 0건이라, 공유해도 BG 결과가 바뀌지 않는다.
+ */
+export const CHAR_PRESET: Preset = {
+  ...SHARED,
+  name: "CHAR",
+  excludeGroupPrefixes: ["-", "HEIGHTS", "TEMPLATE", "COLOR PALETTE"],
+  edgeLines: { ...DEFAULT_EDGE_LINES, enabled: true },
+  imageLine: { ...DISABLED_IMAGE_LINE },
+};
+
+/**
+ * 소품(PP/PR) 판용. CHAR와 **한 가지만** 다르다: 색경계선 검출이 픽셀 걸음
+ * (edgeMode "change")이다.
+ *
+ * 소품 판은 색 그림이 통째로 구워져 있고(무늬 선까지 컬러 잎 안에) 광택이
+ * ~30px 램프로 번져 있는 경우가 있다. 기본 검출(region)은 램프의 계단 색
+ * 하나하나를 대표색으로 삼아 이웃 간 거리가 전부 게이트 아래로 쪼개지므로
+ * — 게이트 사슬 — 총 34짜리 광택 경계를 통째로 기각한다(2026-08-13 신고 판
+ * 실측). change는 그 판에서 아티스트 마크업과 일치하는 획을 냈다.
+ *
+ * 뷰 단위 자동 판별은 세 가지 신호(흡수 비율·넓은 창 합집합·거리 게이트)로
+ * 시도했고 전부 전수 감사가 기각했다 — 캐릭터 음영 램프와 광택 램프가
+ * 기하학적으로 같은 부류라서다. 그래서 판 종류 단위로 가른다: 아티스트가
+ * 이미 쓰는 규칙 형태(BG냐 CHAR냐)와 같아서, 소품 폴더(PP/PR)의 판이면
+ * PROP을 고르면 된다.
+ */
+export const PROP_PRESET: Preset = {
+  ...SHARED,
+  name: "PROP",
+  excludeGroupPrefixes: ["-", "HEIGHTS", "TEMPLATE", "COLOR PALETTE"],
+  // threshold 12: 광택 띠 경계는 단차 24~34 언저리에다 자리마다 더 약해서,
+  // 기본 24로는 아티스트가 화살표로 짚은 구간 절반이 빠졌다. 신고 판 실측
+  // 스윕(24/16/12/8)에서 12가 화살표 전 구간을 덮고 잡선이 없는 값.
+  // 블러(CHANGE_BLUR_RADIUS)가 반점·지터 바닥을 ~3까지 눌러줘서 가능한
+  // 여유다.
+  //
+  // 굵기는 자동(원본 라인과 동일) 그대로 둔다. "50% 얇게"를 실측(widthScale
+  // 0.5)까지 갔다가 아티스트가 철회했다 — 얇아지면 능선의 미세한 흔들림이
+  // 드러나 "라인에 노이즈"로 보인다. 굵기가 그 흔들림을 덮는 것까지가
+  // 자동 굵기의 역할이다.
+  edgeLines: {
+    ...DEFAULT_EDGE_LINES, enabled: true, edgeMode: "change", threshold: 12,
+  },
+  imageLine: { ...DISABLED_IMAGE_LINE },
+};
+
+export const COLOR_TO_LINE_PRESET: Preset = {
+  ...SHARED,
+  name: "color_to_line",
+  excludeGroupPrefixes: [],
+  merge: "none",
+  outputSuffix: "_LINE",
+  embedPreview: false,
+  lineColor: COLOR_TO_LINE_COLOR,
+  splitLayers: false,
+  outputFormat: "png",
+  edgeLines: { ...DEFAULT_EDGE_LINES },
+  imageLine: { ...COLOR_TO_LINE_IMAGE_LINE },
+};
+
+/** 처음 실행할 때 깔리는 프리셋. 고르면 바로 작업할 수 있어야 한다. */
+export const DEFAULT_PRESETS: Preset[] = [BG_PRESET, CHAR_PRESET, PROP_PRESET, COLOR_TO_LINE_PRESET];
 
 /** 색 통일을 켤 때 처음 제안하는 색. 라인 아트의 기본값. */
 export const DEFAULT_LINE_COLOR = "#000000";
@@ -40,78 +179,203 @@ const MERGE_MODES = new Set(["none", "all", "perGroup", "byElement"]);
 
 const MERGE_RULES = new Set(["role", "group", "plane"]);
 
+export interface OutputFormatOption {
+  value: OutputFormat;
+  label: string;
+}
+
+/**
+ * 출력 포맷 선택지의 유일한 출처. ExportDialog와 PresetDialog가 그대로 렌더링에
+ * 쓰고, 아래 OUTPUT_FORMATS(검증기)도 여기서 값만 뽑아 쓴다 — 세 군데가 각자
+ * 같은 목록을 따로 적으면, 하나만 바뀌었을 때 나머지가 조용히 어긋난다.
+ */
+export const OUTPUT_FORMAT_OPTIONS: OutputFormatOption[] = [
+  { value: "psd", label: "원본 따름 (.psd / .psb)" },
+  { value: "png", label: "PNG — 투명 배경" },
+  { value: "jpg", label: "JPG — 흰 배경" },
+];
+
+export const IMAGE_LINE_OUTPUT_FORMAT_OPTIONS: OutputFormatOption[] = OUTPUT_FORMAT_OPTIONS.filter((o) => o.value !== "jpg");
+
+export function outputFormatsForPreset(preset: Preset | undefined): OutputFormatOption[] {
+  return preset?.imageLine?.enabled ? IMAGE_LINE_OUTPUT_FORMAT_OPTIONS : OUTPUT_FORMAT_OPTIONS;
+}
+
+const OUTPUT_FORMATS = new Set<string>(OUTPUT_FORMAT_OPTIONS.map((o) => o.value));
+
 /** byRole 병합의 기본 역할 토큰(아래→위 순서). 엔진 DEFAULT_ROLE_TOKENS와 같다. */
 export const DEFAULT_ROLE_TOKENS = ["UL", "OL_UL", "OL"];
+
+/**
+ * 마지막으로 고른 프리셋 이름을 남기는 localStorage 키. 프리셋은 사용자가
+ * 바꾸지 않는 한 저절로 바뀌면 안 되고, 그 규칙은 리마운트·재시작보다 위에
+ * 있다 — 켤 때마다 목록 첫 항목으로 돌아가면 그 자체가 "허락 없이 바뀐 것"이다.
+ */
+export const SELECTED_PRESET_STORAGE_KEY = "bwMaker.selectedPreset";
 const NAMING_MODES = new Set(["pathPrefix", "original"]);
 
 /**
  * Validates and normalizes one parsed JSON entry into a `Preset`. Throws a
- * descriptive error (including the array index and offending field) on any
- * shape mismatch — valid-but-wrong-shaped JSON must never silently pass
- * through as a `Preset` and blow up later deep inside PresetDialog/engine
- * calls with an opaque TypeError.
+ * descriptive error (including the field name and path) on any shape mismatch —
+ * valid-but-wrong-shaped JSON must never silently pass through as a `Preset`
+ * and blow up later deep inside PresetDialog/engine calls with an opaque TypeError.
+ *
+ * @param value The value to validate
+ * @param index The array index (used in default prefix)
+ * @param prefix Optional prefix for error messages (default: `presets.json[index]`)
  */
-function validatePreset(value: unknown, index: number): Preset {
-  const prefix = `presets.json[${index}]`;
+export function validatePreset(value: unknown, index: number, prefix?: string): Preset {
+  const msgPrefix = prefix ?? `presets.json[${index}]`;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${prefix}: 객체가 아닙니다.`);
+    throw new Error(`${msgPrefix}: 객체가 아닙니다.`);
   }
   const v = value as Record<string, unknown>;
 
-  if (typeof v.name !== "string") throw new Error(`${prefix}.name: 문자열이 아닙니다.`);
+  if (typeof v.name !== "string") throw new Error(`${msgPrefix}.name: 문자열이 아닙니다.`);
 
   if (typeof v.include !== "object" || v.include === null) {
-    throw new Error(`${prefix}.include: 객체가 아닙니다.`);
+    throw new Error(`${msgPrefix}.include: 객체가 아닙니다.`);
   }
   const include = v.include as Record<string, unknown>;
   if (typeof include.type !== "string" || !INCLUDE_TYPES.has(include.type)) {
-    throw new Error(`${prefix}.include.type: "contains" 또는 "regex"가 아닙니다.`);
+    throw new Error(`${msgPrefix}.include.type: "contains" 또는 "regex"가 아닙니다.`);
   }
-  if (typeof include.value !== "string") throw new Error(`${prefix}.include.value: 문자열이 아닙니다.`);
+  if (typeof include.value !== "string") throw new Error(`${msgPrefix}.include.value: 문자열이 아닙니다.`);
   if (typeof include.caseSensitive !== "boolean") {
-    throw new Error(`${prefix}.include.caseSensitive: boolean이 아닙니다.`);
+    throw new Error(`${msgPrefix}.include.caseSensitive: boolean이 아닙니다.`);
   }
 
   if (!Array.isArray(v.excludeGroupPrefixes) || !v.excludeGroupPrefixes.every((s) => typeof s === "string")) {
-    throw new Error(`${prefix}.excludeGroupPrefixes: 문자열 배열이 아닙니다.`);
+    throw new Error(`${msgPrefix}.excludeGroupPrefixes: 문자열 배열이 아닙니다.`);
   }
-  if (typeof v.matchGroups !== "boolean") throw new Error(`${prefix}.matchGroups: boolean이 아닙니다.`);
-  if (typeof v.includeHidden !== "boolean") throw new Error(`${prefix}.includeHidden: boolean이 아닙니다.`);
+  if (typeof v.matchGroups !== "boolean") throw new Error(`${msgPrefix}.matchGroups: boolean이 아닙니다.`);
+  if (typeof v.includeHidden !== "boolean") throw new Error(`${msgPrefix}.includeHidden: boolean이 아닙니다.`);
   // byRole은 요소별 병합으로 대체되기 전 잠깐 존재했던 이름이다. 그 사이에
   // 저장된 프리셋이 로드에서 튕기지 않도록 새 이름으로 읽어준다.
   if (v.merge === "byRole") v.merge = "byElement";
   if (typeof v.merge !== "string" || !MERGE_MODES.has(v.merge)) {
-    throw new Error(`${prefix}.merge: "none"/"all"/"perGroup" 중 하나가 아닙니다.`);
+    throw new Error(`${msgPrefix}.merge: "none"/"all"/"perGroup" 중 하나가 아닙니다.`);
   }
   if (typeof v.naming !== "string" || !NAMING_MODES.has(v.naming)) {
-    throw new Error(`${prefix}.naming: "pathPrefix" 또는 "original"이 아닙니다.`);
+    throw new Error(`${msgPrefix}.naming: "pathPrefix" 또는 "original"이 아닙니다.`);
   }
-  if (typeof v.outputSuffix !== "string") throw new Error(`${prefix}.outputSuffix: 문자열이 아닙니다.`);
+  if (typeof v.outputSuffix !== "string") throw new Error(`${msgPrefix}.outputSuffix: 문자열이 아닙니다.`);
   // roleTokens도 나중에 추가된 항목이라 그 전에 저장된 파일에는 없다 — 없으면
   // 기본값으로 읽고, 들어있는데 모양이 어긋나면 통과시키지 않는다.
   // splitLayers도 나중에 추가된 항목 — 없으면 기본값(합쳐서 한 파일)으로 읽는다.
   if (v.splitLayers !== undefined && typeof v.splitLayers !== "boolean") {
-    throw new Error(`${prefix}.splitLayers: boolean이 아닙니다.`);
+    throw new Error(`${msgPrefix}.splitLayers: boolean이 아닙니다.`);
   }
   // mergeRule도 나중에 추가된 항목 — 없으면 기존 동작(역할 접미사)으로 읽는다.
   if (v.mergeRule !== undefined && (typeof v.mergeRule !== "string" || !MERGE_RULES.has(v.mergeRule))) {
-    throw new Error(`${prefix}.mergeRule: "role"/"group"/"plane" 중 하나가 아닙니다.`);
+    throw new Error(`${msgPrefix}.mergeRule: "role"/"group"/"plane" 중 하나가 아닙니다.`);
   }
   if (v.roleTokens !== undefined) {
     if (!Array.isArray(v.roleTokens) || !v.roleTokens.every((t) => typeof t === "string")) {
-      throw new Error(`${prefix}.roleTokens: 문자열 배열이 아닙니다.`);
+      throw new Error(`${msgPrefix}.roleTokens: 문자열 배열이 아닙니다.`);
     }
   }
-  if (typeof v.embedPreview !== "boolean") throw new Error(`${prefix}.embedPreview: boolean이 아닙니다.`);
+  // excludeTokens도 나중에 추가된 항목 — 없으면 기본 어휘로 읽는다. 빈 배열은
+  // "제외하지 않겠다"는 뜻이므로 기본값으로 되돌리지 않는다.
+  if (v.excludeTokens !== undefined) {
+    if (!Array.isArray(v.excludeTokens) || !v.excludeTokens.every((t) => typeof t === "string")) {
+      throw new Error(`${msgPrefix}.excludeTokens: 문자열 배열이 아닙니다.`);
+    }
+  }
+  if (typeof v.embedPreview !== "boolean") throw new Error(`${msgPrefix}.embedPreview: boolean이 아닙니다.`);
   // lineColor는 나중에 추가된 항목이라, 그 이전에 저장된 presets.json에는 아예
   // 없다. 없는 것은 "원본 색 유지"(null)로 읽는다 — 형식이 깨진 값과 달리
   // 구버전 파일은 잘못된 것이 아니기 때문이다. 반대로 들어있는데 형식이
   // 어긋나면 통과시키지 않는다.
   if (v.lineColor !== undefined && v.lineColor !== null) {
     if (typeof v.lineColor !== "string" || !isValidLineColor(v.lineColor)) {
-      throw new Error(`${prefix}.lineColor: null 또는 "#RRGGBB" 형식이 아닙니다.`);
+      throw new Error(`${msgPrefix}.lineColor: null 또는 "#RRGGBB" 형식이 아닙니다.`);
     }
   }
+  // outputFormat도 나중에 추가된 항목이라 그 이전에 저장된 presets.json에는
+  // 아예 없다. 없는 것은 "원본 따름"(psd)으로 읽는다 — 구버전 파일은 잘못된
+  // 것이 아니기 때문이다. 반대로 들어있는데 모르는 값이면 통과시키지 않는다.
+  if (v.outputFormat !== undefined && !OUTPUT_FORMATS.has(v.outputFormat as string)) {
+    throw new Error(`${msgPrefix}.outputFormat: "psd", "png", "jpg" 중 하나가 아닙니다.`);
+  }
+  // edgeLines도 나중에 추가된 항목이라 그 이전 presets.json에는 없다. 없는 것은
+  // 꺼짐으로 읽는다 — 구버전 파일은 잘못된 것이 아니다. 반대로 들어있는데 형식이
+  // 어긋나면 통과시키지 않는다.
+  // 키 자체가 없는 것(구버전 파일)과 키는 있는데 객체가 아닌 것(손상된 파일)을
+  // 구분해야 한다 — typeof만으로는 null과 배열도 "object"로 잡히므로 따로
+  // 걸러낸다. 여기서 조용히 기본값으로 바꿔치기하면, 파일에 적힌 값을 무시한
+  // 채로 내보내기가 진행되어 아티스트가 의도하지 않은 결과물을 받게 된다 —
+  // 차라리 막는 편이 낫다.
+  if (
+    v.edgeLines !== undefined &&
+    (typeof v.edgeLines !== "object" || v.edgeLines === null || Array.isArray(v.edgeLines))
+  ) {
+    throw new Error(`${msgPrefix}.edgeLines: 객체가 아닙니다.`);
+  }
+  const edge = { ...DEFAULT_EDGE_LINES, ...((v.edgeLines as object | undefined) ?? {}) };
+  if (typeof edge.enabled !== "boolean") {
+    throw new Error(`${msgPrefix}.edgeLines.enabled: boolean이 아닙니다.`);
+  }
+  for (const key of ["threshold", "gap", "width", "minLength", "lineAlpha"] as const) {
+    if (
+      typeof edge[key] !== "number" ||
+      !Number.isFinite(edge[key]) ||
+      !Number.isInteger(edge[key]) ||
+      edge[key] < 0
+    ) {
+      throw new Error(`${msgPrefix}.edgeLines.${key}: 0 이상의 정수가 아닙니다.`);
+    }
+  }
+  // 정수가 아닌 배율이라 위 목록과 따로 검사한다. 0은 "획 없음"이 아니라
+  // 실수로만 나올 값이라 막는다(끄려면 enabled가 있다).
+  if (
+    typeof edge.widthScale !== "number" ||
+    !Number.isFinite(edge.widthScale) ||
+    edge.widthScale <= 0 ||
+    edge.widthScale > 4
+  ) {
+    throw new Error(`${msgPrefix}.edgeLines.widthScale: 0 초과 4 이하의 수가 아닙니다.`);
+  }
+  // 저장된 프리셋에는 이 두 키가 없다(각 옵션이 생기기 전에 저장된 것들). 위의
+  // 스프레드가 둘 다 기본값으로 메운다 — colourMode는 composite라 예전 프리셋이
+  // 예전 동작 그대로지만, edgeMode는 일부러 그렇지 않다. 기본값이 region(새 검출)
+  // 이라, edgeMode가 없던 예전 프리셋은 이제 새 검출을 쓴다 — region이 옛 change를
+  // 밀어낸 이유가 바로 아티스트가 change를 결함으로 신고했기 때문이다(설계 문서 3절).
+  if (edge.colourMode !== "composite" && edge.colourMode !== "paste") {
+    throw new Error(`${msgPrefix}.edgeLines.colourMode: composite 또는 paste가 아닙니다.`);
+  }
+  if (edge.edgeMode !== "region" && edge.edgeMode !== "change") {
+    throw new Error(`${msgPrefix}.edgeLines.edgeMode: region 또는 change가 아닙니다.`);
+  }
+  if (
+    v.imageLine !== undefined &&
+    (typeof v.imageLine !== "object" || v.imageLine === null || Array.isArray(v.imageLine))
+  ) {
+    throw new Error(`${msgPrefix}.imageLine: 객체가 아닙니다.`);
+  }
+  const parsedImageLine = { ...DISABLED_IMAGE_LINE, ...((v.imageLine as object | undefined) ?? {}) };
+  if (typeof parsedImageLine.enabled !== "boolean") {
+    throw new Error(`${msgPrefix}.imageLine.enabled: boolean이 아닙니다.`);
+  }
+  if (parsedImageLine.version !== 1) {
+    throw new Error(`${msgPrefix}.imageLine.version: 1이 아닙니다.`);
+  }
+  for (const key of ["darkThreshold", "boundaryThreshold", "minLength", "width"] as const) {
+    if (
+      typeof parsedImageLine[key] !== "number" ||
+      !Number.isFinite(parsedImageLine[key]) ||
+      !Number.isInteger(parsedImageLine[key]) ||
+      parsedImageLine[key] < 0
+    ) {
+      throw new Error(`${msgPrefix}.imageLine.${key}: 0 이상의 정수가 아닙니다.`);
+    }
+  }
+  if (parsedImageLine.enabled && v.outputFormat === "jpg") {
+    throw new Error(`${msgPrefix}.outputFormat: imageLine은 png 또는 psd만 지원합니다.`);
+  }
+  const imageLine = parsedImageLine.enabled
+    ? { ...COLOR_TO_LINE_IMAGE_LINE }
+    : parsedImageLine;
 
   return {
     name: v.name,
@@ -129,8 +393,14 @@ function validatePreset(value: unknown, index: number): Preset {
     naming: v.naming as Preset["naming"],
     outputSuffix: v.outputSuffix,
     embedPreview: v.embedPreview,
-    lineColor: (v.lineColor as string | null | undefined) ?? null,
+    lineColor: imageLine.enabled
+      ? COLOR_TO_LINE_COLOR
+      : (v.lineColor as string | null | undefined) ?? null,
     splitLayers: (v.splitLayers as boolean | undefined) ?? false,
+    outputFormat: (v.outputFormat as OutputFormat | undefined) ?? "psd",
+    excludeTokens: (v.excludeTokens as string[] | undefined) ?? [...DEFAULT_EXCLUDE_TOKENS],
+    edgeLines: edge,
+    imageLine,
   };
 }
 
@@ -141,18 +411,93 @@ function validatePresetList(value: unknown): Preset[] {
 }
 
 /**
- * Loads presets from `appDataDir()/presets.json`. Returns [DEFAULT_PRESET]
- * when the file doesn't exist yet (first run). Malformed JSON and
- * well-formed-but-wrong-shaped JSON are NOT absorbed here — both throw and
+ * Parses and validates a raw presets.json string into Preset[], with no
+ * filesystem access. `loadPresets` below is this plus the disk read — pulled
+ * apart so validation rules (esp. the "missing key is fine, wrong-shaped key
+ * throws" family) can be exercised directly without going through Tauri fs
+ * mocks for every case.
+ */
+export function parsePresets(raw: string): Preset[] {
+  const parsed: unknown = JSON.parse(raw);
+  return validatePresetList(parsed);
+}
+
+/**
+ * 기본 프리셋(BG·CHAR)은 **어느 컴퓨터에서든** 목록에 있어야 한다.
+ *
+ * 파일이 없을 때만 기본값을 주면 그 약속이 깨진다: 앱을 새로 설치해도 appData는
+ * 지워지지 않으므로, 옛 버전이 써둔 `presets.json`이 남아 있는 컴퓨터에서는 그
+ * 옛 목록만 뜨고 BG·CHAR이 아예 안 보인다(실제로 그런 컴퓨터가 있었다 — 지금
+ * 소스에 없는 이름의 프리셋 하나만 떠 있었다). 그래서 읽어온 목록에 **없는**
+ * 기본 프리셋만 끼워 넣는다. 이름이 같은 것이 이미 있으면 손대지 않는다 —
+ * 아티스트가 고쳐 쓰는 판이 그쪽이다.
+ *
+ * **앞에 끼운다.** 새로 설치한 컴퓨터와 같은 순서로 보이게 하려는 것이다. 다만
+ * 순서는 눈에만 보이는 값이 아니다 — 배치는 자기 드롭다운의 첫 번째로 출발하므로
+ * (BatchPanel의 `defaultPresetName`), 기본값이 빠져 있던 컴퓨터에서는 배치의
+ * 출발 프리셋도 BG로 바뀐다.
+ *
+ * 디스크에는 쓰지 않는다. `presets.json`은 아티스트가 저장을 누를 때만 바뀐다.
+ * 그래서 일부러 지운 기본 프리셋도 다음 실행에 다시 보인다 — "기본은 항상
+ * 보인다"를 지키는 대가이고, 지우기가 아니라 이름을 바꿔 쓰는 것이 답이다.
+ */
+/**
+ * 저장된 프리셋의 `excludeTokens`에 **빠진 기본 낱말을 더해 준다.**
+ *
+ * 저장된 presets.json은 값이 박혀 있어 기본값 갱신을 안 받는다(parsePresets는
+ * 필드가 있으면 그 값을 쓴다). 네온 때 이 함정으로 아티스트 기계가 배포만으로는
+ * 안 바뀌어 손으로 고쳐야 했고, 2026-08-21에 `divide`를 더할 때 같은 자리에
+ * 다시 걸렸다 — 이 기계의 두 프리셋 다 옛 다섯 낱말을 값으로 들고 있었다.
+ *
+ * **손대지 않은 기본 목록만 채운다.** 저장된 낱말이 전부 기본 어휘에 있는
+ * 것이면(= 아티스트가 자기 낱말을 넣은 적이 없으면) 빠진 기본을 더하고, 자기
+ * 낱말이 하나라도 있으면 그대로 둔다. 실제 기계들은 옛 기본 그대로를 들고 있어
+ * 이 규칙으로 전부 고쳐지고, `["fx","temp"]` 같은 손수 만든 어휘에는 기본값이
+ * 밀려 들어가지 않는다(그 보호는 "preserves every field exactly" 테스트가 잠근다).
+ *
+ * 빈 목록도 그대로 둔다 — "아무것도 거르지 마라"는 분명한 뜻이라 채우면 그 결정을
+ * 덮는다.
+ *
+ * 남는 성질 하나: 아티스트가 기본 낱말 중 하나를 **일부러 지웠다면** 되살아난다.
+ * 지운 것과 옛 버전에서 저장된 것을 구별할 방법이 파일에 없다(판 번호가 없다).
+ *
+ * 파일을 다시 쓰지는 않는다. 불러온 목록만 고치므로, 아티스트가 프리셋을 저장할
+ * 때 비로소 파일에 반영된다 — 앱을 열기만 해도 설정 파일이 바뀌는 일은 없다.
+ */
+export function withDefaultExcludeTokens(list: Preset[]): Preset[] {
+  return list.map((p) => {
+    const tokens = p.excludeTokens ?? [];
+    if (tokens.length === 0) return p;
+    if (!tokens.every((t) => DEFAULT_EXCLUDE_TOKENS.includes(t))) return p;
+    const missing = DEFAULT_EXCLUDE_TOKENS.filter((t) => !tokens.includes(t));
+    return missing.length === 0 ? p : { ...p, excludeTokens: [...tokens, ...missing] };
+  });
+}
+
+export function withDefaultPresets(list: Preset[]): Preset[] {
+  const names = new Set(list.map((p) => p.name));
+  const missing = DEFAULT_PRESETS.filter((p) => !names.has(p.name)).map((p) => ({ ...p }));
+  // 빠진 기본은 **끝에** 붙인다. 앞에 끼우면 새 기본 프리셋이 추가되는
+  // 버전마다 모든 기계의 첫 프리셋이 바뀌는데, 배치는 자기 드롭다운의 첫
+  // 번째로 돌므로(BatchPanel) 배치 결과가 조용히 달라진다 — PROP을 추가할 때
+  // 실제로 걸릴 뻔한 함정이다. 끝에 붙이면 어떤 기계에서도 이미 있던 첫
+  // 프리셋이 그대로다.
+  return missing.length === 0 ? list : [...list, ...missing];
+}
+
+/**
+ * Loads presets from `appDataDir()/presets.json`. Returns DEFAULT_PRESETS
+ * (BG, CHAR) when the file doesn't exist yet (first run), and tops up any
+ * missing default when it does exist (see withDefaultPresets). Malformed JSON
+ * and well-formed-but-wrong-shaped JSON are NOT absorbed here — both throw and
  * that rejection propagates to the caller, which must surface it (e.g. via
  * ErrorPanel).
  */
 export async function loadPresets(): Promise<Preset[]> {
   const filePath = await presetsFilePath();
-  if (!(await exists(filePath))) return [DEFAULT_PRESET];
+  if (!(await exists(filePath))) return DEFAULT_PRESETS.map((p) => ({ ...p }));
   const raw = await readTextFile(filePath);
-  const parsed: unknown = JSON.parse(raw);
-  return validatePresetList(parsed);
+  return withDefaultExcludeTokens(withDefaultPresets(parsePresets(raw)));
 }
 
 /**

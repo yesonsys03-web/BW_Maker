@@ -31,6 +31,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 from psd_engine.patches import apply_pytoshop_patches
 from pytoshop import enums
 from pytoshop.user import nested_layers
@@ -195,6 +196,48 @@ def main():
             json.dumps(exported["verification"], ensure_ascii=False)[:500],
         )
 
+        # 평면 이미지 전용 ONNX 모델과 가중치가 번들에 함께 들어왔는지 실제
+        # inference까지 실행한다. import 성공만 보면 모델 파일 누락을 못 잡는다.
+        flat = work / "한글 폴더" / "평면 배경.png"
+        pixels = np.full((64, 96, 4), [210, 150, 90, 255], np.uint8)
+        pixels[12:52, 48, :3] = [70, 35, 20]
+        Image.fromarray(pixels, "RGBA").save(flat)
+        response = engine.call("open_psd", path=str(flat))
+        check("평면 PNG 열기", "result" in response, response.get("error"))
+        flat_session = response["result"]["sessionId"]
+        flat_out = work / "한글 폴더" / "평면 배경_LINE.png"
+        response = engine.call(
+            "export_image_line",
+            sessionId=flat_session,
+            outputPath=str(flat_out),
+            outputFormat="png",
+            imageLine={
+                "enabled": True,
+                "version": 1,
+                "darkThreshold": 254,
+                "boundaryThreshold": 32,
+                "minLength": 8,
+                "width": 1,
+            },
+            lineColor="#3d3d3d",
+        )
+        check("동결 ONNX 평면 라인 추출", "result" in response, response.get("error"))
+        check("평면 라인 산출 파일 존재", flat_out.is_file(), str(flat_out))
+
+        # 윈도우 MAX_PATH(260자)를 넘는 경로. `\\?\` 접두사가 없으면 여기서 죽는다.
+        # 이 맥에서는 확인할 수 없고 Windows 러너에서만 진짜로 검증된다.
+        deep = work
+        while len(str(deep)) < 210:
+            deep = deep / "긴폴더이름"
+        deep.mkdir(parents=True, exist_ok=True)
+        long_out = deep / ("내보내기_" + "가" * 40 + "_LINE.psd")
+        response = engine.call("export_psd", sessionId=session_id, includedIds=layer_ids,
+                               operations=[], naming="pathPrefix",
+                               outputPath=str(long_out), overwrite=True)
+        check(f"긴 경로로 내보내기 ({len(str(long_out))}자, 윈도우에서만 유의미)",
+              "result" in response, response.get("error"))
+        check("긴 경로 산출 파일 존재", Path(long_out).is_file())
+
         # 예외는 흡수하지 않고 traceback과 함께 돌아와야 한다.
         response = engine.call("open_psd", path=str(work / "없는 한글 파일.psd"))
         check("없는 파일 → 에러 응답", "error" in response, json.dumps(response)[:300])
@@ -206,6 +249,92 @@ def main():
 
         response = engine.call("존재하지_않는_메서드")
         check("모르는 메서드 → 에러 응답", "error" in response, json.dumps(response)[:300])
+
+        # 전체 캐시 워커 모드. v0.2.7에서 동결 진입점(engine_main.py)이
+        # --warm-worker 분기를 몰라 워커가 **일반 RPC 엔진으로** 떴고 — ready 한
+        # 줄 없이 stdin만 기다렸다 — 빌드 앱의 전체 캐시가 0/6869에서 통째로
+        # 멈췄다. dev는 `-m psd_engine`이라 멀쩡했으므로, 이 검사는 동결본을
+        # 실제로 워커로 띄워야만 잡는다(psd_engine/entry.py 참고). 첫 줄의
+        # ready 이벤트가 판정의 핵심이다: RPC 엔진은 기동 시 아무것도 내지 않는다.
+        cache_dir = work / "타일캐시"
+        worker_tmp = work / "worker-tmp"
+        worker_tmp.mkdir()
+        worker = subprocess.Popen(
+            [str(exe), "--warm-worker", "--max-size", "256"],
+            env={**os.environ, "PSD_ENGINE_TILE_CACHE_DIR": str(cache_dir),
+                 "TMPDIR": str(worker_tmp), "TEMP": str(worker_tmp),
+                 "TMP": str(worker_tmp)},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        worker_watchdog = threading.Timer(60, worker.kill)
+        worker_watchdog.start()
+        try:
+            first = worker.stdout.readline().decode("utf-8", "replace").strip()
+            try:
+                ready_ok = bool(first) and json.loads(first).get("event") == "ready"
+            except ValueError:
+                ready_ok = False
+            check(
+                "워커 모드 기동(ready 이벤트)", ready_ok,
+                f"첫 줄={first!r} — 비어 있으면 동결 진입점이 --warm-worker를 "
+                f"모르고 RPC 엔진으로 뜬 것이다(stderr: "
+                f"{worker.stderr.peek()[:300] if worker.poll() is not None else '살아 있음'})",
+            )
+            request = json.dumps({"path": str(fixture)}, ensure_ascii=False)
+            worker.stdin.write((request + "\n").encode("utf-8"))
+            worker.stdin.flush()
+            file_event = None
+            while file_event is None:
+                line = worker.stdout.readline()
+                if not line:
+                    raise AssertionError(
+                        f"워커가 파일 이벤트 없이 죽었다 (exit={worker.poll()})")
+                message = json.loads(line.decode("utf-8"))
+                if message.get("event") == "file":
+                    file_event = message
+            check("워커가 파일 하나를 끝까지 데움", file_event.get("ok") is True,
+                  json.dumps(file_event, ensure_ascii=False)[:300])
+            check("워커가 타일을 디스크에 쌓음",
+                  cache_dir.is_dir() and any(cache_dir.rglob("*.png")),
+                  str(cache_dir))
+            worker.stdin.close()
+            check("워커 stdin 닫힘 → 정상 종료", worker.wait(timeout=30) == 0)
+        finally:
+            worker_watchdog.cancel()
+            if worker.poll() is None:
+                worker.kill()
+
+        # 뷰 워커 모드(--view-worker). 위와 **같은 종류의 사고**를 막는 검사다 —
+        # 동결 진입점이 이 플래그를 모르면 자식이 일반 RPC 엔진으로 뜨고, 그러면
+        # 판을 나눠 굽는 대신 아무것도 안 굽는다. 화면은 멀쩡하고(부모가 미스로
+        # 보고 순차로 굽는다) 속도만 조용히 원래대로 돌아가므로, 실제로 띄워
+        # 확인하지 않으면 영영 안 드러난다.
+        #
+        # 판정: 뷰 워커는 stdout에 아무것도 안 낸다. RPC 엔진이었다면 이 JSON을
+        # method 없는 요청으로 읽고 **에러 한 줄로 답한다** — 그 차이를 본다.
+        view_job = json.dumps({"path": str(fixture), "opts": {},
+                               "settingsKey": [], "views": []},
+                              ensure_ascii=False)
+        view_worker = subprocess.Popen(
+            [str(exe), "--view-worker"],
+            env={**os.environ, "PSD_ENGINE_TILE_CACHE_DIR": str(cache_dir),
+                 "TMPDIR": str(worker_tmp), "TEMP": str(worker_tmp),
+                 "TMP": str(worker_tmp)},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            vw_out, vw_err = view_worker.communicate(
+                view_job.encode("utf-8"), timeout=60)
+        except subprocess.TimeoutExpired:
+            view_worker.kill()
+            vw_out, vw_err = b"", "(시간 초과)".encode("utf-8")
+        check(
+            "뷰 워커 모드 기동(응답 없이 종료)",
+            view_worker.returncode == 0 and not vw_out.strip(),
+            f"exit={view_worker.returncode} stdout={vw_out[:200]!r} — stdout에 무언가 "
+            f"있으면 동결 진입점이 --view-worker를 모르고 RPC 엔진으로 뜬 것이다 "
+            f"(stderr: {vw_err[:300]!r})",
+        )
 
         exit_code = engine.close()
         check("stdin 닫힘 → 정상 종료", exit_code == 0, f"exit={exit_code}")

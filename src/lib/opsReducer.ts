@@ -12,6 +12,36 @@ export interface Entry {
 export interface OpsState {
   includedIds: number[]; // 체크박스 (정렬된 리프 id, 아래→위)
   previewHiddenIds: number[]; // 눈 아이콘 off (미리보기 전용, 내보내기와 무관)
+  /**
+   * solo (미리보기 전용). 하나라도 있으면 미리보기는 이것만 그리고 체크박스와
+   * 눈을 무시한다 — 이름만으로 라인인지 알 수 없는 레이어를 눈으로 판정하는 용도다.
+   * previewHiddenIds와 독립이라, solo를 풀면 원래 화면이 그대로 돌아온다.
+   */
+  soloIds: number[];
+  /**
+   * 색 경계선 생성의 수동 지정(설계 3.1) — 아티스트가 레이어 트리에서 직접
+   * 짚은 색 레이어(잎) id. 체크박스(includedIds)와 완전히 분리된 별도의
+   * per-layer 집합이다: 체크박스를 그대로 쓰면 지정한 색 레이어가 그 자체로
+   * 내보내기 엔트리가 되어 산출물에 색 레이어가 한 장 끼어든다 — "최종 라인
+   * 레이어만 내보낸다"는 이 기능의 목적과 정면으로 어긋난다.
+   *
+   * 내보내기와 무관하고(soloIds처럼 화면 조작을 위한 것도 아니다), 렌더/
+   * 내보내기 요청의 payload에만 실린다. 프리셋에는 저장하지 않는다 — 어떤
+   * 레이어가 색 원본인지는 파일마다 다른 사실이고 프리셋은 파일과 무관하다.
+   */
+  edgeColourIds: number[];
+  /**
+   * 아티스트가 손으로 "이건 라인이다"라고 지정한 leaf.
+   *
+   * 이름 규칙으로 못 잡는 판이 실제로 있다 — 잎이 7장뿐이고 그중 선화가
+   * `BORDER`라 include 규칙에 하나도 안 걸리는 판을 아티스트가 짚었다. 규칙을
+   * 넓혀 잡으려 하면 다른 판에서 엉뚱한 것이 걸린다.
+   *
+   * 두 곳에서 채워진다: 컨텍스트 메뉴의 "라인으로 지정", 그리고 선택 병합
+   * (병합했다는 것 자체가 "이것들이 내 라인이다"라는 선언이다). 프리셋에는
+   * 저장하지 않는다 — edgeColourIds와 같은 이유로 파일마다 다른 사실이다.
+   */
+  manualLineIds: number[];
   ops: Operation[]; // exclude 제외: merge/rename/reorder/flatten
   entries: Entry[]; // includedIds+ops로부터 계산된 현재 내보내기 목록 (아래→위)
 }
@@ -20,6 +50,11 @@ export type OpsAction =
   | { type: "reset"; includedIds: number[] }
   | { type: "setIncluded"; includedIds: number[] }
   | { type: "togglePreview"; layerId: number }
+  | { type: "toggleSolo"; layerId: number }
+  | { type: "setSolo"; layerIds: number[]; solo: boolean }
+  | { type: "toggleEdgeColour"; layerId: number }
+  | { type: "setEdgeColour"; layerIds: number[]; on: boolean }
+  | { type: "setManualLine"; layerIds: number[]; on: boolean }
   | { type: "pushOp"; op: Operation }
   | { type: "undo" };
 
@@ -284,7 +319,11 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
   switch (action.type) {
     case "reset": {
       const includedIds = action.includedIds;
-      return { includedIds, previewHiddenIds: [], ops: [], entries: buildEntries(includedIds, []) };
+      return {
+        includedIds, previewHiddenIds: [], soloIds: [], edgeColourIds: [],
+        manualLineIds: [],
+        ops: [], entries: buildEntries(includedIds, []),
+      };
     }
     case "setIncluded": {
       const includedIds = action.includedIds;
@@ -297,11 +336,64 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
         : [...state.previewHiddenIds, layerId];
       return { ...state, previewHiddenIds };
     }
+    case "toggleSolo": {
+      const { layerId } = action;
+      const soloIds = state.soloIds.includes(layerId)
+        ? state.soloIds.filter((id) => id !== layerId)
+        : [...state.soloIds, layerId];
+      return { ...state, soloIds };
+    }
+    case "setSolo": {
+      const target = new Set(action.layerIds);
+      const soloIds = action.solo
+        ? Array.from(new Set([...state.soloIds, ...action.layerIds]))
+        : state.soloIds.filter((id) => !target.has(id));
+      return { ...state, soloIds };
+    }
+    case "toggleEdgeColour": {
+      const { layerId } = action;
+      const edgeColourIds = state.edgeColourIds.includes(layerId)
+        ? state.edgeColourIds.filter((id) => id !== layerId)
+        : [...state.edgeColourIds, layerId];
+      return { ...state, edgeColourIds };
+    }
+    case "setEdgeColour": {
+      const target = new Set(action.layerIds);
+      const edgeColourIds = action.on
+        ? Array.from(new Set([...state.edgeColourIds, ...action.layerIds]))
+        : state.edgeColourIds.filter((id) => !target.has(id));
+      return { ...state, edgeColourIds };
+    }
+    case "setManualLine": {
+      // 지정과 동시에 내보내기에도 넣는다. 라인만 목록에는 보이는데 체크가 안 된
+      // 상태는 "지정했는데 안 나갔다"로 이어지고, 그 둘을 따로 눌러야 한다는 걸
+      // 아무도 모른다. 해제는 지정만 거두고 체크는 건드리지 않는다 — 체크는
+      // 아티스트가 직접 만질 수 있는 것이라 되돌리면 그 조작을 덮어쓴다.
+      const target = new Set(action.layerIds);
+      const manualLineIds = action.on
+        ? Array.from(new Set([...state.manualLineIds, ...action.layerIds])).sort((a, b) => a - b)
+        : state.manualLineIds.filter((id) => !target.has(id));
+      if (!action.on) return { ...state, manualLineIds };
+      const includedIds = Array.from(
+        new Set([...state.includedIds, ...action.layerIds]),
+      ).sort((a, b) => a - b);
+      return {
+        ...state, manualLineIds, includedIds,
+        entries: buildEntries(includedIds, state.ops),
+      };
+    }
     case "pushOp": {
       // Throws on invalid refs (unchanged) — caller/UI catches and displays.
       const ops = [...state.ops, action.op];
       const entries = buildEntries(state.includedIds, ops);
-      return { ...state, ops, entries };
+      // 선택 병합은 그 자체가 "이것들이 라인이다"라는 선언이라, 병합 소스를
+      // 라인만 목록에 넣는다. 안 그러면 방금 만든 병합이 라인만에서 안 보여
+      // 아티스트가 자기가 한 일을 확인할 수 없다.
+      const merged = action.op.op === "merge" ? action.op.layerIds : [];
+      const manualLineIds = merged.length
+        ? Array.from(new Set([...state.manualLineIds, ...merged])).sort((a, b) => a - b)
+        : state.manualLineIds;
+      return { ...state, ops, entries, manualLineIds };
     }
     case "undo": {
       const ops = state.ops.slice(0, -1);

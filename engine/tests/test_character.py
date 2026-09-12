@@ -1,0 +1,270 @@
+import pytest
+from pytoshop import enums
+from pytoshop.user import nested_layers
+
+from psd_engine.character import COLOUR_GROUP_NAMES, find_views, manual_views
+from psd_engine.session import SessionStore
+
+from conftest import make_rgb_image, write_psd
+
+
+def _session(path):
+    store = SessionStore()
+    return store.get(store.open(str(path)))
+
+
+def _view_psd(tmp_path, colour_group_name, line_as_group):
+    """뷰 하나짜리 문서. 라인을 잎으로 둘지 그룹으로 둘지 고른다."""
+    colours = nested_layers.Group(name=colour_group_name, layers=[
+        make_rgb_image("hair", (40, 20, 20), 0, 0, 16, 16),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    line = (nested_layers.Group(name="LINES", layers=[
+        make_rgb_image("LINE", (0, 0, 0), 0, 0, 32, 24)])
+        if line_as_group else make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24))
+    p = tmp_path / f"{colour_group_name}_{line_as_group}.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT 3/4", layers=[line, colours])])
+    return p
+
+
+@pytest.mark.parametrize("group_name", sorted(COLOUR_GROUP_NAMES))
+def test_every_colour_group_name_in_the_closed_set_is_found(tmp_path, group_name):
+    s = _session(_view_psd(tmp_path, group_name, line_as_group=False))
+    views = find_views(s)
+    assert len(views) == 1
+    assert views[0]["name"] == "FRONT 3/4"
+    assert len(views[0]["colourIds"]) == 2
+
+
+def test_a_line_group_is_flattened_to_its_leaves(tmp_path):
+    # 실파일에서 lines가 그룹 이름으로만 130회 나온다. 잎만 찾으면 100장 중 22장만 걸렸다.
+    s = _session(_view_psd(tmp_path, "COLORS", line_as_group=True))
+    views = find_views(s)
+    assert len(views) == 1
+    assert len(views[0]["lineIds"]) == 1
+
+
+def test_find_views_excludes_a_hidden_line_leaf_from_line_ids(tmp_path):
+    # 숨은 라인 잎은 포토샵에서도 안 보이고 내보내기에도 안 들어가지만,
+    # _pixel_leaves가 visible을 안 보면 lineIds에 끼어 edges._paste_alpha가 그
+    # 알파를 그대로 붙인다 — 실제로는 선이 없는 자리를 "선이 있다"고 오판해 이
+    # 기능이 그려야 할 바로 그 경계(색으로만 갈린 곳)를 지워 버린다.
+    line_group = nested_layers.Group(name="LINES", layers=[
+        make_rgb_image("visible line", (0, 0, 0), 0, 0, 32, 24),
+        make_rgb_image("hidden line", (0, 0, 0), 0, 0, 32, 24, visible=False),
+    ])
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)])
+    p = tmp_path / "hidden_line.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[line_group, colours])])
+    s = _session(p)
+    views = find_views(s)
+    assert len(views) == 1
+    names = {s["layers_by_id"][lid].name for lid in views[0]["lineIds"]}
+    assert names == {"visible line"}, f"숨은 라인이 lineIds에 들어갔다: {names}"
+
+
+def test_a_palette_group_is_not_a_colour_group(tmp_path):
+    # colour palette 는 46장, color palette 는 36장에 있다. 부분 일치면 전부 오인한다.
+    colours = nested_layers.Group(name="COLOUR PALETTE", layers=[
+        make_rgb_image("swatch", (200, 30, 60), 0, 0, 8, 8)])
+    line = make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24)
+    p = tmp_path / "palette.psd"
+    write_psd(p, [nested_layers.Group(name="TEMPLATE", layers=[line, colours])])
+    assert find_views(_session(p)) == []
+
+
+def test_a_document_with_no_colour_group_yields_no_views(tmp_path):
+    # 군중·배치 시트가 이렇다(실폴더 100장 중 17장). 실패가 아니라 대상이 아니다.
+    p = tmp_path / "crowd.psd"
+    write_psd(p, [nested_layers.Group(name="CROWD", layers=[
+        make_rgb_image("figure", (10, 10, 10), 0, 0, 16, 16)])])
+    assert find_views(_session(p)) == []
+
+
+def test_views_are_found_at_any_nesting_depth(tmp_path):
+    # 실파일에 TURN/CHARACTER/PROFILE/FILLS 처럼 더 깊은 중첩이 있다.
+    inner = nested_layers.Group(name="PROFILE", layers=[
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24),
+        nested_layers.Group(name="FILLS", layers=[
+            make_rgb_image("fill", (200, 30, 60), 0, 0, 32, 24)]),
+    ])
+    p = tmp_path / "deep.psd"
+    write_psd(p, [nested_layers.Group(name="TURN", layers=[
+        nested_layers.Group(name="CHARACTER", layers=[inner])])])
+    views = find_views(_session(p))
+    assert [v["name"] for v in views] == ["PROFILE"]
+
+
+def test_manual_views_group_picked_leaves_by_their_view(tmp_path):
+    # 아티스트는 잎을 고른다. 그 잎의 부모가 사실상의 색 그룹이고, 뷰는 그 부모의 부모다.
+    inner = nested_layers.Group(name="ODD NAME", layers=[
+        make_rgb_image("dark", (40, 20, 20), 0, 0, 16, 16),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    p = tmp_path / "manual.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24), inner])])
+    s = _session(p)
+    assert find_views(s) == [], "이름이 닫힌 집합에 없으므로 자동은 아무것도 못 찾아야 한다"
+
+    picked = [lid for lid, l in s["layers_by_id"].items() if l.name in ("dark", "base")]
+    lines = [lid for lid, l in s["layers_by_id"].items() if l.name == "LINES"]
+    views = manual_views(s, picked, included_ids=lines)
+    assert len(views) == 1
+    assert views[0]["name"] == "FRONT"
+    assert sorted(views[0]["colourIds"]) == sorted(picked)
+    assert views[0]["lineIds"] == lines
+
+
+def test_manual_views_only_take_lines_that_are_being_exported(tmp_path):
+    # 스펙 3.1: 기존 라인은 "내보내기에 이미 포함된" 라인 레이어를 쓴다.
+    inner = nested_layers.Group(name="ODD NAME", layers=[
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)])
+    p = tmp_path / "manual_noline.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24), inner])])
+    s = _session(p)
+    picked = [lid for lid, l in s["layers_by_id"].items() if l.name == "base"]
+    views = manual_views(s, picked, included_ids=[])
+    assert views[0]["lineIds"] == [], "체크하지 않은 라인이 들어왔다"
+
+
+def test_manual_views_find_the_view_through_the_nearest_line_ancestor_with_no_colour_group_at_all(tmp_path):
+    # 색 그룹 자체가 없는 파일(FRONT/{LINES, base, hair}) — 자동 검출이 실패하는
+    # 바로 그 모양이고, 수동 지정이 존재하는 이유다. 뷰는 "line 자식을 가진
+    # 가장 가까운 조상"이라는 한 원칙(_nearest_line_ancestor)으로 찾으므로
+    # 2단(잎→뷰)과 3단(잎→색그룹→뷰, 위 test_manual_views_group_picked_leaves_by_their_view가
+    # 지킨다)이 조건문 없이 같은 코드 경로를 탄다.
+    p = tmp_path / "two_level.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24),
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24),
+        make_rgb_image("hair", (40, 20, 20), 0, 0, 16, 16),
+    ])])
+    s = _session(p)
+    assert find_views(s) == [], "색 그룹이 없으므로 자동은 아무것도 못 찾아야 한다"
+
+    picked = [lid for lid, l in s["layers_by_id"].items() if l.name in ("base", "hair")]
+    lines = [lid for lid, l in s["layers_by_id"].items() if l.name == "LINES"]
+    views = manual_views(s, picked, included_ids=lines)
+    assert len(views) == 1
+    assert views[0]["name"] == "FRONT"
+    assert sorted(views[0]["colourIds"]) == sorted(picked)
+    assert views[0]["lineIds"] == lines, "2단 모양에서 lineIds가 비었다 — 뷰를 못 찾았다는 뜻"
+
+
+def test_manual_views_are_empty_when_nothing_is_picked(tmp_path):
+    s = _session(_view_psd(tmp_path, "COLORS", line_as_group=False))
+    assert manual_views(s, [], included_ids=[1, 2, 3]) == []
+
+
+@pytest.mark.xfail(strict=True, reason="색 그룹 안에 색 그룹 이름이 중첩되면 가짜 뷰가 하나 더 나온다 — 전수 조사에 없던 모양이라 두고 본다. 고치면 이 테스트가 알려준다.")
+def test_a_colour_group_nested_inside_a_colour_group_does_not_make_a_second_view(tmp_path):
+    inner = nested_layers.Group(name="FILLS", layers=[
+        make_rgb_image("f", (200, 30, 60), 0, 0, 16, 16)])
+    colours = nested_layers.Group(name="COLORS", layers=[
+        inner, make_rgb_image("base", (40, 20, 20), 0, 0, 32, 24)])
+    p = tmp_path / "nested.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24), colours])])
+    assert len(find_views(_session(p))) == 1
+
+
+def test_find_views_drops_a_colour_named_leaf_from_inside_a_line_group(tmp_path):
+    # 납품 폴더에서 실제로 이 모양이 나왔다: `LINE` 그룹 안에 `colour`가 들어
+    # 있어서, 라인 알파가 뷰 박스의 95.6%를 덮었다. 그 알파에서 획 굵기를
+    # 유도하므로(edges._auto_width는 가로 런 길이의 중앙값을 쓴다) 굵기가
+    # 캐릭터 몸통 너비인 771px로 나왔고, 옛 PIL 모폴로지에서 그 한 장이 16분을
+    # 잡아먹었다. 굵기만 문제가 아니다 — subtract_lines가 같은 알파를 "이미
+    # 선이 있다"로 보고 박스의 95%에서 경계를 지운다.
+    #
+    # 내보내기 경로는 이런 잎을 excludeTokens로 이미 걸러낸다. 두 경로가 같은
+    # 물음("이 잎이 선화인가")에 다른 답을 내고 있었던 것이 결함이다.
+    line_group = nested_layers.Group(name="LINE", layers=[
+        make_rgb_image("LINE", (0, 0, 0), 0, 0, 32, 24),
+        make_rgb_image("colour", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)])
+    p = tmp_path / "colour_inside_line_group.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[line_group, colours])])
+    s = _session(p)
+    views = find_views(s)
+    assert len(views) == 1
+    names = {s["layers_by_id"][lid].name for lid in views[0]["lineIds"]}
+    assert names == {"LINE"}, f"채색 잎이 lineIds에 들어갔다: {names}"
+
+
+def test_find_views_keeps_a_line_leaf_whose_name_merely_contains_a_colour_word(tmp_path):
+    # 제외는 토큰 단위여야 한다. `colour line`은 색으로 그린 선화이지 채색이
+    # 아니다 — 부분 문자열로 자르면 진짜 선화까지 함께 사라진다.
+    line_group = nested_layers.Group(name="LINES", layers=[
+        make_rgb_image("colourful line", (0, 0, 0), 0, 0, 32, 24),
+    ])
+    colours = nested_layers.Group(name="COLORS", layers=[
+        make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)])
+    p = tmp_path / "colourful_line.psd"
+    write_psd(p, [nested_layers.Group(name="FRONT", layers=[line_group, colours])])
+    s = _session(p)
+    names = {s["layers_by_id"][lid].name for lid in find_views(s)[0]["lineIds"]}
+    assert names == {"colourful line"}, f"선화가 빠졌다: {names}"
+
+
+# ---- colors류 잎 표식 (2026-08-12 확장) ----
+# 같은 납품에서 COLORS가 평평한 레이어 한 장인 판이 나왔다 — 그룹 판과 같은
+# 관례의 압축판이다. 게이트 근거는 find_views docstring과 185장 census에 있다.
+
+def _leaf_view_psd(tmp_path, name, view_layers):
+    p = tmp_path / f"{name}.psd"
+    write_psd(p, [nested_layers.Group(name="ALASTOR", layers=view_layers)])
+    return _session(p)
+
+
+def test_a_flattened_colour_leaf_marks_a_view(tmp_path):
+    s = _leaf_view_psd(tmp_path, "잎표식", [
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24),
+        make_rgb_image("COLORS", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    views = find_views(s)
+    assert len(views) == 1
+    assert views[0]["name"] == "ALASTOR"
+    assert len(views[0]["colourIds"]) == 1
+    assert len(views[0]["lineIds"]) == 1
+
+
+def test_a_colour_leaf_without_line_siblings_is_not_a_view(tmp_path):
+    # 게이트 ①: COLOR PALETTE의 FILLS 같은 참조 잎이 census에서 뷰 120개를
+    # 만들었다 — 라인이 없으면 attach가 어차피 버리므로 애초에 만들지 않는다.
+    s = _leaf_view_psd(tmp_path, "라인없음", [
+        make_rgb_image("FILLS", (200, 30, 60), 0, 0, 32, 24),
+        make_rgb_image("swatch", (40, 20, 20), 0, 0, 16, 16),
+    ])
+    assert find_views(s) == []
+
+
+def test_a_colour_leaf_inside_a_line_named_group_is_not_a_view(tmp_path):
+    # 게이트 ②: LINE 그룹 안의 colour 잎은 트레이스/참조다(census 46개) —
+    # 그걸 뷰로 만들면 라인 그룹 자신 위에 획을 얹게 된다.
+    line_group = nested_layers.Group(name="LINE", layers=[
+        make_rgb_image("colour", (200, 30, 60), 0, 0, 32, 24),
+        make_rgb_image("trace", (0, 0, 0), 0, 0, 32, 24),
+    ])
+    p = tmp_path / "라인그룹안.psd"
+    write_psd(p, [nested_layers.Group(name="ALASTOR", layers=[line_group])])
+    s = _session(p)
+    assert find_views(s) == []
+
+
+def test_a_colour_leaf_next_to_a_colour_group_is_ignored(tmp_path):
+    # 게이트 ③: 색 그룹과 평평 사본이 나란히 있으면(census 5개) 그룹이 정본이다
+    # — 잎까지 뷰로 만들면 같은 라인에 계획 두 번, 획 합성 두 번이 얹힌다.
+    s = _leaf_view_psd(tmp_path, "이중표식", [
+        make_rgb_image("LINES", (0, 0, 0), 0, 0, 32, 24),
+        nested_layers.Group(name="COLORS", layers=[
+            make_rgb_image("base", (200, 30, 60), 0, 0, 32, 24)]),
+        make_rgb_image("COLORS", (200, 30, 60), 0, 0, 32, 24),
+    ])
+    views = find_views(s)
+    assert len(views) == 1
+    assert len(views[0]["colourIds"]) == 1  # 그룹의 base 잎 하나

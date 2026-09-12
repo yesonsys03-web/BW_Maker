@@ -18,6 +18,12 @@ def build_tree(psd):
                 "opacity": int(layer.opacity),
                 "bbox": list(layer.bbox),
                 "hasMask": layer.mask is not None,
+                # 실제로 그려진 채널을 들고 있는지. 종류만으로는 알 수 없다 —
+                # 스마트오브젝트·셰이프는 래스터화된 픽셀을 함께 저장하지만
+                # (그래서 render.py의 extract_rgba가 픽셀 레이어와 똑같이 읽는다),
+                # 조정 레이어는 그렇지 않다. 그리는 대상으로 삼아도 되는지는
+                # 이 값으로 판단한다.
+                "hasPixels": False if layer.is_group() else bool(layer.has_pixels()),
                 "path": path + [layer.name],
             }
             nodes_by_id[node_id] = node

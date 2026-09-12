@@ -28,20 +28,40 @@ VENV_PY="${BUILD_VENV}/bin/python"
 DIST="target/engine-dist"
 WORK="target/engine-build"
 
+# 호스트 아키텍처 → Tauri 타깃 트리플. 스테이징 디렉터리 이름에 들어가고, 런타임에
+# Rust 쪽(locate_bundled_engine)이 같은 이름으로 찾는다. uv의 --python-platform 값도
+# 이것이다.
+case "$(uname -m)" in
+    arm64)  TRIPLE="aarch64-apple-darwin" ;;
+    x86_64) TRIPLE="x86_64-apple-darwin" ;;
+    *)
+        echo "ERROR: unsupported host arch: $(uname -m)" >&2
+        exit 1
+        ;;
+esac
+
+# 사이드카가 지원할 최소 macOS. uv는 --python-platform이 함께 있을 때만 이 변수를 보고
+# 휠을 고른다 — 없으면 빌드 기계 OS 기준으로 가장 새 태그를 택한다. v0.4.5가 그렇게
+# macOS 15 러너에서 numpy macosx_14_0 휠을 실었고, 몬터레이(12)에서 dyld가 로드를
+# 거절해 엔진이 시동 임포트에서 죽었다. 아래 check-sidecar-minos.sh가 같은 값으로
+# 산물을 판정하므로, 빌드 기계 OS가 무엇이든 이 값을 넘는 바이너리는 빌드에서 걸린다.
+MACOS_MIN="12.0"
+export MACOSX_DEPLOYMENT_TARGET="${MACOS_MIN}"
+
 echo "Preparing Python ${PY_VERSION} build venv (engine deps + pyinstaller)…"
 uv venv --clear --python "${PY_VERSION}" "${BUILD_VENV}"
-uv pip install --python "${VENV_PY}" ./engine "pyinstaller>=6.21"
+uv pip install --python "${VENV_PY}" --python-platform "${TRIPLE}" ./engine "pyinstaller>=6.21"
 
 # 임포트 게이트. uv 캐시가 패키지를 실체화하지 못하고 .dist-info만 남기는 일이
 # 있다(yeson_meet이 cv2/pymupdf에서 실측). 그 상태로 동결하면 PyInstaller가
 # 모듈을 못 모아 번들이 조용히 비고, 사용자 PC에서 첫 요청에 죽는다 — 빌드가
 # 성공한 것처럼 보이는 게 최악이라 여기서 멈춘다.
-if ! "${VENV_PY}" -c 'import psd_tools, pytoshop, numpy, PIL'; then
+if ! "${VENV_PY}" -c 'import psd_tools, pytoshop, numpy, PIL, onnxruntime'; then
     echo "build venv import gate failed — 캐시 없이 재설치 후 재검증…" >&2
-    uv pip install --python "${VENV_PY}" --reinstall --no-cache ./engine
+    uv pip install --python "${VENV_PY}" --python-platform "${TRIPLE}" --reinstall --no-cache ./engine
     "${VENV_PY}" -c 'import psd_tools, pytoshop, numpy, PIL'
 fi
-echo "build venv import gate OK (psd_tools, pytoshop, numpy, PIL)"
+echo "build venv import gate OK (psd_tools, pytoshop, numpy, PIL, onnxruntime)"
 
 echo "Freezing psd_engine (PyInstaller --onedir, console)…"
 # --onedir/--console/--noupx/--name은 spec 파일 안에 있다(스펙이 주어지면
@@ -57,17 +77,6 @@ OUT_BIN="${OUT_DIR}/psd_engine"
     exit 1
 }
 
-# 호스트 아키텍처 → Tauri 타깃 트리플. 스테이징 디렉터리 이름에 들어가고,
-# 런타임에 Rust 쪽(locate_bundled_engine)이 같은 이름으로 찾는다.
-case "$(uname -m)" in
-    arm64)  TRIPLE="aarch64-apple-darwin" ;;
-    x86_64) TRIPLE="x86_64-apple-darwin" ;;
-    *)
-        echo "ERROR: unsupported host arch: $(uname -m)" >&2
-        exit 1
-        ;;
-esac
-
 DEST_DIR="src-tauri/binaries/psd-engine-${TRIPLE}"
 rm -rf "${DEST_DIR}"
 mkdir -p "$(dirname "${DEST_DIR}")"
@@ -75,6 +84,11 @@ cp -R "${OUT_DIR}" "${DEST_DIR}"
 echo "→ ${DEST_DIR}"
 echo "  bundle size: $(du -sh "${DEST_DIR}" | cut -f1)"
 echo "  entry binary: ${DEST_DIR}/psd_engine"
+
+# 산물이 요구하는 최소 macOS가 MACOS_MIN을 넘지 않는지 본다. 빌드 기계가 더 새
+# OS라서 smoke는 통과하는데 옛 OS에서만 죽는 판(v0.4.5)을 여기서 잡는다.
+echo "Checking the frozen sidecar's minimum macOS (≤ ${MACOS_MIN})…"
+bash scripts/check-sidecar-minos.sh "${DEST_DIR}" "${MACOS_MIN}"
 
 # 동결본이 실제로 말을 하는지 스테이징된 자리에서 확인한다. 모듈 누락이나 런타임
 # pytoshop 패치 실패는 여기서만 드러나고, 놓치면 설치본이 사용자 PC의 첫 요청에서

@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { buildEntries, type Entry, type OpsState } from "../lib/opsReducer";
 import { resolveEntryName } from "../lib/exportFlow";
+import { summarizeNames } from "../lib/opsLabel";
 import type { Operation, TreeNode } from "../lib/types";
 
 interface OpsHistoryProps {
@@ -13,29 +14,40 @@ function name(entriesBefore: Entry[], tree: TreeNode[] | undefined, id: number):
   return resolveEntryName(entriesBefore, tree, id);
 }
 
-function describeOp(op: Operation, entriesBefore: Entry[], tree: TreeNode[] | undefined): string {
+/** 한 줄에 보일 문구와, 마우스를 올렸을 때 보일 전체 목록. */
+interface OpRow {
+  text: string;
+  /** 줄인 것이 없으면 undefined — 같은 내용을 툴팁으로 또 띄울 이유가 없다. */
+  full?: string;
+}
+
+function describeOp(op: Operation, entriesBefore: Entry[], tree: TreeNode[] | undefined): OpRow {
   switch (op.op) {
     case "merge": {
       const names = op.layerIds.map((id) => name(entriesBefore, tree, id));
-      return `병합: ${names.join(", ")} → ${op.name}`;
+      const short = summarizeNames(names);
+      const full = names.join(", ");
+      return { text: `병합: ${short} → ${op.name}`, full: short === full ? undefined : `병합: ${full} → ${op.name}` };
     }
     case "flatten":
-      return `모두 병합 → ${op.name}`;
+      return { text: `모두 병합 → ${op.name}` };
     case "rename":
-      return `이름변경: ${name(entriesBefore, tree, op.layerId)} → ${op.name}`;
+      return { text: `이름변경: ${name(entriesBefore, tree, op.layerId)} → ${op.name}` };
     case "reorder": {
       const moved = name(entriesBefore, tree, op.layerId);
-      if (op.aboveId === null) return `순서변경: ${moved} → 맨 아래로`;
-      return `순서변경: ${moved} → ${name(entriesBefore, tree, op.aboveId)} 바로 위로`;
+      if (op.aboveId === null) return { text: `순서변경: ${moved} → 맨 아래로` };
+      return { text: `순서변경: ${moved} → ${name(entriesBefore, tree, op.aboveId)} 바로 위로` };
     }
     case "unmerge": {
       const names = op.layerIds.map((id) => name(entriesBefore, tree, id));
-      return `병합 해제: ${names.join(", ")}`;
+      const short = summarizeNames(names);
+      const full = names.join(", ");
+      return { text: `병합 해제: ${short}`, full: short === full ? undefined : `병합 해제: ${full}` };
     }
     case "exclude":
-      return `제외: ${op.layerIds.length}개 레이어`;
+      return { text: `제외: ${op.layerIds.length}개 레이어` };
     default:
-      return JSON.stringify(op);
+      return { text: JSON.stringify(op) };
   }
 }
 
@@ -67,8 +79,10 @@ export function OpsHistory({ ops, tree, onUndo }: OpsHistoryProps) {
         <p className="ops-history-empty">편집 내역이 없습니다.</p>
       ) : (
         <ol className="ops-history-list">
-          {rows.map((text, i) => (
-            <li key={i}>{text}</li>
+          {rows.map((row, i) => (
+            <li key={i} title={row.full}>
+              {row.text}
+            </li>
           ))}
         </ol>
       )}

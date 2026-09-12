@@ -5,18 +5,31 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import traceback
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 
+from .character import find_views, manual_views
+from .edges import EDGE_DEFAULTS, attach_overlays, plan_overlays
+from .export import export_image_line as _export_image_line
 from .export import export_psd as _export
 from .export import export_psd_split as _export_split
+from .imageline import (image_line_profile,
+                        render_image_line_preview as _render_image_line_preview)
+from .linedetect import measure_strokes
 from .matching import (auto_merge_operations, auto_merge_preview,
                        match_preset, preset_operations)
 from .ops import build_export_plan, finalize_names
-from .render import render_document_preview, render_preview, render_thumbnails
+from .raster import export_raster as _export_raster
+from .raster import export_raster_split as _export_raster_split
+from . import tilecache, viewpool
+from .render import (_perf, assign_line_color, render_document_preview,
+                     render_preview, render_thumbnails, warm_preview_tiles)
 from .session import SessionStore
 from .verify import verify_export
+from .verify_raster import verify_raster
 
 
 #: 종류별로 살려두는 렌더 디렉터리 세대 수.
@@ -32,6 +45,256 @@ from .verify import verify_export
 RENDER_DIR_GENERATIONS = 3
 
 
+#: 오버레이 캐시가 세션당 들고 있는 항목 수 상한. **소프트 캡이다** — 지금
+#: 렌더가 쓰는 뷰들은 축출하지 않으므로, 뷰가 상한보다 많은 판에서는 그 렌더
+#: 동안 상한을 넘긴다(_cached_plan_overlays 참고).
+#:
+#: 오버레이 한 장은 그 뷰의 bbox 크기짜리 RGBA 배열이다. 컨트롤러 실측으로 뷰
+#: 박스가 최대 약 3.1 Mpx였으니 한 장이 3.1e6px * 4B(RGBA) ≈ 12.4MB를 넘을 수
+#: 있다. "실사용 파일은 뷰가 최대 7장"(설계 문서 9절)이라는 이 값의 원래 근거는
+#: 2026-08-11 실측으로 깨졌다 — 납품 캐릭터 폴더에 뷰 15개짜리 판이 있고, 그
+#: 판에서 하드 캡 LRU는 순차 삽입 때문에 매 렌더 100% 미스였다(뷰당 ~9초 ×
+#: 15뷰 = 토글마다 134초). 소프트 캡의 최악 메모리는 "한 파일의 실제 뷰 수 ×
+#: 12.4MB × 세션 2"로, 뷰 15개면 ≈ 372MB — 무한정 쌓이던 예전 썸네일 OOM과
+#: 달리 파일 구조가 묶는 값이고, 설정을 바꿔가며 쌓이는 옛 항목에는 여전히
+#: 상한이 든다.
+OVERLAY_CACHE_PER_SESSION = 8
+
+#: opts 중 실제로 그려지는 픽셀을 바꾸는 설정만 뽑아 캐시 키로 쓴다
+#: (edges.EDGE_DEFAULTS·build_overlay가 읽는 것과 정확히 같은 일곱 개).
+#: "enabled"는 이 값이 캐시 키에 들어갈 필요가 없다 — _cached_plan_overlays는
+#: 호출부가 이미 enabled를 확인한 뒤에만 부른다. "manualColourIds"도 뺀다 —
+#: 그게 바뀌면 뷰 자체(view["colourIds"]/view["lineIds"])가 달라지므로 뷰
+#: 키에서 이미 갈린다.
+#:
+#: width는 다른 에이전트가 지금 "0 = 파일 자체 선 굵기에서 두께를 유도한다"는
+#: 뜻으로 의미를 바꾸는 중이다. 유도된 값이 아니라 **넘어온 값 그대로**(0이든
+#: 5든) 키에 쓴다 — 유도는 edges.py 안에서 일어나므로, 여기서 미리 계산해
+#: 끼워 넣으면 그 작업과 어긋날 수 있고 넘어온 값 그대로 쓰면 의미가 어느
+#: 쪽이든 항상 옳다.
+#: colourMode도 여기 들어간다. 그리는 픽셀을 바꾸는 설정이면 예외 없이 키에 있어야
+#: 한다 — 빠진 채로 두면 같은 세션에서 모드만 바꿨을 때 이전 모드의 오버레이가 캐시에서
+#: 그대로 나오고, 두 방법을 비교하려던 사람은 "차이 없음"이라는 틀린 판정을 얻는다.
+#: 비교하려고 만든 옵션이 비교를 막는 셈이다. edgeMode도 같은 이유로 들어간다 —
+#: region/change 두 검출을 같은 세션에서 비교하려고 만든 옵션이니, 키에서 빠지면
+#: 그 비교 자체가 막힌다.
+_PIXEL_SETTINGS = ("threshold", "gap", "width", "minLength", "lineAlpha",
+                   "colourMode", "edgeMode", "widthScale")
+
+
+def _edge_settings_key(opts):
+    """
+    숫자는 전부 float로 접는다 — 같은 값이 경로에 따라 int/float로 갈리기 때문이다.
+
+    프리셋 파일의 widthScale 1.0을 파이썬 json.load는 float 1.0으로, 프런트를
+    거친 요청은 JS 숫자를 지나며 int 1로 가져온다. 키는 json.dumps 문자열의
+    해시라 "1"과 "1.0"이 다른 키가 되고, 그러면 **풀이 방금 구운 오버레이를
+    준비 워커가 절대 못 찾는다** — 판 20 실측에서 뷰 9개를 통째로 두 번
+    굽고(두 벌 npz가 그 증거) 캐시완료가 ~95초 늦었다(2026-08-18).
+    """
+    def fold(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return v
+        return float(v)
+
+    return tuple(fold(opts.get(k)) for k in _PIXEL_SETTINGS)
+
+
+def _cached_plan_overlays(session, views, opts):
+    """
+    plan_overlays를 세션당 메모이즈해서 부른다.
+
+    오버레이 하나는 그 뷰의 색 레이어·라인 레이어와 픽셀에 영향을 주는 설정
+    (threshold/gap/width/minLength/lineAlpha)만으로 정해진다 — 지금 화면에 뭐가
+    보이는지(visibleLayerIds)는 그 값에 관여하지 않는다. 눈은 "그려진 오버레이
+    중 무엇을 합성하는지"만 정할 뿐이다(render_preview의 시점-필터, render.py가
+    그리기 직전에 lineIds & visible로 한 번 더 거르는 것과는 다른 층이다). 그래서
+    같은 뷰·같은 설정이면 레이어 눈을 켰다 껐다 다시 렌더해도 결과가 같고, 다시
+    계산할 이유가 없다 — 이 캐시가 옳은 이유가 그것이다.
+
+    캐시는 세션 딕셔너리 위에 얹는다(session.py를 건드리지 않고 여기서 attach).
+    SessionStore.open은 경로와 mtime이 둘 다 같을 때만 세션을 재사용하고,
+    아티스트가 포토샵에서 저장하면 mtime이 바뀌어 완전히 새 세션 딕셔너리가
+    만들어진다(session.py의 open 참고) — 그러니 여기서 따로 무효화를 챙길 필요가
+    없다. 옛 세션이 LRU에 밀려 사라지면 그 딕셔너리를 참조하는 곳이 없어져
+    캐시도 함께 GC된다. 상한(OVERLAY_CACHE_PER_SESSION)은 그와 별개로, 같은
+    세션 안에서 설정을 계속 바꿔가며 미리보기를 켜켜이 쌓는 경우를 막는다.
+    """
+    cache = session.setdefault("_overlay_cache", OrderedDict())
+    settings_key = _edge_settings_key(opts)
+    # 이번 렌더가 쓰는 뷰들의 키. 축출에서 지킨다 — 상한(8)보다 뷰가 많은 판
+    # (실측 #44: 뷰 15개)에서 순차 삽입 LRU가 매 렌더 100% 미스가 되는 것을
+    # 막는다. 캐시가 전혀 안 듣는 그 상태로 뷰당 ~9초 × 15뷰 = 토글마다 134초가
+    # 실측됐다. 지킬 것만 남으면 상한을 넘긴 채 둔다 — SessionStore._evict가
+    # 고정된 세션 하나만 남았을 때 내리는 판단과 같다: 상한 초과가 스래싱보다 낫다.
+    wanted = {(tuple(v["colourIds"]), tuple(v["lineIds"]), settings_key)
+              for v in views}
+    # 아직 아무 데도 없는 뷰가 둘 이상이면 자식들에게 나눠 굽게 한다. 자식은
+    # 디스크 캐시에 넣고, 아래 루프가 평소처럼 거기서 읽는다 — 실패하면 그냥
+    # 미스로 남아 부모가 순차로 굽는다(viewpool 문서 참고).
+    missing = [v for v in views
+               if (tuple(v["colourIds"]), tuple(v["lineIds"]), settings_key)
+               not in cache
+               and tilecache.load_overlays(
+                   session, tilecache.overlay_key(
+                       v["colourIds"], v["lineIds"], settings_key)) is None]
+    if len(missing) > 1:
+        t0 = time.perf_counter()
+        n = viewpool.fill_overlay_cache(session, missing, opts, settings_key)
+        if n > 1:
+            _perf(perf="overlay_pool", n=n, views=len(missing),
+                  s=round(time.perf_counter() - t0, 4))
+    plans = []
+    for view in views:
+        key = (tuple(view["colourIds"]), tuple(view["lineIds"]), settings_key)
+        cached = cache.get(key)
+        if cached is not None:
+            cache.move_to_end(key)
+            plans.extend(cached)
+            continue
+        # 세션 캐시 미스면 계산 전에 디스크를 본다. 오버레이는 뷰당 실측
+        # 9~17초짜리 계산인데 결과가 세션과 함께 죽어서, 세션이 밀려날 때마다
+        # (LRU 2칸이라 파일만 옮겨도) 같은 값을 다시 계산했다 — 타일 캐시를
+        # 깔고 나니 토글 "로딩"의 정체가 전부 이것이었다. 키가 뷰 구성+픽셀
+        # 설정이므로 설정이 바뀌면 자동으로 다시 계산된다.
+        vkey = tilecache.overlay_key(view["colourIds"], view["lineIds"], settings_key)
+        t0 = time.perf_counter()
+        made = tilecache.load_overlays(session, vkey)
+        if made is not None:
+            _perf(perf="overlay_disk", n=len(made),
+                  s=round(time.perf_counter() - t0, 4))
+        else:
+            made = plan_overlays(session, [view], opts)
+            _perf(perf="overlay_view", s=round(time.perf_counter() - t0, 4))
+            tilecache.store_overlays(session, vkey, made)
+        # 뷰 키를 각 오버레이에 달아 둔다. render_preview가 "줄여 놓은 오버레이"를
+        # 디스크에서 찾을 때 쓰는 키다 — 거기서는 뷰 구성·픽셀 설정을 알 수 없고,
+        # 모양만으로 키를 만들면 설정을 바꿔도 옛 그림이 그대로 나온다.
+        # store_overlays 뒤에 다는 것이 중요하다(npz에 실리면 안 된다).
+        for m in made:
+            m["viewKey"] = vkey
+        cache[key] = made
+        while len(cache) > OVERLAY_CACHE_PER_SESSION:
+            victim = next((k for k in cache if k not in wanted), None)
+            if victim is None:
+                break
+            del cache[victim]
+        plans.extend(made)
+    return plans
+
+
+def _preview_key_material(visible_ids, max_size, line_color, line_color_ids,
+                          edge_lines, included_ids):
+    """
+    미리보기 PNG 디스크 캐시 키의 재료 — render_preview_cached가 그림을 만들 때
+    실제로 읽는 입력 전부의 정규형이다. 여기 없는 값이 그림을 바꾸게 되면 그
+    값을 반드시 추가해야 한다(빠뜨리면 다른 그림이 같은 키로 재사용된다 —
+    tilecache._PIXEL_SETTINGS의 colourMode 사고와 같은 종류다).
+
+    **정규화 규칙.** 집합으로만 읽히는 목록은 정렬한다 — line_color_ids는
+    render.render_preview가 set()으로, included_ids는 character.manual_views가
+    멤버십으로만 쓴다. 반대로 visible_ids는 합성 순서 그 자체라, manualColourIds는
+    뷰 순서(오버레이가 얹히는 순서)라 순서를 보존한다. 경계선이 꺼져 있으면
+    엣지 쪽 입력은 통째로 "off"다 — 엔진이 그 값들을 아예 읽지 않으므로 키에
+    실으면 무관한 변경에 캐시만 버려진다(previewCache.ts의 edgeLinesKey와 같은
+    판단).
+
+    프런트(src/lib/previewCache.ts previewRenderSpec)가 보내는 값과
+    워커(warmworker._preset_preview_args)가 만드는 값이 이 함수 위에서 같은
+    키로 접혀야 워커가 구운 그림을 클릭이 찾는다 — 세 곳 중 하나를 바꾸면
+    나머지 둘을 같이 봐야 한다.
+    """
+    if edge_lines and edge_lines.get("enabled"):
+        opts = {**EDGE_DEFAULTS, **edge_lines}
+        edge = [list(_edge_settings_key(opts)),
+                list(edge_lines.get("manualColourIds") or []),
+                sorted(included_ids) if included_ids is not None else None]
+    else:
+        edge = "off"
+    return [int(max_size), list(visible_ids), line_color,
+            sorted(line_color_ids) if line_color_ids is not None else None,
+            edge]
+
+
+def render_preview_cached(session, out_dir, visible_ids, max_size=1500,
+                          line_color=None, line_color_ids=None,
+                          edge_lines=None, included_ids=None):
+    """
+    render_preview 본체 + 디스크 캐시. Engine.render_preview(사용자 렌더)와
+    warmworker(전체 캐시 워커의 미리 굽기)가 함께 쓴다 — 같은 함수여야 두
+    경로가 같은 그림·같은 키를 만든다.
+
+    히트면 합성 없이 캐시 PNG를 out_dir로 복사해 돌려준다. 미스면 예전 그대로
+    합성하고, 부산물을 캐시에 떨궈 다음 같은 요청(재시작·세션 축출 뒤 포함)이
+    디코드·합성 없이 끝나게 한다 — 타일 캐시(_preview_tile)와 같은 구조를
+    그림 한 장 단위로 반복한 것이다.
+    """
+    key = tilecache.preview_key(_preview_key_material(
+        visible_ids, max_size, line_color, line_color_ids,
+        edge_lines, included_ids))
+    t0 = time.perf_counter()
+    hit = tilecache.load_preview(session, key,
+                                 str(Path(out_dir) / "preview.png"))
+    if hit is not None:
+        _perf(perf="preview_disk", s=round(time.perf_counter() - t0, 4))
+        return hit
+    overlay_s = 0.0
+    overlays = None
+    if edge_lines and edge_lines.get("enabled"):
+        opts = {**EDGE_DEFAULTS, **edge_lines}
+        visible = set(visible_ids)
+        # 수동은 자동에 **보탠다**(설계 3.1). 자동 결과를 지우지 않는다.
+        #
+        # manual_views의 included_ids는 "내보내기에 이미 포함된 라인"을
+        # 뜻한다(character.manual_views 참고) — export_psd는 실제 includedIds를
+        # 준다. render_preview도 이제 같은 것을 includedIds로 받는다
+        # (src/lib/engine.ts의 renderPreview → PreviewCanvas/App.tsx의
+        # ops.includedIds가 그대로 여기까지 온다).
+        #
+        # 이걸 visible_ids(체크 ∩ 눈, 솔로 중이면 솔로 목록)로 대신하면
+        # 안 된다 — 체크는 됐지만 눈으로만 숨긴 라인이 "빠진" 것으로 보여,
+        # 이 앱 다른 곳에서는 눈이 무엇이 그려지는지만 바꾸는데(export_psd는
+        # 눈을 아예 안 본다) 여기서만 계산 자체가 눈에 따라 달라지는 예외가
+        # 생긴다. 반대로 그 버그를 피하려고 세션의 모든 레이어 id를 넘기면
+        # (전 버전이 그랬다) 교집합이 사실상 무력화돼, 아티스트가 체크를
+        # 해제해 실제로는 내보내기에 없는 라인까지 "이미 있다"고 보아 획을
+        # 덜 그린다 — 미리보기가 내보내기보다 획이 적어 보이는 정확히 그
+        # 라인이 지워진다.
+        #
+        # includedIds가 있으면 그것을 그대로 쓴다. 없는 옛 호출(직접
+        # render_preview를 부르는 기존 테스트 등)은 이전처럼 세션의 모든
+        # 레이어 id로 근사한다 — 하위 호환을 위한 기본값일 뿐, 새 호출은
+        # 전부 진짜 목록을 넘긴다.
+        #
+        # visible_ids(위 visible)는 이 계산에 관여하지 않는다 — 그건
+        # 무엇이 그려지는지(눈 포함)를 정하고, includedIds는 무엇이 "이미
+        # 있는 라인"인지를 정한다. 서로 다른 질문이라 한 값으로 합치면
+        # 안 된다.
+        included = included_ids if included_ids is not None \
+            else session["layers_by_id"].keys()
+        views = find_views(session) + manual_views(
+            session, edge_lines.get("manualColourIds") or [], included)
+        # render.render_preview가 그리기 직전에 이미 하는 lineIds & visible
+        # 필터를 여기로 앞당긴다. plan_overlays 하나가 뷰당 0.9~11.6초라
+        # (설계 9절) 다섯 뷰 모델에서 하나만 솔로해도 나머지 넷을 합성해
+        # 버리고 버리는 낭비가 있었다 — 요청이 stdin 큐에서 순차 처리되므로
+        # 그 낭비가 뒤에 온 다른 요청까지 물고 늘어진다. 그리기 시점 필터는
+        # 그대로 둔다 — 호출자가 잊을 수 없는 안전망이다.
+        views = [v for v in views if set(v["lineIds"]) & visible]
+        t_overlay = time.perf_counter()
+        overlays = _cached_plan_overlays(session, views, opts)
+        overlay_s = time.perf_counter() - t_overlay
+    png_path = render_preview(session, visible_ids, max_size, out_dir,
+                              line_color=line_color,
+                              line_color_ids=line_color_ids,
+                              edge_overlays=overlays)
+    tilecache.store_preview(session, key, png_path)
+    _perf(perf="rpc.render_preview", n=len(visible_ids),
+          overlay_plan_s=round(overlay_s, 4),
+          total_s=round(time.perf_counter() - t0, 4))
+    return png_path
+
+
 def _emit(obj, out):
     out.write(json.dumps(obj) + "\n")
     out.flush()
@@ -39,10 +302,12 @@ def _emit(obj, out):
 
 class Engine:
     _ALLOWED_METHODS = {
-        "open_psd", "close_session", "render_thumbnails",
-        "render_preview", "render_document_preview",
-        "apply_preset", "auto_merge_operations", "auto_merge_preview",
-        "export_psd", "batch_run",
+        "open_psd", "psd_mtimes", "close_session", "pin_file", "render_thumbnails",
+        "render_preview", "render_document_preview", "warm_preview_tiles", "warm_tiles_pooled",
+        "render_image_line_preview", "export_image_line",
+        "apply_preset", "measure_leaf_strokes", "preview_cached_lookup",
+        "auto_merge_operations",
+        "auto_merge_preview", "export_psd", "batch_run",
     }
 
     def __init__(self, out=None):
@@ -68,16 +333,58 @@ class Engine:
 
     # ---- RPC methods ----
     def open_psd(self, path):
+        t0 = time.perf_counter()
         sid = self.store.open(path)
+        _perf(perf="open_psd", s=round(time.perf_counter() - t0, 4))
         s = self.store.get(sid)
         psd = s["psd"]
         return {
             "sessionId": sid, "width": psd.width, "height": psd.height,
             "colorMode": psd.color_mode.name, "depth": psd.depth, "tree": s["tree"],
+            # 파일이 마지막으로 바뀐 시각. UI가 만들어둔 미리보기를 언제까지
+            # 재사용해도 되는지 판단하는 근거다 — 세션 id로는 판단할 수 없다.
+            # 세션은 LRU에 밀려 수시로 새로 열리지만 그때 파일 내용은 그대로이고,
+            # 반대로 아티스트가 포토샵에서 저장하면 내용이 달라진다.
+            # 세션이 읽어둔 값을 그대로 쓴다. 여기서 다시 재면, 세션을 재사용하는
+            # 경우(SessionStore.open) 트리는 옛 판인데 시각만 새 값이 되어 캐시
+            # 키가 실제 내용과 어긋난다.
+            "mtime": s["mtime"],
         }
+
+    def psd_mtimes(self, paths):
+        """
+        경로마다 디스크의 수정시각. 프로젝트를 열 때 "이 PSD가 저장 이후에
+        바뀌었나"를 판정하는 근거다(설계 4절). PSD를 파싱하지 않으므로 세션을
+        만들지 않고, 100장을 물어도 stat 100번이다.
+
+        **없는 파일은 키 자체를 빼고 돌려준다.** 0 같은 값으로 채우면 호출부가
+        "안 바뀐 파일"로 오판할 수 있다 — 없는 것과 안 바뀐 것은 다르다.
+
+        초 단위로 자른다. open_psd가 돌려주는(그래서 프로젝트에 저장되는) mtime은
+        session.py의 os.path.getmtime 그대로라 소수점 이하가 있는 float이므로,
+        여기서 자른 값을 그대로 비교하면 안 바뀐 파일이 전부 "바뀜"이 된다.
+        실제 비교는 reconcileProject가 양쪽을 다 Math.floor로 자르는 한 곳에서만
+        한다(src/lib/project.ts) — 여기서 자르는 것은 두 곳이 같은 단위를
+        말하게 두려는 것이지, 판정을 여기로 옮기려는 것이 아니다.
+        """
+        out = {}
+        for p in paths:
+            try:
+                out[str(p)] = int(os.path.getmtime(p))
+            except OSError:
+                pass
+        return out
 
     def close_session(self, sessionId):
         self.store.close(sessionId)
+        return {}
+
+    def pin_file(self, path=None):
+        """
+        화면이 지금 보고 있는 파일을 알린다 — 그 파일의 세션은 축출하지 않는다.
+        세션 총량은 그대로이므로 메모리는 늘지 않는다(SessionStore.pin 참고).
+        """
+        self.store.pin(path)
         return {}
 
     def render_thumbnails(self, sessionId, layerIds, maxSize=128):
@@ -85,37 +392,165 @@ class Engine:
         out_dir = self._fresh_render_dir("thumbnails")
         return {"thumbs": render_thumbnails(s, layerIds, maxSize, out_dir)}
 
-    def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None):
+    def warm_preview_tiles(self, sessionId, layerIds, maxSize=1500, budgetMs=2000,
+                           diskOnly=False):
+        """
+        미리보기 타일 워밍업. 프런트가 유휴 시간에 잘게 나눠 부른다 —
+        maxSize는 render_preview와 같아야 같은 배율의 타일이 데워진다
+        (배율이 키에 들어간다, render._preview_tile 참고).
+
+        diskOnly는 타일 자식들(warm_tiles_pooled)이 굽는 동안의 폴링 모드다:
+        디코드 없이 디스크에 놓인 타일만 RAM으로 쓸어담고, 풀 생사(poolAlive)를
+        같이 알린다 — 자식이 다 끝났는데 remaining이 남았으면 그 몫은 프런트가
+        이 플래그를 끄고 다시 불러 기존 디코드 경로로 마저 굽는다.
+        """
+        s = self.store.get(sessionId)
+        out = warm_preview_tiles(s, layerIds, maxSize, budgetMs / 1000.0,
+                                 disk_only=diskOnly)
+        if diskOnly:
+            out["poolAlive"] = viewpool.tile_pool_alive(s)
+        return out
+
+    def warm_tiles_pooled(self, sessionId, layerIds, maxSize=1500):
+        """
+        드로잉 레이어 타일을 작업 프로세스들에 나눠 굽게 **시작**한다(기다리지
+        않음 — stdin이 직렬이라 여기서 기다리면 사용자 렌더가 줄을 선다).
+        판 20 실측: 145장 순차 216초 → 4개 80초(2.71배). 몇 개로 나눌지는 그때
+        남은 메모리가 정한다(viewpool.worker_count) — 폴더 준비·뷰 굽기가 도는
+        중이면 가용량이 낮아 저절로 줄고, 1이면 프런트가 기존 경로를 그대로 쓴다.
+        """
+        s = self.store.get(sessionId)
+        return {"workers": viewpool.start_tile_pool(s, layerIds, maxSize)}
+
+    def preview_cached_lookup(self, path, mtime, visibleLayerIds, maxSize=1500,
+                             lineColor=None, lineColorIds=None, edgeLines=None,
+                             includedIds=None):
+        """
+        구운 미리보기의 디스크 캐시 조회 — **세션 없이**. 히트면 pngPath, 미스면
+        None. 프로젝트 저장이 쓴다: 캐시완료로 미리보기는 전부 디스크에 있는데
+        저장은 앱 메모리의 것만 담았다("미리보기 준비" 큐가 언제 돌았는지에
+        좌우됐다). 상식은 "캐시완료면 저장도 완전"이다(2026-08-20 사용자) —
+        세션을 요구하면 세션 없는 파일마다 NAS 파싱을 다시 내므로 안 된다.
+        키 계산은 render_preview_cached와 같은 함수를 그대로 쓴다.
+        """
+        key = tilecache.preview_key(_preview_key_material(
+            visibleLayerIds, maxSize, lineColor, lineColorIds,
+            edgeLines, includedIds))
+        out_dir = self._fresh_render_dir("preview")
+        hit = tilecache.load_preview({"path": path, "mtime": mtime}, key,
+                                     str(Path(out_dir) / "preview.png"))
+        return {"pngPath": hit}
+
+    def render_preview(self, sessionId, visibleLayerIds, maxSize=1500, lineColor=None,
+                       lineColorIds=None, edgeLines=None, includedIds=None):
+        # 본체는 모듈 함수에 있다 — 전체 캐시 워커(warmworker)가 같은 함수로
+        # 같은 그림을 미리 구워 두므로, 여기가 디스크 히트로 끝나는 것이
+        # "전체 캐시 완료 = 어떤 파일이든 즉시"의 미리보기 쪽 절반이다.
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
-        return {"pngPath": render_preview(s, visibleLayerIds, maxSize, out_dir,
-                                          line_color=lineColor)}
+        png_path = render_preview_cached(
+            s, out_dir, visibleLayerIds, maxSize, line_color=lineColor,
+            line_color_ids=lineColorIds, edge_lines=edgeLines,
+            included_ids=includedIds)
+        return {"pngPath": png_path}
 
-    def auto_merge_operations(self, sessionId, layerIds, roleTokens=None, rule="role"):
+    # 이 둘은 세션이 아니라 트리를 받는다. 이름만 보고 묶는 계산이라 픽셀도 PSD도
+    # 필요 없는데, 세션을 요구하면 그것이 축출됐을 때 700MB짜리 파일을 통째로 다시
+    # 읽어야 한다 — 버튼 한 번에 3.4초다. 화면은 트리를 이미 들고 있고(FileEntry.tree)
+    # 그것은 세션이 밀려나도 남으므로, 그대로 보내면 왕복이 사라진다.
+    #
+    # 규칙 자체는 여전히 엔진에만 있다. 프런트에 다시 구현하면 배치 실행 결과와
+    # 갈라지기 때문이다 — 옮긴 것은 입력이지 규칙이 아니다.
+    def auto_merge_operations(self, tree, layerIds, roleTokens=None, rule="role"):
         """레이어 패널의 자동 병합 버튼용. 프리셋 경로와 같은 함수를 쓴다."""
-        s = self.store.get(sessionId)
-        return {"operations": auto_merge_operations(s["tree"], layerIds, roleTokens, rule=rule)}
+        return {"operations": auto_merge_operations(tree, layerIds, roleTokens, rule=rule)}
 
-    def auto_merge_preview(self, sessionId, layerIds, roleTokens=None):
+    def auto_merge_preview(self, tree, layerIds, roleTokens=None):
         """규칙별 결과 장수. 드롭다운이 누르기 전에 보여준다."""
-        s = self.store.get(sessionId)
-        return {"rules": auto_merge_preview(s["tree"], layerIds, roleTokens)}
+        return {"rules": auto_merge_preview(tree, layerIds, roleTokens)}
 
     def render_document_preview(self, sessionId, maxSize=1500):
         s = self.store.get(sessionId)
         out_dir = self._fresh_render_dir("preview")
         return {"pngPath": render_document_preview(s, maxSize, out_dir)}
 
+    def render_image_line_preview(self, sessionId, maxSize=1500, imageLine=None,
+                                  lineColor=None):
+        s = self.store.get(sessionId)
+        out_dir = self._fresh_render_dir("preview")
+        png_path, mask_hash = _render_image_line_preview(
+            s, out_dir, maxSize, imageLine, lineColor)
+        return {
+            "pngPath": png_path,
+            "maskHash": mask_hash,
+            "profile": image_line_profile(s, imageLine),
+        }
+
+    def export_image_line(self, sessionId, outputPath, outputFormat="png",
+                          imageLine=None, lineColor=None, overwrite=False):
+        s = self.store.get(sessionId)
+        return _export_image_line(
+            s, outputPath, outputFormat, imageLine, lineColor,
+            overwrite=overwrite)
+
     def apply_preset(self, sessionId, preset):
         s = self.store.get(sessionId)
-        matched = match_preset(s["tree"], preset)
+        matched, skipped = match_preset(s["tree"], preset)
         return {
             "matchedLayerIds": matched,
+            # 규칙에 걸렸지만 그릴 수 없어 뺀 레이어들. 조용히 버리면 화면에서는
+            # "원래 안 걸린 것"과 구별되지 않는다.
+            "skippedLayers": skipped,
             "operations": preset_operations(s["tree"], matched, preset,
                                             source_stem=Path(s["path"]).stem),
         }
 
-    def batch_run(self, paths, preset, outputDir=None, overwrite=False):
+    def measure_leaf_strokes(self, sessionId, layerIds):
+        """
+        잎들의 굵기 특징(linedetect.measure_strokes). 프런트의 "선으로 그려진
+        레이어" 검출이 프리셋 적용 뒤에 부른다 — 무엇을 잴지(후보)와 문턱은
+        저쪽이 정하고, 여기는 픽셀만 본다.
+
+        디코드가 비싸므로 두 가지로 지킨다: 세션에 잎 단위로 캐시해서 프리셋을
+        다시 적용해도 같은 잎을 두 번 디코드하지 않고, 호출자는 잎 몇 개씩
+        끊어 부른다 — 엔진은 요청을 직렬로 처리하므로 한 번에 다 재면 그동안
+        미리보기가 줄을 선다.
+
+        잎 하나가 못 재어져도(픽셀 없음·디코드 실패) 나머지는 잰다 — 그 잎만
+        None이다. 전체를 실패시키면 이상한 잎 하나가 파일 전체의 검출을 막는다.
+        """
+        s = self.store.get(sessionId)
+        cache = s.setdefault("stroke_features", {})
+        if not s.get("stroke_features_seeded"):
+            # 스윕(warmworker)이 재둔 특징을 세션 캐시의 밑판으로 깐다 —
+            # 스윕한 파일의 클릭 검출은 디코드 0이 된다. None도 그대로 깐다
+            # (못 재는 잎을 다시 재지 않는 것까지 같은 계약).
+            s["stroke_features_seeded"] = True
+            disk = tilecache.load_strokes(s["path"], s["mtime"])
+            if disk:
+                for k, v in disk.items():
+                    try:
+                        cache.setdefault(int(k), v)
+                    except (TypeError, ValueError):
+                        continue
+        out = {}
+        for lid in layerIds:
+            if lid not in cache:
+                layer = s["layers_by_id"].get(lid)
+                node = s["nodes_by_id"].get(lid)
+                if layer is None or node is None or node["kind"] == "group":
+                    cache[lid] = None
+                else:
+                    try:
+                        cache[lid] = measure_strokes(layer)
+                    except Exception as e:
+                        _perf(perf="strokes", error=type(e).__name__, layer=lid)
+                        cache[lid] = None
+            out[str(lid)] = cache[lid]
+        return {"features": out}
+
+    def batch_run(self, paths, preset, outputDir=None, overwrite=False,
+                  manualLineIds=None, drawnLines=None, rejectedIds=None):
         from .batch import run_batch
 
         def progress(path, stage, current, total):
@@ -123,11 +558,14 @@ class Engine:
                    "current": current, "total": total}, self.out)
 
         return run_batch(paths, preset, output_dir=outputDir,
-                         overwrite=overwrite, progress=progress)
+                         overwrite=overwrite, progress=progress,
+                         manual_line_ids=manualLineIds, drawn_lines=drawnLines,
+                         rejected_ids=rejectedIds)
 
     def export_psd(self, sessionId, includedIds, operations, naming, outputPath,
                    embedPreview=True, overwrite=False, verify=True, lineColor=None,
-                   splitLayers=False):
+                   splitLayers=False, outputFormat="psd", lineColorIds=None,
+                   edgeLines=None):
         s = self.store.get(sessionId)
         included = sorted(includedIds)
         for lid in included:
@@ -140,15 +578,66 @@ class Engine:
         entries = finalize_names(
             build_export_plan(included, operations), s["nodes_by_id"], naming
         )
+        # 색 통일을 여기서 한 번만 정한다. 아래 내보내기·검증은 그 판단을 읽기만
+        # 하므로 둘이 갈라질 수 없다(assign_line_color 참고). 형식이 틀린 색은
+        # 파일을 만들기 전인 여기서 걸린다.
+        assign_line_color(entries, lineColor, lineColorIds)
+        # 색 경계선. 켜져 있을 때만 돈다 — 꺼져 있으면 엔트리가 그대로이므로
+        # 산출물이 이 기능 이전과 바이트 단위로 같다.
+        if edgeLines and edgeLines.get("enabled"):
+            opts = {**EDGE_DEFAULTS, **edgeLines}
+            # 수동은 자동에 **보탠다**(설계 3.1). 자동 결과를 지우지 않는다.
+            #
+            # 여기서는 `included`(진짜 includedIds, 눈 상태와 무관) 그대로 준다 —
+            # render_preview 쪽과 달리 이 메서드는 진짜 포함 목록을 이미 갖고
+            # 있으므로 근사할 이유가 없다. 눈(previewHiddenIds)은 여기 관여하지
+            # 않는다 — export_psd 전체가 애초에 눈을 보지 않는다.
+            views = find_views(s) + manual_views(
+                s, edgeLines.get("manualColourIds") or [], included)
+            # 포함된 라인이 있는 뷰만 계획한다. attach_overlays가 어차피 그런
+            # 뷰를 건너뛰므로 산출물은 같고, 버릴 계획(뷰당 0.9~11.6초)을 아예
+            # 안 하는 것이 목적이다 — 특히 find_views가 잎 표식을 받으면서
+            # COLOR PALETTE류 참조 그룹의 뷰(라인이 프리셋 제외라 체크될 일
+            # 없음)가 늘었다. render_preview의 visible 필터와 같은 층이다.
+            included_set = set(included)
+            views = [v for v in views if set(v["lineIds"]) & included_set]
+            attach_overlays(entries, _cached_plan_overlays(s, views, opts))
+        else:
+            attach_overlays(entries, [])
 
         def progress(stage, current, total):
             _emit({"event": "progress", "stage": stage,
                    "current": current, "total": total}, self.out)
 
+        if outputFormat in ("png", "jpg"):
+            if splitLayers:
+                result = _export_raster_split(s, entries, outputPath, outputFormat,
+                                              overwrite=overwrite, progress=progress)
+                if verify:
+                    # 파일마다 그 파일에 들어간 엔트리 하나로 검증한다.
+                    for entry, out in zip(entries, result["outputs"]):
+                        out["verification"] = verify_raster(
+                            s, [entry], out["outputPath"], outputFormat)
+                    result["verification"] = {
+                        "ok": all(o["verification"]["ok"] for o in result["outputs"]),
+                        "canvasOk": all(o["verification"]["canvasOk"] for o in result["outputs"]),
+                        "layerCountOk": True,
+                        "expectedLayers": len(result["outputs"]),
+                        "actualLayers": len(result["outputs"]),
+                        "layers": [l for o in result["outputs"] for l in o["verification"]["layers"]],
+                    }
+                result["outputPath"] = os.path.dirname(result["outputs"][0]["outputPath"])
+                return result
+            result = _export_raster(s, entries, outputPath, outputFormat,
+                                    overwrite=overwrite, progress=progress)
+            if verify:
+                result["verification"] = verify_raster(s, entries, outputPath,
+                                                       outputFormat)
+            return result
+
         if splitLayers:
             result = _export_split(s, entries, outputPath, embed_preview=embedPreview,
-                                   overwrite=overwrite, progress=progress,
-                                   line_color=lineColor)
+                                   overwrite=overwrite, progress=progress)
             if verify:
                 # 파일마다 그 파일에 들어간 엔트리 하나로 검증한다.
                 for entry, out in zip(entries, result["outputs"]):
@@ -165,7 +654,7 @@ class Engine:
             return result
 
         result = _export(s, entries, outputPath, embed_preview=embedPreview,
-                         overwrite=overwrite, progress=progress, line_color=lineColor)
+                         overwrite=overwrite, progress=progress)
         if verify:
             result["verification"] = verify_export(s, entries, outputPath)
         return result
@@ -176,7 +665,18 @@ class Engine:
         if method_name not in self._ALLOWED_METHODS:
             raise ValueError(f"unknown method: {method_name!r}")
         method = getattr(self, method_name)
-        return method(**request.get("params", {}))
+        # 요청 단위 계측. 단계별 이벤트만으로는 "그 사이"가 안 보인다 — 판 20
+        # 앱 타임라인에서 뷰당 17.5초짜리 공백의 주인을 이틀에 걸쳐 셋(오버레이
+        # 재생성→썸네일→?)이나 잘못 짚었다. 어떤 요청이 큐를 차지했는지가
+        # 이름으로 찍히면 그 추리는 애초에 필요가 없다. 0.05초 미만은 버린다 —
+        # 미리보기 한 번에 타일 요청이 수백 개다.
+        t0 = time.perf_counter()
+        try:
+            return method(**request.get("params", {}))
+        finally:
+            dt = time.perf_counter() - t0
+            if dt >= 0.05:
+                _perf(perf="rpc.request", method=method_name, s=round(dt, 4))
 
 
 def _as_utf8(stream):
@@ -198,9 +698,55 @@ def _as_utf8(stream):
     return stream
 
 
+def _watch_for_orphaning():
+    """
+    앱이 사라지면 엔진도 끝낸다.
+
+    앱은 종료할 때 stdin을 닫아 아래 루프가 EOF로 빠져나오게 한다. 그런데 그
+    신호는 **루프가 stdin을 읽고 있을 때만** 닿는다. 배치처럼 한 번의 요청이
+    수십 분 도는 동안에는 아무도 stdin을 보지 않으므로 EOF가 쌓인 채로 남고,
+    엔진은 앱이 없어진 줄 모르고 계속 판다 — 실측으로 CPU 99%·RSS 8.9GB짜리가
+    남아 산출물을 계속 썼다.
+
+    그래서 메인 루프 밖에서 부모를 지켜본다. 이 스레드는 긴 작업과 무관하게
+    도므로 그때도 동작하고, 앱이 SIGKILL로 죽거나 터미널에서 Ctrl-C로 끊겨
+    정리 코드가 아예 안 도는 경우까지 함께 막는다.
+
+    죽는 방식은 os._exit이다. 지금 하던 작업을 중간에 끊는 것이 목적이므로
+    정상 종료 절차(atexit의 임시 디렉터리 정리 포함)를 기다리지 않는다 — 부모가
+    없는 이상 그 결과를 받을 사람도 없다.
+    """
+    poll = float(os.environ.get("PSD_ENGINE_ORPHAN_POLL", "2"))
+    try:
+        original = os.getppid()
+    except AttributeError:  # 윈도우 등 getppid가 없는 환경
+        return
+
+    def orphaned():
+        """
+        부모가 사라졌는가.
+
+        "처음 본 부모와 달라졌는가"만 보면 안 된다. 엔진은 psd_tools·pytoshop을
+        임포트하느라 시작이 굼떠서, 앱이 그 사이에 죽으면 여기 도달했을 때 이미
+        고아다 — 그러면 original이 처음부터 1로 잡혀 비교가 영영 거짓이 되고,
+        정확히 "배치 중에 앱을 강제 종료했다"가 그 순서다.
+        """
+        ppid = os.getppid()
+        return ppid == 1 or ppid != original
+
+    def loop():
+        while True:
+            time.sleep(poll)
+            if orphaned():
+                os._exit(0)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def main(stdin=None, stdout=None):
     from .patches import apply_pytoshop_patches
     apply_pytoshop_patches()
+    _watch_for_orphaning()
     stdin = stdin or _as_utf8(sys.stdin)
     stdout = stdout or _as_utf8(sys.stdout)
     engine = Engine(out=stdout)
