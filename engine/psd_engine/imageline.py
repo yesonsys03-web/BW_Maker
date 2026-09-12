@@ -166,6 +166,111 @@ def _effectively_visible(layer, psd):
 CHROME_DECODE_LIMIT = 8
 
 
+#: 톤 효과 판정. 캔버스를 거의 다 덮고(≥95%), 블렌드가 normal이 아니고,
+#: 불투명도가 절반을 넘고, **칠이 빽빽한** 잎은 그림이 아니라 색보정이다.
+#: 밀도로 가르는 이유: 같은 조건의 곱하기 **선화 판**은 흰 종이에 가는 획이라
+#: 밀도가 낮다. KOTH 실측(2026-09-12): 조명 필터·대기 글로 0.65~1.00,
+#: 선화 판·벽지 무늬 0.01~0.57.
+TONE_EFFECT_COVERAGE = 0.95
+TONE_EFFECT_MIN_OPACITY = 128
+TONE_EFFECT_MIN_DENSITY = 0.65
+_TONE_DARKEN_BLENDS = frozenset({
+    "MULTIPLY", "LINEAR_BURN", "DARKEN", "COLOR_BURN"})
+_TONE_LIGHTEN_BLENDS = frozenset({
+    "SCREEN", "COLOR_DODGE", "LINEAR_DODGE", "LIGHTEN"})
+
+
+def _is_tone_effect_layer(layer, psd):
+    if layer.is_group() or layer.bbox == (0, 0, 0, 0):
+        return False
+    blend = str(layer.blend_mode).split(".")[-1]
+    if blend in ("NORMAL", "PASS_THROUGH"):
+        return False
+    if int(layer.opacity) < TONE_EFFECT_MIN_OPACITY:
+        return False
+    if layer.width * layer.height < psd.width * psd.height * (
+            TONE_EFFECT_COVERAGE):
+        return False
+    try:
+        image = layer.topil()
+    except (ImportError, NotImplementedError):
+        return False
+    if image is None:
+        return False
+    rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+    # int16으로 더하면 255*150이 넘쳐 흰색이 -1로 계산된다(numpy 2). uint16이
+    # 이 모듈의 다른 휘도 계산과 같은 폭이다.
+    rgb = rgba[..., :3].astype(np.uint16)
+    lum = ((rgb[..., 0] * 77 + rgb[..., 1] * 150
+            + rgb[..., 2] * 29) >> 8).astype(np.int16)
+    #: 블렌드가 아무 일도 하지 않는 값(중립). 곱하기는 흰색, 스크린류는 검정,
+    #: 오버레이류는 중간 회색이다. 중립에서 멀리 떨어진 픽셀이 곧 칠이다.
+    neutral = (255 if blend in _TONE_DARKEN_BLENDS
+               else 0 if blend in _TONE_LIGHTEN_BLENDS else 128)
+    active = (np.abs(lum - neutral) > 8) & (rgba[..., 3] > 8)
+    return float(np.mean(active)) >= TONE_EFFECT_MIN_DENSITY
+
+
+def _tone_effect_ids(psd, allowed):
+    return {
+        id(layer) for layer in psd.descendants()
+        if id(layer) in allowed and _is_tone_effect_layer(layer, psd)
+    }
+
+
+def _chrome_alpha(psd, roots, limit=None):
+    """보이는 비제작 잎이 칠한 자리. 내장 합성을 쓸 때 지울 크롬 영역이다.
+
+    limit이 있으면 그보다 많은 잎을 디코드해야 할 때 None을 돌려준다(판정용).
+    """
+    allowed = _production_layer_ids(roots)
+    pending = []
+    for layer in psd.descendants():
+        if (
+            layer.is_group()
+            or id(layer) in allowed
+            or layer.bbox == (0, 0, 0, 0)
+            or not _effectively_visible(layer, psd)
+        ):
+            continue
+        pending.append(layer)
+        if limit is not None and len(pending) > limit:
+            return None
+    painted = np.zeros((psd.height, psd.width), dtype=bool)
+    for layer in pending:
+        try:
+            image = layer.topil()
+        except (ImportError, NotImplementedError):
+            return None
+        if image is None:
+            continue
+        alpha = np.array(image.convert("RGBA"), dtype=np.uint8)[..., 3]
+        _composite_layer_alpha(
+            painted, layer, (alpha >= 8).astype(np.uint8) * 255)
+    return painted
+
+
+#: 필터 합성이 깨졌다고 볼 기준 — 제작 그림이 있어야 할 자리가 이 비율 이상
+#: 흰색으로 비어 있으면 psd-tools 합성기가 캔버스를 덮은 것이다. 겨울 야경
+#: 판에서는 95%가 그렇게 비었고 울타리 한 줄만 남았다(2026-09-12).
+COMPOSITE_BLANK_LIMIT = 0.20
+
+
+def _composite_looks_blank(rendered, embedded):
+    """필터 합성이 그림을 **불투명한 흰색으로** 덮었는가.
+
+    psd-tools 1.17.4는 마스크 달린 통과 그룹에서 캔버스를 흰색으로 칠해 버린다.
+    그 자리는 합성기가 실제로 칠한 것이라 **알파가 차 있다**. 반면 크롬을
+    필터로 뺀 자리는 아무도 칠하지 않아 **투명**하다 — 둘을 알파로 가른다.
+    겨울 야경 판은 캔버스의 95%가 불투명한 흰색이었고 울타리만 남았다.
+    디자인 시트는 크롬 바탕이 빠진 자리가 투명이라 여기 걸리지 않는다.
+    """
+    opaque_white = (rendered[..., 3] > 0) & np.all(
+        rendered[..., :3] >= 250, axis=2)
+    drawn = ~np.all(embedded[..., :3] >= 250, axis=2)
+    return float(np.mean(opaque_white & drawn)) > COMPOSITE_BLANK_LIMIT
+
+
 def _chrome_confined_to_occlusion(psd, roots, occlusion):
     """보이는 비제작 레이어의 잉크가 전부 `occlusion`(템플릿 바닥판) 안에 있는가.
 
@@ -244,11 +349,16 @@ def _artwork_rgba(session):
             and layer.bbox != (0, 0, 0, 0)
         )
     ]
-    if len(roots) == 1 and not visible_siblings:
+    allowed = _production_layer_ids(roots)
+    #: 톤 효과가 있으면 포토샵이 저장한 합성은 쓸 수 없다 — 효과가 이미 구워져
+    #: 있어 빼낼 방법이 없다. 그래서 내장 합성으로 가는 두 지름길보다 **먼저**
+    #: 본다.
+    effects = _tone_effect_ids(psd, allowed)
+    if not effects and len(roots) == 1 and not visible_siblings:
         return _document_rgba(session)
 
     occlusion = _template_back_occlusion(psd)
-    if _chrome_confined_to_occlusion(psd, roots, occlusion):
+    if not effects and _chrome_confined_to_occlusion(psd, roots, occlusion):
         # 보이는 크롬이 전부 템플릿 바닥판 위에 있다 — 포토샵이 저장한 합성이
         # 곧 작품이고, 바닥판 자리만 비우면 된다.
         rgba = _document_rgba(session).copy()
@@ -262,18 +372,29 @@ def _artwork_rgba(session):
     # (2026-09-11). 조정 레이어는 bbox가 비어 제작 자식에 들지 않으므로 scipy
     # 없이도 합성된다; 벡터 도형(aggdraw)처럼 합성기가 못 그리는 것이 있으면
     # 예전 원시 합성으로 내려간다.
-    allowed = _production_layer_ids(roots)
     try:
         rendered = psd.composite(
             force=True,
             color=1.0,
             alpha=0.0,
-            layer_filter=lambda layer: id(layer) in allowed,
+            layer_filter=lambda layer: (
+                id(layer) in allowed and id(layer) not in effects),
         )
     except (ImportError, NotImplementedError):
         rendered = None
     if rendered is not None:
-        return np.array(rendered.convert("RGBA"), dtype=np.uint8)
+        filtered = np.array(rendered.convert("RGBA"), dtype=np.uint8)
+        embedded = _document_rgba(session)
+        if not _composite_looks_blank(filtered, embedded):
+            return filtered
+        # 합성기가 캔버스를 덮었다. 포토샵이 저장한 합성에서 크롬이 칠한
+        # 자리만 지워 쓴다 — 원시 합성으로 내려가면 텍스처를 100%로 그려
+        # 점 잡음이 된다.
+        chrome = _chrome_alpha(psd, roots)
+        if chrome is not None:
+            rgba = embedded.copy()
+            rgba[chrome] = 0
+            return rgba
 
     canvas = Image.new("RGBA", (psd.width, psd.height))
     rendered_any = False
@@ -285,7 +406,7 @@ def _artwork_rgba(session):
             # 2026-09-11).
             continue
         try:
-            rendered = _render_production_root(root)
+            rendered = _render_production_root(root, effects)
         except (ImportError, NotImplementedError):
             rendered = None
         if rendered is None:
@@ -895,7 +1016,7 @@ def _production_root_needs_raw_render(root):
     )
 
 
-def _render_production_root(root):
+def _render_production_root(root, effects=()):
     """Composite production only, with a raw fallback for optional effects."""
     if not root.is_group():
         return root.topil()
@@ -913,6 +1034,7 @@ def _render_production_root(root):
 
     def draw(nodes, parent_opacity):
         _, production = _production_children(nodes)
+        production = [c for c in production if id(c) not in effects]  # 톤 효과 제외
         # psd-tools는 아래→위 순서이고 alpha_composite는 뒤에 그린 것이 위에
         # 놓인다 — 그 순서 그대로 그린다. reversed()로 돌리면 맨 아래 전체판
         # (background)이 마지막에 그려져 위의 전경 OL 그룹을 덮는다(2026-09-10).

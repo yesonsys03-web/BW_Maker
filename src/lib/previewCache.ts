@@ -236,8 +236,12 @@ export interface PreviewFileId {
  * 캔버스가 검게 뒤집힌 판). 제작 루트를 직접 합성할 때 포토샵 합성기로
  * 문서째 합성해 곱하기 줄무늬·오버레이 텍스처가 세로줄·점 잡음이 되던
  * 것을 없앴다.
+ *
+ * 56 (2026-09-12): psd-tools 합성기가 캔버스를 불투명한 흰색으로 덮으면
+ * 알아채고 포토샵이 저장한 합성으로 되돌린다(겨울 야경 판이 울타리만
+ * 남던 것). 캔버스를 덮는 짙은 톤 효과 레이어는 라인 추출에서 뺀다.
  */
-export const PREVIEW_PICTURE_VERSION = 55;
+export const PREVIEW_PICTURE_VERSION = 56;
 
 export function previewCacheKey(
   file: PreviewFileId,

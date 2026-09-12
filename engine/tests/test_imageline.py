@@ -870,6 +870,115 @@ def test_artwork_top_level_leaf_roots_follow_opacity_and_clipping(tmp_path):
     assert (rendered[5, 25, :3] == [200, 200, 200]).all()  # 바탕 밖: 잎 없음
 
 
+def test_artwork_keeps_the_filtered_render_when_chrome_holds_the_missing_paint(
+        tmp_path):
+    """크롬이 캔버스 전체를 칠하는 판(디자인 시트의 바탕)에서는, 필터 합성이
+    그 자리를 비워 두는 것이 정상이다. 그것을 합성기 고장으로 읽으면 되돌리기가
+    바탕을 크롬으로 지워 그림까지 사라진다(sample 판 하나가 통째로 비었다,
+    2026-09-12). 판정은 **제작 잎이 칠한 자리**에서만 한다."""
+    from pytoshop.user import nested_layers
+
+    sheet = np.full((40, 80, 4), [120, 120, 120, 255], dtype=np.uint8)
+    panel = np.zeros((40, 80, 4), dtype=np.uint8)
+    panel[12:28, 24:56, :] = [250, 250, 250, 255]
+    panel[16:24, 30:50, :] = [20, 20, 20, 255]
+    path = tmp_path / "sheet-with-panel.psd"
+    # 아래→위 = TEMPLATE(전체 캔버스 바탕), DRAWINGS(작은 패널).
+    write_psd(path, [
+        nested_layers.Group(name="DRAWINGS", layers=[
+            _rgba_layer("panel", panel),
+        ]),
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("BG", sheet),
+        ]),
+    ], width=80, height=40)
+    session = _session(path)
+    assert [r.name for r in imageline._production_roots(session["psd"])] == [
+        "DRAWINGS"]
+    rendered = imageline._artwork_rgba(session)
+    assert rendered[..., 3].max() > 0          # 통째로 비지 않는다
+    assert (rendered[20, 40, :3] == [20, 20, 20]).all()
+
+
+def test_artwork_ignores_a_full_canvas_tone_effect_but_keeps_a_line_plate(
+        tmp_path):
+    """라인을 뽑을 때 **효과 레이어는 무시한다**(아티스트 지시 2026-09-12).
+    캔버스를 통째로 덮는 짙은 곱하기 필터·컬러 닷지 글로는 대비를 무너뜨려
+    소파 윤곽과 벽지 줄무늬를 점선으로 끊는다. 같은 조건이라도 **곱하기 선화
+    판**은 흰 종이에 가는 획이라 칠 밀도가 낮다 — 그것으로 가른다."""
+    from pytoshop import enums
+    from pytoshop.user import nested_layers
+
+    plate = np.full((40, 80, 4), [210, 200, 180, 255], dtype=np.uint8)
+    plate[10:30, 20:60, :3] = [90, 120, 200]
+
+    def blended(name, rgba, blend, opacity):
+        return nested_layers.Image(
+            name=name,
+            channels={i: np.ascontiguousarray(rgba[..., i]) for i in range(3)}
+            | {-1: np.ascontiguousarray(rgba[..., 3])},
+            top=0, left=0, opacity=opacity, visible=True, blend_mode=blend,
+        )
+
+    tint = np.full((40, 80, 4), [40, 40, 90, 255], dtype=np.uint8)
+    ink = np.full((40, 80, 4), [255, 255, 255, 255], dtype=np.uint8)
+    ink[18:20, 10:70, :3] = [15, 15, 15]
+    path = tmp_path / "tone-effect.psd"
+    # 아래→위 = BG, 선화 판(곱하기, 성김), 톤 필터(곱하기, 빽빽).
+    write_psd(path, [
+        nested_layers.Group(name="Layers", layers=[
+            blended("filter", tint, enums.BlendMode.multiply, 255),
+            blended("line plate", ink, enums.BlendMode.multiply, 255),
+            _rgba_layer("BG", plate),
+        ]),
+        nested_layers.Group(name="TEMPLATE", layers=[
+            _rgba_layer("TEMPLATE BACK", np.zeros((40, 80, 4), np.uint8)),
+        ]),
+    ], width=80, height=40)
+    session = _session(path)
+    rendered = imageline._artwork_rgba(session)
+    # 톤 필터는 빠진다 — 배경색이 어두워지지 않는다.
+    assert rendered[5, 5, 2] > 150
+    # 선화 판은 남는다.
+    assert rendered[18, 40, 0] < 80
+
+
+def test_artwork_falls_back_when_the_filtered_composite_whitens_the_canvas(
+        tmp_path, monkeypatch):
+    """psd-tools 합성기가 마스크 달린 통과 그룹에서 캔버스를 하얗게 덮는다
+    (1.17.4). 그 결과를 그대로 쓰면 겨울 야경 판이 울타리 한 줄만 남았다
+    (KOTH 2026-09-12). 내장 합성과 대조해 깨진 것을 알아채고, 포토샵이 저장한
+    합성에서 크롬이 칠한 자리만 지워 쓴다."""
+    from pytoshop.user import nested_layers
+
+    plate = np.full((40, 80, 4), [40, 60, 120, 255], dtype=np.uint8)
+    plate[10:30, 10:70, :3] = [200, 90, 60]
+    chrome = np.zeros((40, 80, 4), dtype=np.uint8)
+    chrome[34:38, 5:40, :] = [10, 10, 10, 255]
+    path = tmp_path / "whitened-composite.psd"
+    write_psd(path, [
+        nested_layers.Group(name="TEMPLATE BAR", layers=[
+            _rgba_layer("SHOT INFO", chrome),
+        ]),
+        nested_layers.Group(name="Layers", layers=[
+            _rgba_layer("BG", plate),
+        ]),
+    ], width=80, height=40)
+    session = _session(path)
+    psd = session["psd"]
+    original = type(psd).composite
+
+    def maybe_white(self, *args, **kwargs):
+        if kwargs.get("layer_filter") is not None:
+            return Image.new("RGBA", (psd.width, psd.height), (255, 255, 255, 255))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(psd), "composite", maybe_white)
+    rendered = imageline._artwork_rgba(session)
+    assert (rendered[20, 40, :3] == [200, 90, 60]).all()   # 그림이 살아 있다
+    assert rendered[36, 20, 3] == 0                        # 크롬 자리는 비었다
+
+
 def test_artwork_uses_photoshop_composite_when_chrome_sits_on_template_back(
         tmp_path):
     """보이는 크롬이 전부 템플릿 바닥판 위에 있으면 포토샵이 저장한 합성이 곧
